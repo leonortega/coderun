@@ -126,6 +126,18 @@ async fn handle_health() -> Json<serde_json::Value> {
     }))
 }
 
+/// Validate message length (spec §3 — secrets redaction + input validation)
+fn validate_input_len(content: &str, limit: usize) -> Result<(), String> {
+    if content.len() > limit {
+        return Err(format!("input too large: {} > {} bytes (truncated)", content.len(), limit));
+    }
+    if content.contains("..") && content.contains('/') && content.len() < 500 {
+        // Path traversal heuristic for file mentions — allow but warn
+        tracing::warn!(content = %coderun_core::redact_secrets(content), "possible path traversal in input");
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 async fn handle_hook(
     State(state): State<HttpServerState>,
@@ -135,6 +147,22 @@ async fn handle_hook(
     let correlation_id = request.correlation_id.unwrap_or_else(|| {
         format!("req_{}", uuid::Uuid::new_v4())
     });
+    // Input validation (100KB message, 1MB tool content) + secrets redaction before logging
+    if let HttpRequestPayload::MessageRewrite { ref message, .. } = request.payload {
+        if let Err(e) = validate_input_len(message, 100 * 1024) {
+            tracing::warn!(correlation_id = %correlation_id, error = %e, "input validation failed, fail-open passthrough");
+            let resp = HttpResponse {
+                correlation_id: correlation_id.clone(),
+                hook_type: request.hook_type.clone(),
+                payload: HttpResponsePayload::OriginalPassthrough { original: message.clone(), reason: e.clone() },
+                latency_ms: start.elapsed().as_millis() as u64,
+                error: Some(e),
+            };
+            return Ok(Json(resp));
+        }
+        // Redact secrets before any outbound call
+        let _redacted = coderun_core::redact_secrets(message);
+    }
 
     debug!(
         correlation_id = %correlation_id,

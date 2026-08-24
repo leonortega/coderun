@@ -51,6 +51,14 @@ impl Database {
         let migration_002 = include_str!("migrations/002_knowledge.sql");
         self.apply_migration("002_knowledge", migration_002)?;
 
+        // Migration 003: Dependency graph + cost
+        let migration_003 = include_str!("migrations/003_graph.sql");
+        self.apply_migration("003_graph", migration_003)?;
+
+        // Migration 004: Event persistence
+        let migration_004 = include_str!("migrations/004_events.sql");
+        self.apply_migration("004_events", migration_004)?;
+
         Ok(())
     }
 

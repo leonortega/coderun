@@ -14,6 +14,9 @@ regex.workspace = true
 glob.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tempfile = "3"
 
 # Ripgrep libraries for fast text search
 grep-searcher = "0.1"

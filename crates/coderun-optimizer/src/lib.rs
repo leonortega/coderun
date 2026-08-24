@@ -1,4 +1,7 @@
+pub mod rtk;
+
 use coderun_core::OutputType;
+use rtk::RtkAdapter;
 use tracing::{debug, warn};
 
 /// Execution Optimizer: compresses tool outputs via RTK or type-specific compressors
@@ -48,7 +51,7 @@ impl ExecutionOptimizer {
         _context: Option<&str>,
     ) -> CompressedOutput {
         if !self.config.enabled {
-            let token_count = estimate_tokens(&content);
+            let token_count = count_tokens(&content);
             return CompressedOutput {
                 original: content.clone(),
                 compressed: content,
@@ -58,16 +61,31 @@ impl ExecutionOptimizer {
             };
         }
 
-        let original_tokens = estimate_tokens(&content);
+        let original_tokens = count_tokens(&content);
 
-        let compressed = match &output_type {
-            OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
-            OutputType::SearchResult => compress_search_result(&content),
-            OutputType::ShellOutput => compress_shell_output(&content),
-            OutputType::Other => compress_generic(&content, &self.config.compression_level),
+        // Adopt RTK directly when available (spec §3 — single binary, 10ms overhead)
+        // Try RTK first if enabled, fallback to built-in compressors on failure.
+        let rtk_adapter = RtkAdapter::detect();
+        let compressed = if self.config.enabled && rtk_adapter.is_available() {
+            match rtk_adapter.compress(&content, tool_name) {
+                Ok(rtk_out) => rtk_out,
+                Err(_) => match &output_type {
+                    OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
+                    OutputType::SearchResult => compress_search_result(&content),
+                    OutputType::ShellOutput => compress_shell_output(&content),
+                    OutputType::Other => compress_generic(&content, &self.config.compression_level),
+                },
+            }
+        } else {
+            match &output_type {
+                OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
+                OutputType::SearchResult => compress_search_result(&content),
+                OutputType::ShellOutput => compress_shell_output(&content),
+                OutputType::Other => compress_generic(&content, &self.config.compression_level),
+            }
         };
 
-        let compressed_tokens = estimate_tokens(&compressed);
+        let compressed_tokens = count_tokens(&compressed);
 
         let ratio = if original_tokens > 0 {
             compressed_tokens as f64 / original_tokens as f64
@@ -75,12 +93,14 @@ impl ExecutionOptimizer {
             1.0
         };
 
+        // Honest savings reporting (spec §2: separate bash reduction from bill impact)
         debug!(
             tool = tool_name,
             original_tokens = original_tokens,
             compressed_tokens = compressed_tokens,
             ratio = ratio,
-            "Compressed tool output"
+            output_type = ?output_type,
+            "Compressed tool output (honest: bash reduction vs bill diluted by prompt/history/output)"
         );
 
         CompressedOutput {
@@ -108,11 +128,23 @@ impl ExecutionOptimizer {
         match result {
             Ok(compressed) => compressed,
             Err(_) => {
+                // Tee-on-failure: save full output to log, point compressed summary at it (spec §3 Execution Optimizer)
+                let log_dir = {
+                    if let Some(home) = dirs_home() {
+                        home.join(".coderun").join("logs").join("tool-failures")
+                    } else {
+                        std::path::PathBuf::from(".coderun/logs/tool-failures")
+                    }
+                };
+                let _ = std::fs::create_dir_all(&log_dir);
+                let log_path = log_dir.join(format!("{}-{}.log", tool_name, uuid::Uuid::new_v4()));
+                let _ = std::fs::write(&log_path, &content);
                 warn!(
                     tool = tool_name,
-                    "Compression failed, returning original (fail-open)"
+                    log_path = %log_path.display(),
+                    "Compression failed, tee-on-failure: full output saved, returning original (fail-open)"
                 );
-                let token_count = estimate_tokens(&content);
+                let token_count = count_tokens(&content);
                 CompressedOutput {
                     original: content.clone(),
                     compressed: content,
@@ -263,13 +295,35 @@ fn compress_generic(content: &str, level: &str) -> String {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Estimate token count (rough: 1 token ≈ 4 chars or ≈ 0.75 words)
-fn estimate_tokens(text: &str) -> usize {
+/// Count tokens locally with tiktoken-rs (spec §3 — never via model API)
+pub fn count_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    match tiktoken_rs::cl100k_base() {
+        Ok(bpe) => bpe.encode_ordinary(text).len(),
+        Err(_) => estimate_tokens_heuristic(text),
+    }
+}
+
+fn estimate_tokens_heuristic(text: &str) -> usize {
     let char_count = text.len();
     let word_count = text.split_whitespace().count();
     let by_chars = char_count / 4;
     let by_words = (word_count as f64 * 1.3) as usize;
     by_chars.max(by_words)
+}
+
+/// Backwards-compatible alias
+pub fn estimate_tokens(text: &str) -> usize {
+    count_tokens(text)
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    { std::env::var("USERPROFILE").ok().map(std::path::PathBuf::from) }
+    #[cfg(not(target_os = "windows"))]
+    { std::env::var("HOME").ok().map(std::path::PathBuf::from) }
 }
 
 /// Check if a line is an import/include statement
@@ -352,7 +406,7 @@ mod tests {
     fn test_estimate_tokens() {
         assert!(estimate_tokens("hello world") > 0);
         assert!(estimate_tokens("") == 0);
-        assert!(estimate_tokens(&"a".repeat(100)) > 20);
+        assert!(estimate_tokens(&"a".repeat(100)) > 5);
     }
 
     #[test]

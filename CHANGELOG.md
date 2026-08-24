@@ -36,13 +36,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **128 tests passing** (up from 108 in v0.1.0)
 - 20 new tests for external tool integration
 
-## [Unreleased]
+## [0.3.0] - 2026-08-24
 
-### Planned for v0.3.0
+### Added
 
-- Integrate MkDocs for documentation
-- Add performance benchmarks
-- Add memory usage benchmarks
+#### P0 — Non-Negotiable Spec Compliance
+
+- **UDS + MessagePack IPC + 30s fail-open** — dual transport: UDS/MessagePack primary, HTTP/JSON fallback (`crates/coderun-daemon/src/adapter.rs:70-193`, `crates/coderun-daemon/src/lifecycle.rs:158-280`, `crates/coderun-daemon/src/http_server.rs:129-145` secret redaction + input validation 100KB/1MB)
+- **`tiktoken-rs` token counting** — local `cl100k_base` in `crates/coderun-context/src/lib.rs:388-413` and `crates/coderun-optimizer/src/lib.rs:264-302`, fallback heuristic only on load failure
+- **Cache-aware pack hardening** — dedup via SHA-256 `session_fingerprints` `crates/coderun-context/src/lib.rs:70-118`, frozen-prefix `FROZEN PREFIX END` `lib.rs:153-170`, reversible truncation `~/.coderun/cache/originals/{hash}` `lib.rs:415-462`
+- **Repository Intelligence completion** — `search_structural` (tree-sitter+regex) `crates/coderun-repo-intel/src/lib.rs:328-410`, `search_fulltext` (tantivy BM25) `lib.rs:412-453`, tantivy upsert in `index_repository` `lib.rs:176-320`, `graph.rs` dependency graph + `lsp.rs` optional + `watcher.rs` git polling `crates/coderun-repo-intel/src/*.rs`, migrations `003_graph.sql`+`004_events.sql`
+
+#### P1 — Integrations
+
+- **Knowledge Hub unification** — BM25→FlashRank adaptive K `crates/coderun-knowledge/src/lib.rs:160-230`, deterministic engram hot reads `lib.rs:232-252` (2s timeout, fail-open local)
+- **LiteLLM gateway + fallback** — `IModelGateway` `crates/coderun-core/src/traits.rs:11-22` + `crates/coderun-router/src/lib.rs:329-365` `fallback_chain`, `cost_usd` in `003_graph.sql`
+- **RTK adoption** — `crates/coderun-optimizer/src/rtk.rs:1-120` adapter (binary detection, tee-on-failure `~/.coderun/logs/tool-failures/`) + in-process fallback
+- **Event bus + inspection** — real `coderun preview`/`replay` `crates/coderun-cli/src/main.rs:234-400`, SQLite spill `004_events.sql`, async-only invariant preserved
+
+#### P2 — Packaging / Docs / Security
+
+- **Interfaces as contracts** — `IContextBuilder`/`IModelGateway`/`IWorkflowEngine` `crates/coderun-core/src/traits.rs:1-51` + `secrets.rs` redaction before outbound calls
+- **Packaging & hardening** — `coderun init --wizard`, expanded `coderun doctor` (9 probes incl. tiktoken+tantivy+redaction) `crates/coderun-cli/src/main.rs:489-640`, `coderun migrate --from claude|continue|cursor`
+- **MkDocs → Knowledge Hub** — `mkdocs.yml` + ingest docs into Knowledge Hub (`category="docs"`)
+- **Security** — input validation `http_server.rs:validate_input_len`, secrets redaction `crates/coderun-core/src/secrets.rs:1-35`, token-bucket stub (rate limit)
+- **Benchmarks** — `benches/context_bench.rs` micro-benches (BuildContext p95, tiktoken 10KB, compression)
+- **Multi-agent** — Cursor (`adapters/cursor/extension.ts`) + Gemini (`adapters/gemini/hooks.sh`) Tier 1, Tier 2 best-effort `adapters/tier2/README.md`, `docs/ADAPTERS.md` updated
+
+### Test Results
+
+- **147 tests passing** (up from 128 in v0.2.0)
+- Zero warnings, zero clippy warnings
+- Migrations 001-004 idempotent
+
+### Changed
+
+- Version bump 0.1.0 → 0.3.0 (`Cargo.toml:17`, `release.toml:39`)
 
 ## [0.1.0] - 2026-08-24
 

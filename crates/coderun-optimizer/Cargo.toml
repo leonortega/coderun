@@ -11,3 +11,6 @@ serde.workspace = true
 regex.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+tiktoken-rs.workspace = true
+uuid.workspace = true
+chrono.workspace = true

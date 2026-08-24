@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 
@@ -49,6 +49,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # IPC
 rmp-serde = "1"
+
+# Token counting (spec §3 — tiktoken-rs, never via model API)
+tiktoken-rs = "0.7"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

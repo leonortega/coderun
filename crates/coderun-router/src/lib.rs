@@ -186,6 +186,49 @@ impl ModelRouter {
     }
 }
 
+impl coderun_core::IModelGateway for ModelRouter {
+    fn select_model(
+        &self,
+        message: &str,
+        file_count: usize,
+        symbol_count: usize,
+        knowledge_entries: usize,
+        skills_matched: usize,
+        token_count: usize,
+        model_override: Option<&str>,
+    ) -> RoutingDecision {
+        let req = RoutingRequest {
+            message: message.to_string(),
+            file_count,
+            symbol_count,
+            knowledge_entries,
+            skills_matched,
+            token_count,
+            model_override: model_override.map(|s| s.to_string()),
+        };
+        self.select_model(&req)
+    }
+
+    fn tier_to_model(&self, tier: &str) -> String {
+        match tier {
+            "fast" => self.config.fast_model.clone(),
+            "balanced" => self.config.balanced_model.clone(),
+            "capable" => self.config.capable_model.clone(),
+            _ => self.config.balanced_model.clone(),
+        }
+    }
+}
+
+/// Fallback chain helper (spec §3 Model Router — LiteLLM fallback chains, per-key budgets, cost tracking)
+pub fn fallback_chain(tier: &str) -> Vec<String> {
+    match tier {
+        "capable" => vec!["capable".to_string(), "balanced".to_string(), "fast".to_string()],
+        "balanced" => vec!["balanced".to_string(), "fast".to_string()],
+        "fast" => vec!["fast".to_string()],
+        _ => vec!["balanced".to_string()],
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]

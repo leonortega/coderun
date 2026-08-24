@@ -1,4 +1,7 @@
 mod parser;
+pub mod graph;
+pub mod lsp;
+pub mod watcher;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -170,13 +173,17 @@ impl RepositoryIntelligence {
         }
     }
 
-    /// Index the repository (full or incremental)
+    /// Index the repository (full or incremental) — wires tantivy BM25 in-process, incremental
     pub fn index_repository(&mut self) -> Result<IndexStats, String> {
         let start = Instant::now();
         let mut files_indexed = 0;
         let mut symbols_extracted = 0;
         let mut files_skipped = 0;
         let mut files_deleted = 0;
+
+        // Open tantivy index (MmapDirectory, memory-mapped per spec §3) — optional, never fails indexing
+        let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open(&default_index_path()).ok();
+        let mut tantivy_writer = tantivy_index.as_ref().and_then(|idx| idx.writer().ok());
 
         // Load existing file hashes from database
         let existing_files = self.db.get_all_files()?;
@@ -262,6 +269,14 @@ impl RepositoryIntelligence {
                 }
             }
 
+            // Upsert into tantivy BM25 index (in-process, memory-mapped)
+            if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+                let _ = idx.delete_document(writer, &path_str);
+                let lang_str = language.as_deref().unwrap_or("text");
+                let sym_names: Vec<String> = extract_symbols(&content, &self.patterns, language.as_deref()).iter().map(|s| s.name.clone()).collect();
+                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names);
+            }
+
             files_indexed += 1;
 
             // Log progress every 100 files
@@ -274,12 +289,20 @@ impl RepositoryIntelligence {
             }
         }
 
-        // Remove deleted files from database
+        // Remove deleted files from database (and tantivy)
         for path in existing_hashes.keys() {
             if !seen_paths.contains(path) {
                 self.db.delete_file(path)?;
+                if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+                    let _ = idx.delete_document(writer, path);
+                }
                 files_deleted += 1;
             }
+        }
+
+        // Commit tantivy if writer present
+        if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+            let _ = idx.commit(writer);
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -311,7 +334,7 @@ impl RepositoryIntelligence {
         Ok(stats)
     }
 
-    /// Search for text in the repository using regex
+    /// Search for text in the repository using regex (ripgrep, spec §3)
     pub fn search_text(
         &self,
         query: &str,
@@ -320,6 +343,116 @@ impl RepositoryIntelligence {
     ) -> Result<SearchResults, String> {
         // Use ripgrep for fast searching
         self.search_text_ripgrep(query, language_filter, max_results)
+    }
+
+    /// Structural search via ast-grep semantics (spec §3 — ast-grep structural search)
+    /// Pattern examples: `function $NAME($$$) { $$$ }`, `class $C { $$$ }`, `fn $FUNC($$$) { $$$ }`
+    /// v0.3.0 implements via tree-sitter node-type + identifier matching with regex fallback.
+    /// Future: embed `ast-grep-core` directly.
+    pub fn search_structural(
+        &self,
+        pattern: &str,
+        language_filter: Option<&str>,
+        max_results: usize,
+    ) -> Result<SearchResults, String> {
+        // Heuristic: map pattern keywords to tree-sitter node kinds
+        let pattern_lower = pattern.to_lowercase();
+        let want_fn = pattern_lower.contains("function") || pattern_lower.contains("fn ") || pattern_lower.contains("def ");
+        let want_class = pattern_lower.contains("class") || pattern_lower.contains("struct") || pattern_lower.contains("interface");
+        let want_loop = pattern_lower.contains("for") || pattern_lower.contains("while") || pattern_lower.contains("loop");
+
+        let mut results = Vec::new();
+        let walker = WalkBuilder::new(&self.repo_path).hidden(false).git_ignore(true).build();
+        for entry in walker {
+            let entry = match entry { Ok(e) => e, Err(_) => continue };
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) { continue; }
+            let path = entry.path();
+            let path_str = path.strip_prefix(&self.repo_path).unwrap_or(path).to_string_lossy().to_string();
+            if let Some(lang) = language_filter {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if detect_language(ext).as_deref() != Some(lang) { continue; }
+            }
+            if is_likely_binary(path) { continue; }
+            let content = match std::fs::read_to_string(path) { Ok(c) => c, Err(_) => continue };
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let lang = detect_language(ext).unwrap_or_else(|| "text".to_string());
+            // Try tree-sitter structural match
+            let mut matched = false;
+            if ["rust", "python", "javascript", "typescript"].contains(&lang.as_str()) {
+                let symbols = parser::extract_symbols_ast(&content, &lang);
+                for sym in &symbols {
+                    let is_fn = sym.kind == "function" || sym.kind == "method";
+                    let is_class = sym.kind == "class" || sym.kind == "struct" || sym.kind == "interface";
+                    if (want_fn && is_fn) || (want_class && is_class) || (want_loop && sym.kind == "loop") || (!want_fn && !want_class && !want_loop) {
+                        results.push(SearchResult { path: path_str.clone(), line: sym.line_start as usize, content: format!("{} {} @ {}:{}", sym.kind, sym.name, path_str, sym.line_start), score: 0.9 });
+                        matched = true;
+                        if results.len() >= max_results { break; }
+                    }
+                }
+            }
+            // Fallback: regex contains of pattern keywords (strip ast-grep metavariables)
+            if !matched {
+                let keywords: Vec<String> = pattern.split(|c: char| !c.is_alphanumeric()).filter(|s| s.len() > 2 && !["function","class","struct","interface","fn"].contains(s)).map(|s| s.to_lowercase()).collect();
+                let lower_content = content.to_lowercase();
+                let mut score = 0.0;
+                for kw in &keywords { if lower_content.contains(kw) { score += 1.0; } }
+                if score > 0.0 && keywords.len() > 0 {
+                    let norm = score / keywords.len() as f64;
+                    if norm > 0.3 {
+                        // find first line containing a keyword
+                        for (i, line) in content.lines().enumerate() {
+                            let ll = line.to_lowercase();
+                            if keywords.iter().any(|k| ll.contains(k)) {
+                                results.push(SearchResult { path: path_str.clone(), line: i+1, content: line.trim().to_string(), score: norm });
+                                break;
+                            }
+                        }
+                    }
+                } else if keywords.is_empty() && (want_fn || want_class) {
+                    // pattern with only metavariables — already handled via symbols; no fallback
+                }
+            }
+            if results.len() >= max_results { break; }
+        }
+        results.truncate(max_results);
+        let total = results.len();
+        Ok(SearchResults { results, total_count: total })
+    }
+
+    /// Full-text BM25 search via tantivy (spec §3 — tantivy/BM25, in-process, memory-mapped)
+    pub fn search_fulltext(
+        &self,
+        query: &str,
+        language_filter: Option<&str>,
+        max_results: usize,
+    ) -> Result<SearchResults, String> {
+        // Try tantivy index at default location; fallback to ripgrep if index missing
+        let index_path = default_index_path();
+        match coderun_storage::tantivy_index::TantivyIndex::open(&index_path) {
+            Ok(idx) => {
+                let reader = idx.reader().map_err(|e| format!("tantivy reader: {e}"))?;
+                match idx.search(&reader, query, language_filter, max_results) {
+                    Ok(hits) => {
+                        let mut results = Vec::new();
+                        for hit in hits {
+                            // snippet: first 200 chars
+                            let snippet = hit.content.chars().take(200).collect::<String>();
+                            results.push(SearchResult { path: hit.path, line: 1, content: snippet, score: hit.score as f64 });
+                        }
+                        let total = results.len();
+                        Ok(SearchResults { results, total_count: total })
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "tantivy search failed, falling back to ripgrep");
+                        self.search_text(query, language_filter, max_results)
+                    }
+                }
+            }
+            Err(_) => {
+                debug!("tantivy index not found at {}, fallback to ripgrep", index_path);
+                self.search_text(query, language_filter, max_results)
+            }
+        }
     }
 
     /// Search using ripgrep (grep-searcher crate)
@@ -481,6 +614,22 @@ impl RepositoryIntelligence {
         Ok(results)
     }
 
+    /// Build dependency graph for the current repo (spec §3, ROADMAP.md:81)
+    pub fn build_dependency_graph(&self) -> Result<graph::DependencyGraph, String> {
+        let files = self.walk_directory(&self.repo_path)?;
+        Ok(graph::DependencyGraph::build_from_files(&self.repo_path, &files))
+    }
+
+    /// LSP client accessor (optional enrichment, never hard dep)
+    pub fn lsp_client(&self) -> lsp::LspClient {
+        lsp::LspClient::default()
+    }
+
+    /// Spawn git-change-aware watcher that re-indexes incrementally
+    pub fn spawn_watcher(&self) -> watcher::RepoWatcher {
+        watcher::RepoWatcher::new(self.repo_path.clone())
+    }
+
     /// Walk directory tree, yielding indexable files
     fn walk_directory(&self, dir: &Path) -> Result<Vec<PathBuf>, String> {
         let mut files = Vec::new();
@@ -554,6 +703,22 @@ fn is_likely_binary(path: &Path) -> bool {
     } else {
         false
     }
+}
+
+/// Default tantivy index path (spec §3 — MmapDirectory)
+fn default_index_path() -> String {
+    if let Some(home) = dirs_home() {
+        home.join(".coderun").join("index").to_string_lossy().to_string()
+    } else {
+        ".coderun/index".to_string()
+    }
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    { std::env::var("USERPROFILE").ok().map(PathBuf::from) }
+    #[cfg(not(target_os = "windows"))]
+    { std::env::var("HOME").ok().map(PathBuf::from) }
 }
 
 /// Compute SHA-256 hash of content

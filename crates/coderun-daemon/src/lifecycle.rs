@@ -155,7 +155,130 @@ impl DaemonState {
             }
         });
 
-        // Start HTTP server (primary interface for plugins)
+        // Start UDS/MessagePack adapter (primary per spec §2) + HTTP fallback
+        // Shared ContextEngine + optimizer for both transports (handler extracted via adapter.rs)
+        let adapter_config = crate::adapter::AdapterConfig {
+            socket_path: std::path::PathBuf::from(self.config.daemon.socket_path.clone()),
+            request_timeout_ms: self.config.daemon.request_timeout_ms,
+            max_concurrent: self.config.daemon.max_concurrent,
+            tcp_port: 9527,
+        };
+        // Clone engine for adapter (needs owned ContextEngine; we rebuild from shared state via new)
+        // Instead, we reuse HTTP state for the adapter by cloning the Arc<Mutex<ContextEngine>> and optimizer.
+        // AdapterLayer::new expects owned ContextEngine — create a lightweight clone via shared adapter path:
+        // Use HTTP-server-style shared state: start adapter via direct UnixListener loop that reuses http_server's handler.
+        // For correctness we instantiate an AdapterLayer-compatible server that shares the same ContextEngine Arc.
+        #[allow(unused_variables)]
+        let adapter_handle = {
+            let adapter_engine = self.context_engine.clone();
+            let adapter_optimizer = std::sync::Arc::new(self.optimizer.clone());
+            let adapter_event_bus = self.event_bus.clone();
+            let adapter_socket = adapter_config.socket_path.clone();
+            let adapter_timeout = adapter_config.request_timeout_ms;
+            tokio::spawn(async move {
+            // Instantiate a minimal adapter that shares the existing ContextEngine Arc
+            // We cannot reuse AdapterLayer::new (takes owned engine), so we run a custom UDS loop
+            // that mirrors adapter::handle_connection but with shared Arcs.
+            #[cfg(unix)]
+            {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                use coderun_core::{AgentRequest, AgentResponse, CorrelationId, HookType, RequestPayload, ResponsePayload, TaskRequest, OutputType};
+                use tracing::{debug, warn};
+
+                // Helper: handle a single connection with timeout + MessagePack
+                async fn handle_uds_conn(
+                    stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
+                    engine: std::sync::Arc<tokio::sync::Mutex<coderun_context::ContextEngine>>,
+                    optimizer: std::sync::Arc<coderun_optimizer::ExecutionOptimizer>,
+                    event_bus: coderun_events::EventBus,
+                    timeout_ms: u64,
+                ) -> Result<(), String> {
+                    let mut len_buf = [0u8; 4];
+                    stream.read_exact(&mut len_buf).await.map_err(|e| format!("read len: {e}"))?;
+                    let len = u32::from_be_bytes(len_buf) as usize;
+                    if len > 10 * 1024 * 1024 { return Err("request too large".to_string()); }
+                    let mut body = vec![0u8; len];
+                    stream.read_exact(&mut body).await.map_err(|e| format!("read body: {e}"))?;
+                    let request: AgentRequest = rmp_serde::from_slice(&body).map_err(|e| format!("decode: {e}"))?;
+                    let correlation_id = request.correlation_id.clone();
+                    let hook_type = request.hook_type.clone();
+                    let payload_clone = request.payload.clone();
+                    let fut = async {
+                        match payload_clone {
+                            RequestPayload::MessageRewrite { session_id, message, context_hints } => {
+                                let task = TaskRequest { message: message.clone(), session_id, context_hints };
+                                let eng = engine.lock().await;
+                                match eng.build_context(&task) {
+                                    Ok((pack, routing)) => {
+                                        let yaml = coderun_context::ContextEngine::to_yaml(&pack).unwrap_or_default();
+                                        ResponsePayload::RewrittenMessage(Box::new(coderun_core::RewrittenMessageData {
+                                            original: message.clone(),
+                                            rewritten: format!("{}\\n\\n---\\n\\nContext:\\n{}", message, yaml),
+                                            context_pack: Some(pack),
+                                            routing_decision: Some(routing),
+                                        }))
+                                    }
+                                    Err(e) => ResponsePayload::OriginalPassthrough { original: message, reason: e },
+                                }
+                            }
+                            RequestPayload::ToolOutput { tool_name, output_type, content, context } => {
+                                let r = optimizer.compress_output(&tool_name, output_type, content.clone(), context.as_deref());
+                                ResponsePayload::CompressedOutput { original: content, compressed: r.compressed, original_tokens: r.original_tokens, compressed_tokens: r.compressed_tokens }
+                            }
+                        }
+                    };
+                    let payload = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            warn!("UDS request timed out after {}ms", timeout_ms);
+                            ResponsePayload::OriginalPassthrough { original: String::new(), reason: "timeout".to_string() }
+                        }
+                    };
+                    let resp = AgentResponse { correlation_id, hook_type, payload, latency_ms: 0, error: None };
+                    let bytes = rmp_serde::to_vec(&resp).map_err(|e| format!("encode: {e}"))?;
+                    let len_bytes = (bytes.len() as u32).to_be_bytes();
+                    stream.write_all(&len_bytes).await.map_err(|e| format!("write len: {e}"))?;
+                    stream.write_all(&bytes).await.map_err(|e| format!("write body: {e}"))?;
+                    Ok(())
+                }
+
+                if adapter_socket.exists() { let _ = std::fs::remove_file(&adapter_socket); }
+                if let Some(parent) = adapter_socket.parent() { let _ = std::fs::create_dir_all(parent); }
+                match tokio::net::UnixListener::bind(&adapter_socket) {
+                    Ok(listener) => {
+                        tracing::info!(path = %adapter_socket.display(), "UDS/MessagePack adapter listening (primary)");
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(&adapter_socket, std::fs::Permissions::from_mode(0o600));
+                        }
+                        loop {
+                            match listener.accept().await {
+                                Ok((mut stream, _)) => {
+                                    let eng = adapter_engine.clone();
+                                    let opt = adapter_optimizer.clone();
+                                    let eb = adapter_event_bus.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = handle_uds_conn(&mut stream, eng, opt, eb, adapter_timeout).await {
+                                            tracing::error!(error = %e, "UDS conn error");
+                                        }
+                                    });
+                                }
+                                Err(e) => { tracing::error!(error = %e, "UDS accept failed"); break; }
+                            }
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "Failed to bind UDS adapter"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tracing::info!("UDS adapter not available on Windows — HTTP fallback active");
+            }
+        })
+        };
+
+        // HTTP server remains as fallback for Windows/dev convenience (JSON over TCP 9527)
         let http_state = crate::http_server::HttpServerState {
             context_engine: self.context_engine.clone(),
             optimizer: std::sync::Arc::new(self.optimizer.clone()),
@@ -167,9 +290,6 @@ impl DaemonState {
             }
         });
 
-        // Note: TCP/UDS adapter disabled in favor of HTTP server
-        // The adapter_config was: socket_path, request_timeout_ms, max_concurrent, tcp_port
-
         // Wait for shutdown signal
         info!("Daemon ready. Press Ctrl+C to shutdown.");
         wait_for_shutdown(self.shutdown_flag.clone(), self.force_shutdown_flag.clone()).await;
@@ -177,8 +297,9 @@ impl DaemonState {
         // Graceful shutdown
         info!("Shutting down gracefully...");
 
-        // Wait for HTTP server to finish
+        // Wait for HTTP + UDS servers to finish (timeout)
         let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), adapter_handle).await;
 
         // Wait for indexing to finish
         let _ = tokio::time::timeout(Duration::from_secs(10), indexing_handle).await;
