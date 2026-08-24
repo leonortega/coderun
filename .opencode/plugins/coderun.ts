@@ -1,18 +1,18 @@
 /**
  * Coderun AI Runtime Plugin for OpenCode
- * 
- * This plugin integrates OpenCode with the Coderun daemon via UDS/TCP.
+ *
+ * This plugin integrates OpenCode with the Coderun daemon via HTTP.
  * It intercepts pre-generation and pre-tool-call events to enrich
  * context and compress tool outputs.
- * 
+ *
  * Usage:
  *   1. Start the Coderun daemon: `coderun serve`
  *   2. Place this file in `.opencode/plugins/`
  *   3. Restart OpenCode
- * 
+ *
  * Configuration:
  *   Set CODERUN_DAEMON_URL environment variable to override the default.
- *   Default: http://127.0.0.1:9527 (TCP) or /tmp/coderun.sock (UDS)
+ *   Default: http://127.0.0.1:9527
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -21,7 +21,6 @@ const CODERUN_DAEMON_URL = process.env.CODERUN_DAEMON_URL || "http://127.0.0.1:9
 const REQUEST_TIMEOUT_MS = 30000
 
 interface CoderunRequest {
-  correlation_id: string
   hook_type: "PreGeneration" | "PreToolCall"
   payload: {
     type: "MessageRewrite" | "ToolOutput"
@@ -43,17 +42,11 @@ interface CoderunResponse {
     rewritten?: string
     compressed?: string
     reason?: string
-    context_pack?: unknown
-    routing_decision?: unknown
     original_tokens?: number
     compressed_tokens?: number
   }
   latency_ms: number
   error?: string
-}
-
-function generateCorrelationId(): string {
-  return `req_${crypto.randomUUID()}`
 }
 
 async function callCoderunDaemon(request: CoderunRequest): Promise<CoderunResponse | null> {
@@ -83,6 +76,23 @@ async function callCoderunDaemon(request: CoderunRequest): Promise<CoderunRespon
   }
 }
 
+function getOutputType(toolName: string): string {
+  switch (toolName.toLowerCase()) {
+    case "read":
+    case "readfile":
+      return "FileRead"
+    case "grep":
+    case "search":
+      return "SearchResult"
+    case "bash":
+    case "shell":
+    case "exec":
+      return "ShellOutput"
+    default:
+      return "Other"
+  }
+}
+
 export const CoderunPlugin: Plugin = async ({ project, client, $, directory, worktree }) => {
   console.log("[coderun] Plugin initialized")
 
@@ -96,7 +106,6 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
       if (!message || typeof message !== "string") return
 
       const request: CoderunRequest = {
-        correlation_id: generateCorrelationId(),
         hook_type: "PreGeneration",
         payload: {
           type: "MessageRewrite",
@@ -125,7 +134,6 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
       if (!content || typeof content !== "string") return
 
       const request: CoderunRequest = {
-        correlation_id: generateCorrelationId(),
         hook_type: "PreToolCall",
         payload: {
           type: "ToolOutput",
@@ -147,22 +155,5 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
         console.log(`[coderun] Compressed ${toolName} output (${savings} savings)`)
       }
     },
-  }
-}
-
-function getOutputType(toolName: string): string {
-  switch (toolName.toLowerCase()) {
-    case "read":
-    case "readfile":
-      return "FileRead"
-    case "grep":
-    case "search":
-      return "SearchResult"
-    case "bash":
-    case "shell":
-    case "exec":
-      return "ShellOutput"
-    default:
-      return "Other"
   }
 }

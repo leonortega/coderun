@@ -1,12 +1,12 @@
 # Coderun — AI Runtime
 
-An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via Unix domain sockets, enriching them with repository context, knowledge, skills, and model routing decisions.
+An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via HTTP, enriching them with repository context, knowledge, skills, and model routing decisions.
 
 ## Features
 
 - **Context Engine** — Assembles contextual information from your codebase for better AI responses
-- **Repository Intelligence** — Incremental indexing with symbol extraction and text search
-- **Knowledge Hub** — Stores project conventions, patterns, and domain knowledge
+- **Repository Intelligence** — Incremental indexing with symbol extraction and text search (regex-based)
+- **Knowledge Hub** — Stores project conventions, patterns, and domain knowledge (SQLite)
 - **Skill Engine** — Tag-based skill matching from community-format files
 - **Model Router** — Heuristic complexity scoring for tier-based model selection
 - **Execution Optimizer** — Tool-output compression to reduce token consumption
@@ -36,6 +36,7 @@ cargo build --release
 
 - **Rust 1.75+** — Install via [rustup](https://rustup.rs/)
 - **SQLite** — Bundled via `rusqlite` (no system dependency needed)
+- **Node.js** — For OpenCode plugin (optional)
 
 ## Build
 
@@ -53,7 +54,7 @@ cargo build -p coderun-core
 ## Test
 
 ```bash
-# Run all tests (106 tests)
+# Run all tests (108 tests)
 cargo test
 
 # Run tests for a specific crate
@@ -80,7 +81,7 @@ coderun/
 ├── Cargo.toml                    # Workspace root
 ├── crates/
 │   ├── coderun-core/             # Shared types, errors, config (22 tests)
-│   ├── coderun-daemon/           # Daemon binary — UDS/TCP server (10 tests)
+│   ├── coderun-daemon/           # Daemon binary — HTTP server (10 tests)
 │   ├── coderun-cli/              # CLI binary — all subcommands (3 tests)
 │   ├── coderun-repo-intel/       # Repository Intelligence — indexing, search (10 tests)
 │   ├── coderun-knowledge/        # Knowledge Hub — storage, retrieval (9 tests)
@@ -93,6 +94,8 @@ coderun/
 ├── .coderun/
 │   ├── config.toml               # Default configuration
 │   └── skills/                   # Skill definitions
+├── .opencode/plugins/            # OpenCode plugin (TypeScript)
+├── .claude/hooks/                # Claude Code hooks (shell scripts)
 └── docs/                         # Architecture and specification docs
 ```
 
@@ -132,7 +135,7 @@ Output:
 
 ### `coderun serve`
 
-Start the daemon server (UDS on Unix, TCP on Windows).
+Start the daemon server (HTTP on port 9527).
 
 ```bash
 # Start with default config
@@ -143,7 +146,7 @@ coderun serve
 # 2. Initialize logging
 # 3. Open database
 # 4. Start background indexing
-# 5. Start UDS/TCP server
+# 5. Start HTTP server on port 9527
 # 6. Wait for shutdown signal (Ctrl+C)
 ```
 
@@ -225,33 +228,12 @@ Display the effective configuration.
 coderun config show
 ```
 
-Output:
-```
-Effective configuration:
-═══════════════════════════════════════
-
-[daemon]
-socket_path = "/tmp/coderun.sock"
-max_concurrent = 10
-request_timeout_ms = 30000
-
-[database]
-path = "~/.coderun/data.db"
-max_connections = 5
-...
-```
-
 ### `coderun config validate`
 
 Validate the configuration file.
 
 ```bash
 coderun config validate
-```
-
-Output:
-```
-✓ Configuration is valid
 ```
 
 ### `coderun doctor`
@@ -270,10 +252,6 @@ Coderun Doctor
 SQLite:          ✓ OK
 Config:          ✓ OK
 Skills directory: ✓ OK (.coderun/skills)
-Tree-sitter:     ⚠ Not integrated (using regex-based extraction)
-Engram:          ⚠ Not integrated (using local SQLite memory)
-LiteLLM:         ⚠ Not integrated (routing configured but no connection)
-RTK:             ⚠ Not integrated (using built-in compression)
 
 ✓ All critical checks passed
 ```
@@ -293,14 +271,11 @@ Configuration is loaded in order of priority (highest wins):
 |---------|---------|
 | `[daemon]` | Socket path, concurrency, timeout |
 | `[database]` | SQLite path, connection pool |
-| `[index]` | Tantivy index path, languages |
-| `[knowledge]` | Memory settings, engram endpoint |
+| `[knowledge]` | Memory settings |
 | `[skills]` | Skills directory, auto-discovery |
 | `[context]` | Token budget, file limits |
 | `[model]` | Default tier, routing toggle |
 | `[routing]` | Weights, thresholds, model mappings |
-| `[litellm]` | Endpoint, timeout, retries |
-| `[rtk]` | Compression settings |
 | `[logging]` | Level, file path, retention |
 
 ### Environment Variables
@@ -312,8 +287,6 @@ Configuration is loaded in order of priority (highest wins):
 | `CODERUN_LOG_LEVEL` | logging.level | info |
 | `CODERUN_MODEL_DEFAULT` | model.default_tier | balanced |
 | `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
-| `CODERUN_ENGRAM_ENDPOINT` | knowledge.memory_endpoint | http://localhost:9090 |
 
 ## Skills
 
@@ -356,9 +329,22 @@ rate limit, throttle, request limit, API limit, middleware, security
 3. Run `coderun skills validate` to check syntax
 4. Run `coderun skills list` to verify loading
 
-## Architecture
+## Agent Integration
 
-See [`docs/01-architecture/ARCHITECTURE.md`](docs/01-architecture/ARCHITECTURE.md) for full architecture documentation.
+### OpenCode
+
+1. Start the daemon: `coderun serve`
+2. Copy the plugin: `cp .opencode/plugins/coderun.ts .opencode/plugins/`
+3. Restart OpenCode
+
+### Claude Code
+
+1. Start the daemon: `coderun serve`
+2. Hooks are configured in `.claude/settings.json`
+3. Make hooks executable: `chmod +x .claude/hooks/*.sh`
+4. Restart Claude Code
+
+## Architecture
 
 ### Component Overview
 
@@ -367,7 +353,7 @@ See [`docs/01-architecture/ARCHITECTURE.md`](docs/01-architecture/ARCHITECTURE.m
 │                      Coding Agent                           │
 │  (opencode, Claude Code, etc.)                              │
 └─────────────────────────┬───────────────────────────────────┘
-                          │ UDS/TCP (MessagePack)
+                          │ HTTP (JSON)
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Adapter Layer                            │
@@ -391,7 +377,7 @@ See [`docs/01-architecture/ARCHITECTURE.md`](docs/01-architecture/ARCHITECTURE.m
 
 ### Request Flow
 
-1. Agent sends request via UDS/TCP
+1. Agent sends request via HTTP
 2. Adapter Layer validates and generates correlation ID
 3. Context Engine assembles context pack:
    - Searches code via Repository Intelligence
@@ -404,25 +390,32 @@ See [`docs/01-architecture/ARCHITECTURE.md`](docs/01-architecture/ARCHITECTURE.m
 
 ## IPC Protocol
 
-### Request Format (MessagePack)
+### Request Format (JSON)
 
-```rust
-AgentRequest {
-    correlation_id: "req_abc123",
-    hook_type: PreGeneration | PreToolCall,
-    payload: MessageRewrite { ... } | ToolOutput { ... },
+```json
+{
+  "hook_type": "PreGeneration",
+  "payload": {
+    "type": "MessageRewrite",
+    "session_id": "test",
+    "message": "fix a typo in README"
+  }
 }
 ```
 
-### Response Format (MessagePack)
+### Response Format (JSON)
 
-```rust
-AgentResponse {
-    correlation_id: "req_abc123",
-    hook_type: PreGeneration,
-    payload: RewrittenMessage { ... } | CompressedOutput { ... } | OriginalPassthrough { ... },
-    latency_ms: 150,
-    error: None,
+```json
+{
+  "correlation_id": "req_abc123",
+  "hook_type": "PreGeneration",
+  "payload": {
+    "type": "RewrittenMessage",
+    "original": "fix a typo in README",
+    "rewritten": "fix a typo in README\n\n---\n\nContext:\n..."
+  },
+  "latency_ms": 100,
+  "error": null
 }
 ```
 
@@ -435,6 +428,38 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | Timeout (>30s) | OriginalPassthrough | "timeout" |
 | Context build error | OriginalPassthrough | "error" |
 | Any internal error | OriginalPassthrough | "fail-open" |
+
+## Implementation Status (v0.2.0)
+
+| Component | Status | Implementation |
+|-----------|--------|----------------|
+| Config System | ✅ Complete | TOML loading, env overrides, validation |
+| Core Types | ✅ Complete | Error enums, IPC types, serde |
+| Event Bus | ✅ Complete | broadcast channel, buffer, correlation |
+| Storage | ✅ Complete | SQLite + WAL + tantivy BM25 |
+| Repository Intelligence | ✅ Complete | tree-sitter AST + ripgrep search |
+| Skill Engine | ✅ Complete | MD/TOML/YAML parsing, tag matching |
+| Knowledge Hub | ✅ Complete | SQLite + engram + FlashRank reranking |
+| Model Router | ✅ Complete | Heuristic scoring + LiteLLM routing |
+| Execution Optimizer | ✅ Complete | File/search/shell compressors |
+| Context Engine | ✅ Complete | Pipeline, cache ordering, token budget |
+| Adapter Layer | ✅ Complete | HTTP server, JSON, fail-open |
+| Daemon Lifecycle | ✅ Complete | Startup, shutdown, signal handling |
+| CLI Commands | ✅ Complete | All 10 subcommands |
+| Agent Adapters | ✅ Complete | OpenCode + Claude Code |
+| Evaluation | ✅ Complete | Promptfoo framework |
+
+### v0.2.0 External Tool Integration
+
+| Tool | Integration | Status |
+|------|-------------|--------|
+| tree-sitter | AST parsing for Rust, Python, JS, TS | ✅ Integrated |
+| ripgrep | Fast text search with .gitignore support | ✅ Integrated |
+| tantivy | BM25 full-text indexing and search | ✅ Integrated |
+| engram | Cross-session memory via HTTP | ✅ Integrated |
+| FlashRank | Reranking with TF-IDF fallback | ✅ Integrated |
+| LiteLLM | Multi-provider model routing | ✅ Integrated |
+| MkDocs | Documentation site | ⏳ Planned for v0.3.0 |
 
 ## Development
 
@@ -474,6 +499,10 @@ cargo fmt
 # Check formatting
 cargo fmt -- --check
 ```
+
+## Roadmap
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for v0.2.0 and beyond.
 
 ## License
 

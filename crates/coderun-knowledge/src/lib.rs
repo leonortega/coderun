@@ -1,3 +1,6 @@
+pub mod engram;
+pub mod rerank;
+
 use std::path::Path;
 
 use coderun_core::{KnowledgeEntry, SkillMatch};

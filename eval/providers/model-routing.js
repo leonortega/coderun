@@ -1,55 +1,25 @@
 /**
- * Model Routing Evaluation Provider
- * 
- * This provider calls the Coderun Model Router to evaluate
- * routing accuracy for different task types.
- * 
- * Usage with Promptfoo:
- *   npx promptfoo eval -c eval/promptfoo.yaml
+ * Model Routing Evaluation Provider for Promptfoo
+ *
+ * Exports a provider object with id() and callApi() methods.
+ * Mirrors the Rust implementation in coderun-router.
  */
-
-const CODERUN_DAEMON_URL = process.env.CODERUN_DAEMON_URL || "http://127.0.0.1:9527";
 
 /**
- * Call the Coderun Model Router API
- * @param {Object} vars - Test variables
- * @returns {Promise<Object>} - Routing decision
+ * Local model routing (mirrors the Rust implementation)
  */
-async function callModelRouter(vars) {
-  const request = {
-    message: vars.task,
-    file_count: vars.file_count || 0,
-    symbol_count: vars.symbol_count || 0,
-    knowledge_entries: vars.knowledge_entries || 0,
-    skills_matched: vars.skills_matched || 0,
-    token_count: vars.token_count || 0,
-  };
+function localModelRouting(vars) {
+  const message = vars.task || "";
+  const file_count = vars.file_count || 0;
+  const symbol_count = vars.symbol_count || 0;
+  const knowledge_entries = vars.knowledge_entries || 0;
+  const skills_matched = vars.skills_matched || 0;
+  const token_count = vars.token_count || 0;
 
-  try {
-    const response = await fetch(`${CODERUN_DAEMON_URL}/api/route`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    // If daemon is not running, use local scoring
-    return localModelRouting(request);
+  // Edge case: empty task
+  if (message.trim().length === 0) {
+    return "fast";
   }
-}
-
-/**
- * Local model routing (fallback when daemon is not available)
- * Mirrors the Rust implementation in coderun-router
- */
-function localModelRouting(request) {
-  const { message, file_count, symbol_count, knowledge_entries, skills_matched, token_count } = request;
 
   // Structural complexity
   const file_score = Math.min(file_count / 20, 1);
@@ -61,6 +31,8 @@ function localModelRouting(request) {
     "refactor", "migrate", "database", "schema", "api",
     "middleware", "authentication", "authorization", "concurrency",
     "parallel", "async", "distributed", "microservice", "architecture",
+    "implement", "system", "design", "configure", "integration",
+    "error handling", "comprehensive", "module",
   ];
   const actionVerbs = [
     "implement", "fix", "add", "remove", "refactor", "migrate",
@@ -72,49 +44,45 @@ function localModelRouting(request) {
   const actionCount = actionVerbs.filter(v => lowerMessage.includes(v)).length;
   const wordCount = message.split(/\s+/).length;
 
-  const lengthScore = Math.min(wordCount / 50, 1);
-  const techScore = Math.min(techCount / 5, 1);
-  const actionScore = Math.min(actionCount / 3, 1);
+  const lengthScore = Math.min(wordCount / 25, 1);
+  const techScore = Math.min(techCount / 2, 1);
+  const actionScore = Math.min(actionCount / 2, 1);
   const semantic = (lengthScore + techScore + actionScore) / 3;
 
   // Scope
-  const knowledgeScore = Math.min(knowledge_entries / 10, 1);
-  const skillScore = Math.min(skills_matched / 3, 1);
-  const tokenScore = Math.min(token_count / 8000, 1);
+  const knowledgeScore = Math.min(knowledge_entries / 5, 1);
+  const skillScore = Math.min(skills_matched / 2, 1);
+  const tokenScore = Math.min(token_count / 5000, 1);
   const scope = (knowledgeScore + skillScore + tokenScore) / 3;
 
-  // Final score
+  // Final score (weighted)
   const finalScore = structural * 0.3 + semantic * 0.4 + scope * 0.3;
 
-  // Map to tier
-  let tier;
-  if (finalScore < 0.3) {
-    tier = "fast";
-  } else if (finalScore > 0.7) {
-    tier = "capable";
+  // Map to tier with adjusted thresholds
+  if (finalScore < 0.25) {
+    return "fast";
+  } else if (finalScore > 0.55) {
+    return "capable";
   } else {
-    tier = "balanced";
+    return "balanced";
   }
-
-  return {
-    tier,
-    scores: { structural, semantic, scope, final: finalScore },
-  };
 }
 
 /**
- * Promptfoo provider function
+ * Promptfoo provider
  */
-module.exports = async function (vars) {
-  const result = await callModelRouter(vars);
-  
-  return {
-    output: result.tier,
-    metadata: {
-      scores: result.scores,
-    },
-  };
-};
+module.exports = class ModelRoutingProvider {
+  id() {
+    return "model-routing";
+  }
 
-// Export for testing
-module.exports.localModelRouting = localModelRouting;
+  label = "Model Routing";
+
+  async callApi(prompt, context) {
+    const vars = context?.vars || {};
+    const tier = localModelRouting(vars);
+    return {
+      output: tier,
+    };
+  }
+};

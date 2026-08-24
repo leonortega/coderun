@@ -258,26 +258,24 @@ Reference implementation: Not implemented in v1. Defined for future external orc
 | Logs | Runtime | Log files | Persistent, rotated |
 | Events | Event Bus | In-memory channel | Ephemeral (consumed by CLI/metrics) |
 
-## Technology Stack
+## Technology Stack (v0.2.0)
 
 | Layer | Technology | Role |
 |-------|------------|------|
 | Language | Rust (>= 1.75) | Context Engine, daemon, all modules |
-| Agent IPC | Unix Domain Socket + MessagePack | Daemon ↔ Agent communication |
-| AST Parsing | tree-sitter (embedded Rust crate) | Incremental AST parsing |
-| Structural Search | ast-grep (embedded Rust crate) | Code pattern matching |
-| Text Search | ripgrep (embedded Rust crate) | Fast text search |
-| Full-text Index | tantivy / BM25 crate | Lexical scoring for docs/code |
-| Reranking | FlashRank via `ort` (ONNX Runtime) | In-process reranking |
-| Memory | engram (Go binary, SQLite+FTS5) | Persistent memory, MCP-native |
-| Model Gateway | LiteLLM | Multi-provider routing, fallbacks |
-| Tool Compression | RTK (Rust binary) | Tool-output compression |
-| Token Counting | tiktoken-rs | Local token counting |
+| Agent IPC | HTTP + JSON (axum) | Daemon ↔ Agent communication |
+| AST Parsing | tree-sitter (embedded Rust crate) | Incremental AST parsing for Rust, Python, JS, TS |
+| Text Search | ripgrep (grep-searcher crate) | Fast text search with .gitignore support |
+| Full-text Index | tantivy | BM25 lexical scoring for docs/code |
+| Reranking | FlashRank reranker with TF-IDF fallback | Search result reranking |
+| Memory | engram (HTTP client) | Cross-session memory via HTTP |
+| Model Gateway | LiteLLM (HTTP client) | Multi-provider routing, fallbacks |
+| Directory Walking | ignore crate | .gitignore-aware file traversal |
 | Database | SQLite via rusqlite | Index and metadata storage |
-| Serialization | serde + toml + serde_yaml | Configuration and Context Pack |
+| Serialization | serde + toml + serde_json | Configuration and IPC |
 | CLI | clap | Argument parsing |
 | Logging | tracing + tracing-subscriber | Structured logging |
 | Testing | cargo test + promptfoo | Unit tests + offline evaluation |
 | Error Handling | anyhow + thiserror | Error types |
 | Async Runtime | tokio | Async task management |
-| HTTP Client | reqwest | LiteLLM communication |
+| HTTP Client | reqwest | LiteLLM and engram communication |

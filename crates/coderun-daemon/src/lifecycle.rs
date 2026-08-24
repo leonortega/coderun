@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tracing::{error, info, warn};
 
+#[allow(unused_imports)]
 use crate::adapter::{AdapterConfig, AdapterLayer};
 use coderun_core::Config;
 use coderun_events::EventBus;
@@ -20,6 +21,8 @@ pub struct DaemonState {
     #[allow(dead_code)]
     pub db: Arc<Database>,
     pub event_bus: EventBus,
+    pub context_engine: Arc<tokio::sync::Mutex<coderun_context::ContextEngine>>,
+    pub optimizer: coderun_optimizer::ExecutionOptimizer,
     pub shutdown_flag: Arc<AtomicBool>,
     pub force_shutdown_flag: Arc<AtomicBool>,
 }
@@ -49,11 +52,62 @@ impl DaemonState {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let force_shutdown_flag = Arc::new(AtomicBool::new(false));
 
+        // Initialize repository intelligence
+        let repo_path = std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?;
+
+        let repo_db_path = expand_path(&config.database.path);
+        let repo_db = Database::open(&repo_db_path)
+            .map_err(|e| format!("Failed to open database for repo-intel: {}", e))?;
+
+        let repo_intel = RepositoryIntelligence::new(
+            repo_path,
+            repo_db,
+            event_bus.clone(),
+        );
+
+        // Initialize knowledge hub
+        let knowledge_db_path = expand_path(&config.database.path);
+        let knowledge_db = Database::open(&knowledge_db_path)
+            .map_err(|e| format!("Failed to open database for knowledge: {}", e))?;
+
+        let knowledge_config = KnowledgeConfig {
+            memory_enabled: config.knowledge.memory_enabled,
+            memory_endpoint: config.knowledge.memory_endpoint.clone(),
+            max_knowledge_entries: config.knowledge.max_knowledge_entries,
+        };
+        let knowledge_hub = KnowledgeHub::new(
+            knowledge_db,
+            event_bus.clone(),
+            knowledge_config,
+        );
+
+        // Initialize context engine
+        let context_config = coderun_context::ContextConfig {
+            max_tokens: config.context.max_tokens,
+            max_files: config.context.max_files,
+            max_lines_per_file: config.context.max_lines_per_file,
+            cache_order: config.context.cache_order.clone(),
+        };
+        let context_engine = coderun_context::ContextEngine::new(
+            repo_intel,
+            knowledge_hub,
+            event_bus.clone(),
+            context_config,
+        );
+
+        // Initialize optimizer
+        let optimizer = coderun_optimizer::ExecutionOptimizer::new(
+            coderun_optimizer::OptimizerConfig::default(),
+        );
+
         Ok(Self {
             config,
             #[allow(clippy::arc_with_non_send_sync)]
             db: Arc::new(db),
             event_bus,
+            context_engine: Arc::new(tokio::sync::Mutex::new(context_engine)),
+            optimizer,
             shutdown_flag,
             force_shutdown_flag,
         })
@@ -66,54 +120,11 @@ impl DaemonState {
         // Print startup banner
         print_banner(&self.config);
 
-        // Initialize repository intelligence
-        let repo_path = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current directory: {}", e))?;
-
-        // Create a second Database connection for repo_intel (SQLite allows multiple readers)
-        let repo_db_path = expand_path(&self.config.database.path);
-        let repo_db = Database::open(&repo_db_path)
-            .map_err(|e| format!("Failed to open database for repo-intel: {}", e))?;
-
-        let repo_intel = RepositoryIntelligence::new(
-            repo_path.clone(),
-            repo_db,
-            self.event_bus.clone(),
-        );
-
-        // Initialize knowledge hub
-        let knowledge_db_path = expand_path(&self.config.database.path);
-        let knowledge_db = Database::open(&knowledge_db_path)
-            .map_err(|e| format!("Failed to open database for knowledge: {}", e))?;
-
-        let knowledge_config = KnowledgeConfig {
-            memory_enabled: self.config.knowledge.memory_enabled,
-            memory_endpoint: self.config.knowledge.memory_endpoint.clone(),
-            max_knowledge_entries: self.config.knowledge.max_knowledge_entries,
-        };
-        let knowledge_hub = KnowledgeHub::new(
-            knowledge_db,
-            self.event_bus.clone(),
-            knowledge_config,
-        );
-
-        // Initialize context engine
-        let context_config = coderun_context::ContextConfig {
-            max_tokens: self.config.context.max_tokens,
-            max_files: self.config.context.max_files,
-            max_lines_per_file: self.config.context.max_lines_per_file,
-            cache_order: self.config.context.cache_order.clone(),
-        };
-        let context_engine = coderun_context::ContextEngine::new(
-            repo_intel,
-            knowledge_hub,
-            self.event_bus.clone(),
-            context_config,
-        );
-
         // Start background indexing
         let indexing_db_path = expand_path(&self.config.database.path);
         let event_bus_clone = self.event_bus.clone();
+        let repo_path = std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?;
         let repo_path_clone = repo_path.clone();
         let indexing_handle = tokio::spawn(async move {
             info!("Starting background indexing...");
@@ -144,25 +155,20 @@ impl DaemonState {
             }
         });
 
-        // Configure adapter
-        let adapter_config = AdapterConfig {
-            socket_path: PathBuf::from(&self.config.daemon.socket_path),
-            request_timeout_ms: self.config.daemon.request_timeout_ms,
-            max_concurrent: self.config.daemon.max_concurrent,
-            tcp_port: 9527,
+        // Start HTTP server (primary interface for plugins)
+        let http_state = crate::http_server::HttpServerState {
+            context_engine: self.context_engine.clone(),
+            optimizer: std::sync::Arc::new(self.optimizer.clone()),
         };
-
-        // Create adapter layer
-        let adapter = AdapterLayer::new(
-            adapter_config,
-            context_engine,
-            self.event_bus.clone(),
-        );
-
-        // Start adapter server
-        let adapter_handle = tokio::spawn(async move {
-            adapter.serve().await
+        let http_port = 9527;
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = crate::http_server::start_http_server(http_port, http_state).await {
+                error!(error = %e, "HTTP server error");
+            }
         });
+
+        // Note: TCP/UDS adapter disabled in favor of HTTP server
+        // The adapter_config was: socket_path, request_timeout_ms, max_concurrent, tcp_port
 
         // Wait for shutdown signal
         info!("Daemon ready. Press Ctrl+C to shutdown.");
@@ -171,13 +177,8 @@ impl DaemonState {
         // Graceful shutdown
         info!("Shutting down gracefully...");
 
-        // Wait for adapter to finish (max 30s)
-        match tokio::time::timeout(Duration::from_secs(30), adapter_handle).await {
-            Ok(Ok(Ok(()))) => info!("Adapter stopped"),
-            Ok(Ok(Err(e))) => warn!(error = %e, "Adapter stopped with error"),
-            Ok(Err(e)) => warn!(error = %e, "Adapter task failed"),
-            Err(_) => warn!("Adapter shutdown timed out"),
-        }
+        // Wait for HTTP server to finish
+        let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
 
         // Wait for indexing to finish
         let _ = tokio::time::timeout(Duration::from_secs(10), indexing_handle).await;

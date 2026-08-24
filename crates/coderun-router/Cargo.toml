@@ -7,5 +7,10 @@ edition.workspace = true
 coderun-core.workspace = true
 coderun-events.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
+
+# HTTP client for LiteLLM communication
+reqwest = { version = "0.12", features = ["json"] }

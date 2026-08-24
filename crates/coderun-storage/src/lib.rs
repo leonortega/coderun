@@ -1,3 +1,5 @@
+pub mod tantivy_index;
+
 use std::path::Path;
 use std::time::Instant;
 

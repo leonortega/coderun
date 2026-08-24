@@ -1,3 +1,5 @@
+pub mod litellm;
+
 use coderun_core::{RoutingDecision, RoutingScores};
 use tracing::{debug, info};
 

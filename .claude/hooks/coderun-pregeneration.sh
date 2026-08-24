@@ -1,73 +1,51 @@
-#!/usr/bin/env bash
-# coderun-pregeneration.sh - Enriches user prompts with context via Coderun daemon
+#!/bin/bash
+# Coderun Pre-Generation Hook for Claude Code
+# Called when UserPromptSubmit is triggered
 #
-# This hook intercepts UserPromptSubmit events and calls the Coderun daemon
-# to enrich the prompt with repository context, knowledge, and skills.
-#
-# Exit codes:
-#   0 - Proceed (with enriched message on stdout if available)
-#   2 - Block (reason on stderr)
-#   other - Non-blocking error, logged and ignored
+# Usage: Reads stdin with hook context, sends to Coderun daemon via HTTP
 
-set -euo pipefail
+CODERUN_URL="${CODERUN_DAEMON_URL:-http://127.0.0.1:9527}"
 
-CODERUN_DAEMON_URL="${CODERUN_DAEMON_URL:-http://127.0.0.1:9527}"
-REQUEST_TIMEOUT=30
+# Read input from stdin (JSON)
+INPUT=$(cat)
 
-# Read the JSON payload from stdin
-payload=$(cat)
+# Extract message from input (adapt based on Claude Code hook format)
+MESSAGE=$(echo "$INPUT" | jq -r '.message // empty' 2>/dev/null || echo "")
 
-# Extract the prompt/message from the payload
-# Claude Code passes the user's message in the payload
-message=$(echo "$payload" | jq -r '.message // .prompt // empty' 2>/dev/null || echo "")
-
-# If no message found, just proceed
-if [ -z "$message" ]; then
+if [ -z "$MESSAGE" ]; then
+  # Pass through if no message
+  echo "$INPUT"
   exit 0
 fi
 
-# Generate a correlation ID
-correlation_id="req_$(uuidgen 2>/dev/null || echo "$(date +%s)-$$")"
-
-# Build the Coderun request
-request=$(jq -n \
-  --arg cid "$correlation_id" \
-  --arg msg "$message" \
-  --arg sid "${SESSION_ID:-unknown}" \
-  '{
-    correlation_id: $cid,
-    hook_type: "PreGeneration",
-    payload: {
-      type: "MessageRewrite",
-      session_id: $sid,
-      message: $msg
-    }
-  }')
-
-# Call the Coderun daemon
-response=$(curl -s -m "$REQUEST_TIMEOUT" \
-  -X POST \
+# Call Coderun daemon
+RESPONSE=$(curl -s -X POST "${CODERUN_URL}/hook" \
   -H "Content-Type: application/json" \
-  -d "$request" \
-  "$CODERUN_DAEMON_URL/hook" 2>/dev/null || echo "")
+  -d "{
+    \"hook_type\": \"PreGeneration\",
+    \"payload\": {
+      \"type\": \"MessageRewrite\",
+      \"session_id\": \"claude-code\",
+      \"message\": $(echo "$MESSAGE" | jq -Rs .)
+    }
+  }" \
+  --connect-timeout 5 \
+  --max-time 30 \
+  2>/dev/null)
 
-# If no response or error, just proceed with original message
-if [ -z "$response" ]; then
-  exit 0 fi
-
-# Check if we got a valid response
-payload_type=$(echo "$response" | jq -r '.payload.type // empty' 2>/dev/null || echo "")
-
-if [ "$payload_type" = "RewrittenMessage" ]; then
-  # Extract the rewritten message
-  rewritten=$(echo "$response" | jq -r '.payload.rewritten // empty' 2>/dev/null || echo "")
-  
-  if [ -n "$rewritten" ] && [ "$rewritten" != "$message" ]; then
-    # Output the enriched message (Claude Code will use this instead)
-    echo "$rewritten"
-    exit 0
-  fi
+if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
+  # Fail-open: pass through original
+  echo "$INPUT"
+  exit 0
 fi
 
-# Default: proceed with original message
-exit 0
+# Extract rewritten message
+REWRITTEN=$(echo "$RESPONSE" | jq -r '.payload.rewritten // empty' 2>/dev/null)
+
+if [ -n "$REWRITTEN" ]; then
+  # Output enriched context for Claude Code
+  echo "$REWRITTEN"
+else
+  # Pass through original
+  echo "$INPUT"
+fi
