@@ -1,0 +1,11 @@
+[package]
+name = "coderun-router"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+coderun-core.workspace = true
+coderun-events.workspace = true
+serde.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

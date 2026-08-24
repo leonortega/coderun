@@ -1,0 +1,591 @@
+use std::path::Path;
+
+use coderun_core::{KnowledgeEntry, SkillMatch};
+use coderun_events::{EventBus, RuntimeEvent};
+use coderun_storage::Database;
+use tracing::{debug, info};
+
+// ── Configuration ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeConfig {
+    pub memory_enabled: bool,
+    pub memory_endpoint: String,
+    pub max_knowledge_entries: usize,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            memory_enabled: true,
+            memory_endpoint: "http://localhost:9090".to_string(),
+            max_knowledge_entries: 10000,
+        }
+    }
+}
+
+// ── Knowledge Hub ───────────────────────────────────────────────────────
+
+pub struct KnowledgeHub {
+    db: Database,
+    event_bus: EventBus,
+    #[allow(dead_code)]
+    config: KnowledgeConfig,
+    /// In-memory skill registry (loaded from files)
+    skills: Vec<coderun_skills::Skill>,
+}
+
+impl KnowledgeHub {
+    /// Create a new Knowledge Hub
+    pub fn new(db: Database, event_bus: EventBus, config: KnowledgeConfig) -> Self {
+        Self {
+            db,
+            event_bus,
+            config,
+            skills: Vec::new(),
+        }
+    }
+
+    /// Load skills from a directory
+    pub fn load_skills(&mut self, skills_dir: &Path) -> Result<usize, String> {
+        let mut engine = coderun_skills::SkillEngine::new(skills_dir.to_path_buf());
+        let count = engine.load_skills()?;
+        self.skills = engine.get_skills().to_vec();
+        Ok(count)
+    }
+
+    /// Match skills against a task description
+    pub fn match_skills(&self, task_description: &str, max_skills: usize) -> Vec<SkillMatch> {
+        self.simple_tag_match(task_description, max_skills)
+    }
+
+    /// Simple tag-based skill matching (used when engine isn't available)
+    fn simple_tag_match(&self, task_description: &str, max_skills: usize) -> Vec<SkillMatch> {
+        let task_lower = task_description.to_lowercase();
+        let task_tokens: Vec<&str> = task_lower.split_whitespace().collect();
+
+        let mut scored: Vec<(f64, &coderun_skills::Skill)> = self
+            .skills
+            .iter()
+            .map(|skill| {
+                let tag_matches = skill.tags.iter().filter(|tag| {
+                    task_tokens.iter().any(|token| token.contains(tag.as_str()))
+                }).count();
+                
+                let score = if skill.tags.is_empty() {
+                    0.0
+                } else {
+                    tag_matches as f64 / skill.tags.len() as f64
+                };
+                
+                (score, skill)
+            })
+            .filter(|(score, _)| *score > 0.3)
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        scored
+            .into_iter()
+            .take(max_skills)
+            .map(|(score, skill)| SkillMatch {
+                skill_name: skill.name.clone(),
+                match_score: score,
+                instructions: skill.instructions.clone(),
+                examples: skill.examples.clone(),
+                constraints: skill.constraints.clone(),
+            })
+            .collect()
+    }
+
+    // ── Knowledge Storage ──────────────────────────────────────────
+
+    /// Store a knowledge entry
+    pub fn store_knowledge(&self, entry: &KnowledgeEntry) -> Result<i64, String> {
+        self.db.store_knowledge(
+            &entry.category,
+            &entry.key,
+            &entry.value,
+            entry.confidence,
+            &entry.source,
+        )
+    }
+
+    /// Get a knowledge entry by category and key
+    pub fn get_knowledge(&self, category: &str, key: &str) -> Result<Option<KnowledgeEntry>, String> {
+        match self.db.get_knowledge(category, key)? {
+            Some(record) => Ok(Some(KnowledgeEntry {
+                id: Some(record.id),
+                category: record.category,
+                key: record.key,
+                value: record.value,
+                confidence: record.confidence,
+                source: record.source,
+                relevance_score: None,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Get all knowledge entries
+    pub fn get_all_knowledge(&self) -> Result<Vec<KnowledgeEntry>, String> {
+        let records = self.db.get_all_knowledge()?;
+        Ok(records
+            .into_iter()
+            .map(|r| KnowledgeEntry {
+                id: Some(r.id),
+                category: r.category,
+                key: r.key,
+                value: r.value,
+                confidence: r.confidence,
+                source: r.source,
+                relevance_score: None,
+            })
+            .collect())
+    }
+
+    /// Update confidence for a knowledge entry
+    pub fn update_confidence(&self, id: i64, confidence: f64) -> Result<(), String> {
+        self.db.update_knowledge_confidence(id, confidence)
+    }
+
+    /// Decay confidence for old knowledge entries
+    pub fn decay_confidence(&self, min_age_days: i64, decay_amount: f64) -> Result<usize, String> {
+        self.db.decay_knowledge_confidence(min_age_days, decay_amount)
+    }
+
+    // ── Knowledge Retrieval ────────────────────────────────────────
+
+    /// Retrieve knowledge matching a query
+    pub fn retrieve_knowledge(
+        &self,
+        query: &str,
+        category_filter: Option<&str>,
+        max_results: usize,
+    ) -> Result<Vec<KnowledgeEntry>, String> {
+        // Search with minimum confidence threshold
+        let records = self.db.search_knowledge(query, category_filter, 0.3, max_results)?;
+        
+        let entries: Vec<KnowledgeEntry> = records
+            .into_iter()
+            .map(|r| KnowledgeEntry {
+                id: Some(r.id),
+                category: r.category,
+                key: r.key,
+                value: r.value,
+                confidence: r.confidence,
+                source: r.source,
+                relevance_score: None,
+            })
+            .collect();
+
+        debug!(
+            query = query,
+            results = entries.len(),
+            "Knowledge retrieval"
+        );
+
+        Ok(entries)
+    }
+
+    // ── Knowledge Extraction ───────────────────────────────────────
+
+    /// Extract knowledge from indexed code analysis
+    pub fn extract_knowledge(
+        &self,
+        symbols: &[(String, String)], // (name, kind) pairs
+        file_paths: &[String],
+    ) -> Result<usize, String> {
+        let mut extracted = 0;
+
+        // Detect naming patterns
+        let naming_patterns = detect_naming_patterns(symbols);
+        for (pattern, confidence) in naming_patterns {
+            self.store_knowledge(&KnowledgeEntry {
+                id: None,
+                category: "convention".to_string(),
+                key: format!("naming_{}", pattern),
+                value: format!("Project uses {} naming convention", pattern),
+                confidence,
+                source: "auto_extract".to_string(),
+                relevance_score: None,
+            })?;
+            extracted += 1;
+        }
+
+        // Detect architectural patterns
+        let arch_patterns = detect_architectural_patterns(symbols, file_paths);
+        for (pattern, confidence) in arch_patterns {
+            self.store_knowledge(&KnowledgeEntry {
+                id: None,
+                category: "pattern".to_string(),
+                key: format!("arch_{}", pattern),
+                value: format!("Project follows {} architecture", pattern),
+                confidence,
+                source: "auto_extract".to_string(),
+                relevance_score: None,
+            })?;
+            extracted += 1;
+        }
+
+        // Detect domain terms
+        let domain_terms = detect_domain_terms(symbols);
+        for (term, definition, confidence) in domain_terms {
+            self.store_knowledge(&KnowledgeEntry {
+                id: None,
+                category: "domain".to_string(),
+                key: term,
+                value: definition,
+                confidence,
+                source: "auto_extract".to_string(),
+                relevance_score: None,
+            })?;
+            extracted += 1;
+        }
+
+        info!(extracted = extracted, "Knowledge extraction complete");
+        Ok(extracted)
+    }
+
+    // ── Memory Operations (via engram or local) ────────────────────
+
+    /// Save to memory (local SQLite fallback)
+    pub fn memory_save(&self, namespace: &str, key: &str, value: &str) -> Result<i64, String> {
+        let id = self.db.save_memory(namespace, key, value)?;
+        
+        self.event_bus.emit(RuntimeEvent::MemorySaved {
+            entry_id: id.to_string(),
+            namespace: namespace.to_string(),
+            key: key.to_string(),
+        });
+
+        Ok(id)
+    }
+
+    /// Search memory (local SQLite fallback)
+    pub fn memory_search(&self, namespace: &str, query: &str, max_results: usize) -> Result<Vec<(String, String)>, String> {
+        let records = self.db.search_memory(namespace, query, max_results)?;
+        Ok(records
+            .into_iter()
+            .map(|r| (r.key, r.value))
+            .collect())
+    }
+}
+
+// ── Pattern Detection Helpers ───────────────────────────────────────────
+
+/// Detect naming conventions used in the codebase
+fn detect_naming_patterns(symbols: &[(String, String)]) -> Vec<(String, f64)> {
+    let mut patterns = Vec::new();
+    let mut snake_case_count = 0;
+    let mut camel_case_count = 0;
+    let mut pascal_case_count = 0;
+    let total = symbols.len();
+
+    if total == 0 {
+        return patterns;
+    }
+
+    for (name, _kind) in symbols {
+        if name.contains('_') {
+            snake_case_count += 1;
+        } else if name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+            && name.chars().any(|c| c.is_uppercase())
+        {
+            camel_case_count += 1;
+        } else if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            && name.chars().any(|c| c.is_uppercase())
+        {
+            pascal_case_count += 1;
+        }
+    }
+
+    if snake_case_count as f64 / total as f64 > 0.5 {
+        patterns.push(("snake_case".to_string(), 0.8));
+    }
+    if camel_case_count as f64 / total as f64 > 0.5 {
+        patterns.push(("camelCase".to_string(), 0.8));
+    }
+    if pascal_case_count as f64 / total as f64 > 0.5 {
+        patterns.push(("PascalCase".to_string(), 0.8));
+    }
+
+    patterns
+}
+
+/// Detect architectural patterns
+fn detect_architectural_patterns(
+    symbols: &[(String, String)],
+    file_paths: &[String],
+) -> Vec<(String, f64)> {
+    let mut patterns = Vec::new();
+
+    // Check for controller-service-repo pattern
+    let has_controller = symbols.iter().any(|(name, _)| name.to_lowercase().contains("controller"));
+    let has_service = symbols.iter().any(|(name, _)| name.to_lowercase().contains("service"));
+    let has_repository = symbols.iter().any(|(name, _)| name.to_lowercase().contains("repository") || name.to_lowercase().contains("repo"));
+
+    if has_controller && has_service && has_repository {
+        patterns.push(("controller-service-repository".to_string(), 0.9));
+    }
+
+    // Check for MVC pattern
+    let has_model = file_paths.iter().any(|p| p.to_lowercase().contains("model"));
+    let has_view = file_paths.iter().any(|p| p.to_lowercase().contains("view"));
+    let has_controller_file = file_paths.iter().any(|p| p.to_lowercase().contains("controller"));
+
+    if has_model && has_view && has_controller_file {
+        patterns.push(("mvc".to_string(), 0.85));
+    }
+
+    // Check for handler pattern
+    let has_handler = symbols.iter().any(|(name, _)| name.to_lowercase().contains("handler"));
+    if has_handler {
+        patterns.push(("handler".to_string(), 0.7));
+    }
+
+    // Check for middleware pattern
+    let has_middleware = symbols.iter().any(|(name, _)| name.to_lowercase().contains("middleware"));
+    if has_middleware {
+        patterns.push(("middleware".to_string(), 0.7));
+    }
+
+    patterns
+}
+
+/// Detect domain-specific terms
+fn detect_domain_terms(symbols: &[(String, String)]) -> Vec<(String, String, f64)> {
+    let mut terms = Vec::new();
+
+    // Common domain terms to look for
+    let domain_keywords = [
+        ("user", "A user of the system"),
+        ("auth", "Authentication and authorization"),
+        ("session", "User session management"),
+        ("permission", "Access control permissions"),
+        ("role", "User roles for access control"),
+        ("token", "Authentication tokens"),
+        ("api", "Application programming interface"),
+        ("endpoint", "API endpoint"),
+        ("route", "API route definition"),
+        ("middleware", "Request/response middleware"),
+        ("handler", "Request handler"),
+        ("service", "Business logic service"),
+        ("repository", "Data access layer"),
+        ("model", "Data model"),
+        ("schema", "Database schema"),
+        ("migration", "Database migration"),
+        ("config", "Configuration"),
+        ("cache", "Caching layer"),
+        ("queue", "Message queue"),
+        ("event", "Event handling"),
+    ];
+
+    for (keyword, definition) in &domain_keywords {
+        let count = symbols
+            .iter()
+            .filter(|(name, _)| name.to_lowercase().contains(keyword))
+            .count();
+
+        if count >= 2 {
+            // At least 2 occurrences to be confident
+            let confidence = (count as f64 / 10.0).min(0.9);
+            terms.push((
+                keyword.to_string(),
+                definition.to_string(),
+                confidence,
+            ));
+        }
+    }
+
+    terms
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_db() -> Database {
+        let path = PathBuf::from(":memory:");
+        Database::open(&path).expect("Failed to create in-memory database")
+    }
+
+    fn test_hub() -> KnowledgeHub {
+        let db = test_db();
+        let event_bus = EventBus::new();
+        let config = KnowledgeConfig::default();
+        KnowledgeHub::new(db, event_bus, config)
+    }
+
+    #[test]
+    fn test_store_and_get_knowledge() {
+        let hub = test_hub();
+        let entry = KnowledgeEntry {
+            id: None,
+            category: "convention".to_string(),
+            key: "naming".to_string(),
+            value: "Use snake_case".to_string(),
+            confidence: 0.8,
+            source: "test".to_string(),
+            relevance_score: None,
+        };
+
+        let id = hub.store_knowledge(&entry).unwrap();
+        assert!(id > 0);
+
+        let retrieved = hub.get_knowledge("convention", "naming").unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.value, "Use snake_case");
+        assert!((retrieved.confidence - 0.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_get_all_knowledge() {
+        let hub = test_hub();
+        
+        hub.store_knowledge(&KnowledgeEntry {
+            id: None,
+            category: "convention".to_string(),
+            key: "naming".to_string(),
+            value: "Use snake_case".to_string(),
+            confidence: 0.8,
+            source: "test".to_string(),
+            relevance_score: None,
+        }).unwrap();
+
+        hub.store_knowledge(&KnowledgeEntry {
+            id: None,
+            category: "pattern".to_string(),
+            key: "arch".to_string(),
+            value: "MVC pattern".to_string(),
+            confidence: 0.7,
+            source: "test".to_string(),
+            relevance_score: None,
+        }).unwrap();
+
+        let all = hub.get_all_knowledge().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_search_knowledge() {
+        let hub = test_hub();
+        
+        hub.store_knowledge(&KnowledgeEntry {
+            id: None,
+            category: "convention".to_string(),
+            key: "naming".to_string(),
+            value: "Use snake_case for variables".to_string(),
+            confidence: 0.8,
+            source: "test".to_string(),
+            relevance_score: None,
+        }).unwrap();
+
+        let results = hub.retrieve_knowledge("snake", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].value.contains("snake_case"));
+    }
+
+    #[test]
+    fn test_update_confidence() {
+        let hub = test_hub();
+        
+        let id = hub.store_knowledge(&KnowledgeEntry {
+            id: None,
+            category: "test".to_string(),
+            key: "key".to_string(),
+            value: "value".to_string(),
+            confidence: 0.5,
+            source: "test".to_string(),
+            relevance_score: None,
+        }).unwrap();
+
+        hub.update_confidence(id, 0.9).unwrap();
+        
+        let entry = hub.get_knowledge("test", "key").unwrap().unwrap();
+        assert!((entry.confidence - 0.9).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_memory_save_and_search() {
+        let hub = test_hub();
+        
+        let id = hub.memory_save("conventions", "style", "Use rustfmt").unwrap();
+        assert!(id > 0);
+
+        let results = hub.memory_search("conventions", "rustfmt", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "style");
+        assert_eq!(results[0].1, "Use rustfmt");
+    }
+
+    #[test]
+    fn test_extract_knowledge() {
+        let hub = test_hub();
+        
+        let symbols = vec![
+            ("get_user".to_string(), "function".to_string()),
+            ("set_user".to_string(), "function".to_string()),
+            ("user_service".to_string(), "struct".to_string()),
+            ("UserController".to_string(), "struct".to_string()),
+            ("UserService".to_string(), "struct".to_string()),
+            ("UserRepository".to_string(), "struct".to_string()),
+        ];
+
+        let file_paths = vec![
+            "src/controllers/user_controller.rs".to_string(),
+            "src/services/user_service.rs".to_string(),
+            "src/repositories/user_repository.rs".to_string(),
+        ];
+
+        let extracted = hub.extract_knowledge(&symbols, &file_paths).unwrap();
+        assert!(extracted > 0);
+    }
+
+    #[test]
+    fn test_detect_naming_patterns() {
+        let symbols = vec![
+            ("get_user".to_string(), "function".to_string()),
+            ("set_user".to_string(), "function".to_string()),
+            ("is_valid".to_string(), "function".to_string()),
+        ];
+
+        let patterns = detect_naming_patterns(&symbols);
+        assert!(patterns.iter().any(|(p, _)| p == "snake_case"));
+    }
+
+    #[test]
+    fn test_detect_architectural_patterns() {
+        let symbols = vec![
+            ("UserController".to_string(), "struct".to_string()),
+            ("UserService".to_string(), "struct".to_string()),
+            ("UserRepository".to_string(), "struct".to_string()),
+        ];
+
+        let file_paths = vec![
+            "src/controllers/user.rs".to_string(),
+            "src/services/user.rs".to_string(),
+            "src/repositories/user.rs".to_string(),
+        ];
+
+        let patterns = detect_architectural_patterns(&symbols, &file_paths);
+        assert!(patterns.iter().any(|(p, _)| p == "controller-service-repository"));
+    }
+
+    #[test]
+    fn test_detect_domain_terms() {
+        let symbols = vec![
+            ("get_user".to_string(), "function".to_string()),
+            ("create_user".to_string(), "function".to_string()),
+            ("delete_user".to_string(), "function".to_string()),
+            ("find_user".to_string(), "function".to_string()),
+        ];
+
+        let terms = detect_domain_terms(&symbols);
+        assert!(terms.iter().any(|(t, _, _)| t == "user"));
+    }
+}

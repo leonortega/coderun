@@ -1,0 +1,13 @@
+[package]
+name = "coderun-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+toml.workspace = true
+tracing.workspace = true

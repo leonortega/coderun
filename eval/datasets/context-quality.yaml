@@ -1,0 +1,100 @@
+# Context Quality Evaluation Dataset
+# Tests that the Context Engine produces high-quality context packs
+
+description: "Context Quality Tests"
+
+tests:
+  # Test that context includes relevant files
+  - description: "Context includes mentioned files"
+    vars:
+      task: "implement a new function in src/auth.rs"
+      files_mentioned:
+        - "src/auth.rs"
+        - "src/config.rs"
+      expected_files:
+        - "src/auth.rs"
+    assert:
+      - type: contains
+        value: "src/auth.rs"
+
+  # Test token budget enforcement
+  - description: "Context respects token budget"
+    vars:
+      task: "explain the codebase"
+      max_tokens: 5000
+    assert:
+      - type: javascript
+        value: "output.token_usage.total_tokens <= 5000"
+
+  # Test cache-aware ordering
+  - description: "Context has correct section ordering"
+    vars:
+      task: "add error handling"
+    assert:
+      - type: javascript
+        value: |
+          const yaml = output;
+          const skillsIdx = yaml.indexOf('behavioral_skills:');
+          const docsIdx = yaml.indexOf('docs_context:');
+          const codeIdx = yaml.indexOf('code_context:');
+          skillsIdx < docsIdx && docsIdx < codeIdx;
+
+  # Test deduplication
+  - description: "Context deduplicates content"
+    vars:
+      task: "explain the main function"
+      session_id: "test-session-1"
+    assert:
+      - type: javascript
+        value: |
+          // Check that the same content isn't repeated
+          const lines = output.code_context.split('\n');
+          const uniqueLines = new Set(lines);
+          lines.length - uniqueLines.size < 10; // Allow some repetition
+
+  # Test skill injection
+  - description: "Context includes matched skills"
+    vars:
+      task: "add rate limiting to the API"
+      skills_matched:
+        - name: "Rate Limiting"
+          score: 0.8
+    assert:
+      - type: contains
+        value: "Rate Limiting"
+
+  # Test knowledge retrieval
+  - description: "Context includes relevant knowledge"
+    vars:
+      task: "use snake_case for variables"
+      knowledge_entries:
+        - key: "naming_convention"
+          value: "Use snake_case"
+    assert:
+      - type: contains
+        value: "snake_case"
+
+  # Test empty context handling
+  - description: "Context handles empty query gracefully"
+    vars:
+      task: ""
+    assert:
+      - type: javascript
+        value: "output.token_usage.total_tokens >= 0"
+
+  # Test large context truncation
+  - description: "Context truncates large content"
+    vars:
+      task: "show me everything"
+      large_file_count: 100
+    assert:
+      - type: javascript
+        value: "output.token_usage.total_tokens <= 12000"
+
+  # Test model routing decision
+  - description: "Context includes routing decision"
+    vars:
+      task: "implement a new feature"
+    assert:
+      - type: javascript
+        value: "output.routing_decision && output.routing_decision.model"

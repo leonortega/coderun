@@ -1,0 +1,41 @@
+# Release Configuration for Coderun
+# 
+# Usage:
+#   cargo install cargo-release
+#   cargo release patch   # 0.1.0 -> 0.1.1
+#   cargo release minor   # 0.1.0 -> 0.2.0
+#   cargo release major   # 0.1.0 -> 1.0.0
+
+# Release configuration
+[workspace.metadata.release]
+# Create git tag
+tag = true
+# Tag format
+tag-prefix = "v"
+# Commit message format
+tag-message = "Release {{version}}"
+# Publish to crates.io (set to true when ready)
+publish = false
+# Push to remote
+push-remote = "origin"
+# Pre-release hook: run tests
+pre-release-hook = ["cargo", "test"]
+# Pre-release hook: run clippy
+pre-release-hook = ["cargo", "clippy", "--", "-D", "warnings"]
+# Pre-release hook: run cargo audit
+pre-release-hook = ["cargo", "audit"]
+# Update changelog
+update-changelog = true
+# Changelog path
+changelog-path = "CHANGELOG.md"
+# Sign git tag (optional, requires GPG)
+# sign-tag = true
+# Sign commits (optional, requires GPG)
+# sign-commit = true
+
+# Workspace settings
+[workspace]
+# Version to release
+version = "0.1.0"
+# Release profile
+profile = "release"

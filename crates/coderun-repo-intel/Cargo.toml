@@ -1,0 +1,16 @@
+[package]
+name = "coderun-repo-intel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+coderun-core.workspace = true
+coderun-events.workspace = true
+coderun-storage.workspace = true
+tokio.workspace = true
+serde.workspace = true
+sha2.workspace = true
+regex.workspace = true
+glob.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/coderun-core",
+    "crates/coderun-daemon",
+    "crates/coderun-cli",
+    "crates/coderun-repo-intel",
+    "crates/coderun-knowledge",
+    "crates/coderun-skills",
+    "crates/coderun-context",
+    "crates/coderun-router",
+    "crates/coderun-optimizer",
+    "crates/coderun-events",
+    "crates/coderun-storage",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+# Errors
+anyhow = "1"
+thiserror = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+glob = "0.3"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# IPC
+rmp-serde = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates
+coderun-core = { path = "crates/coderun-core" }
+coderun-events = { path = "crates/coderun-events" }
+coderun-storage = { path = "crates/coderun-storage" }
+coderun-repo-intel = { path = "crates/coderun-repo-intel" }
+coderun-knowledge = { path = "crates/coderun-knowledge" }
+coderun-skills = { path = "crates/coderun-skills" }
+coderun-context = { path = "crates/coderun-context" }
+coderun-router = { path = "crates/coderun-router" }
+coderun-optimizer = { path = "crates/coderun-optimizer" }
+coderun-daemon = { path = "crates/coderun-daemon" }
+coderun-cli = { path = "crates/coderun-cli" }

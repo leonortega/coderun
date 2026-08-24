@@ -1,0 +1,17 @@
+[package]
+name = "coderun-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+coderun-core.workspace = true
+coderun-events.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+serde.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
