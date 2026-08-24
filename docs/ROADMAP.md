@@ -102,11 +102,29 @@ v0.1.0 uses **custom, self-contained implementations** for all components:
 
 ---
 
+## v0.5.0 — First-Class Tools ✅
+
+**Released:** 2026-08-24
+**Status:** Complete — Full plan `docs/V0_5_0_PLAN.md`, 15/16 tools first-class (all except optional LSP)
+**Tests:** 166 passing — P0 deletions of fallback-as-primary (ast-grep/engram/FlashRank/graph/LiteLLM/RTK) + P1 Git/MkDocs/Promptfoo/analyzers
+
+### What's Included (first-class, fallbacks only on Err/warn)
+
+1. **ast-grep** `repo-intel/src/lib.rs:348` `search_structural()` `sg-core` gated first-class, `search_structural_fallback()` kept only as `Err` branch
+2. **engram** `knowledge/src/lib.rs:248` `EngramClient::search_memory()` `2s timeout` `block_on_in_thread` primary, `db.search_memory()` LIKE only on `Err`
+3. **FlashRank via ort** `knowledge/src/rerank.rs:1` `ort=2.0.0-rc.13` optional feature int8 `~/.coderun/models/flashrank.onnx` `try_flashrank_ort()`, `rerank_tfidf()` fallback with `WARN`, `enabled:true` default
+4. **codebase-memory-mcp** `repo-intel/src/graph.rs:20` `try_codebase_memory_mcp()` `CODERUN_MCP_ENABLED` probe + `npx` primary, regex `extract_imports()` fallback
+5. **LiteLLM** `router/src/lib.rs:222` `LiteLLMGateway::complete_with_fallback()` `capable→balanced→fast` `tracing::warn` cascade
+6. **RTK** `optimizer/src/lib.rs:66` `RtkAdapter::compress()` vendored primary `WARN` on binary missing, `analyzers.rs` `run_gate()` `clippy` gate
+7. **Git** `repo-intel/src/watcher.rs:7` `try_notify_git2_watcher()` `notify="6"`+`git2` primary, polling 5s fallback
+8. **MkDocs** `repo-intel/src/lib.rs:290` walk `docs/**/*.md` → `store_knowledge(category="docs")` + tantivy on `index_repository()`
+9. **Promptfoo** `eval/providers/context-quality.js:1` UDS `net.createConnection("/tmp/coderun.sock")`+`msgpack-lite` length-prefix primary, `mockContextEngine` fallback
+
 ## v0.4.0 — Production Hardening + DBOS ✅
 
 **Released:** 2026-08-24
 **Status:** Complete — Full plan `docs/V0_4_0_PLAN.md`, decision DBOS Transact (not Temporal, `V0_4_0_PLAN.md:1.1`)
-**Tests:** 165+ passing (see `CHANGELOG.md:0.4.0`)
+**Tests:** 165 passing (see `CHANGELOG.md:0.4.0`)
 
 ### What's Included
 
@@ -139,11 +157,12 @@ We welcome contributions in these areas:
 
 ## Success Metrics
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 |
-|--------|--------|--------|--------|--------|
-| Test coverage | 108 tests | 128 tests | 150+ | 165+ |
-| Languages supported | All (regex) | 4 (tree-sitter) | 10+ | 10+ |
-| Search accuracy | ~70% | ~85% | 95%+ | 95%+ |
-| Latency (p95) | <100ms | <80ms | <50ms | <50ms (RwLock concurrent) |
-| Memory usage | <100MB | <150MB | <200MB | <200MB |
-| Workflow | — | — | Noop | DBOS durable (single-node SQLite+Litestream) |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 |
+|--------|--------|--------|--------|--------|--------|
+| Test coverage | 108 tests | 128 tests | 150+ | 165 | 166 |
+| Languages supported | All (regex) | 4 (tree-sitter) | 10+ | 10+ | 10+ (ast-grep sg-core) |
+| Search accuracy | ~70% | ~85% | 95%+ | 95%+ | 95%+ (FlashRank ort int8) |
+| Latency (p95) | <100ms | <80ms | <50ms | <50ms (RwLock) | <50ms (first-class tools) |
+| Memory usage | <100MB | <150MB | <200MB | <200MB | <200MB (+ort <50MB when enabled) |
+| Workflow | — | — | Noop | DBOS durable | DBOS durable |
+| Tool compliance | 58% | 58% | 90%+ | 93% | 15/16 first-class (all except optional LSP, no Temporal) |

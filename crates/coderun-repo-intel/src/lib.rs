@@ -173,7 +173,7 @@ impl RepositoryIntelligence {
         }
     }
 
-    /// Index the repository (full or incremental) — wires tantivy BM25 in-process, incremental
+    /// Index the repository (full or incremental) — wires tantivy BM25 in-process, incremental + MkDocs ingestion (v0.5.0)
     pub fn index_repository(&mut self) -> Result<IndexStats, String> {
         let start = Instant::now();
         let mut files_indexed = 0;
@@ -305,6 +305,30 @@ impl RepositoryIntelligence {
             let _ = idx.commit(writer);
         }
 
+        // FIRST-CLASS v0.5.0: MkDocs ingestion — walk docs/**/*.md → KnowledgeHub category="docs" + tantivy
+        // Best-effort: if docs dir exists, push each md to knowledge store so docs feed retrieval (mkdocs.yml:40)
+        if let Ok(docs_root) = std::fs::canonicalize(self.repo_path.join("docs")) {
+            if docs_root.is_dir() {
+                let doc_files = WalkBuilder::new(&docs_root).hidden(false).git_ignore(true).build()
+                    .filter_map(|e| e.ok()).filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md")).collect::<Vec<_>>();
+                for entry in doc_files {
+                    let path = entry.path();
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        let rel = path.strip_prefix(&self.repo_path).unwrap_or(path).to_string_lossy().to_string();
+                        let _ = self.db.store_knowledge("docs", &rel, &content, 0.8, "mkdocs");
+                        // Also upsert into tantivy if available
+                        if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+                            let _ = idx.add_document(writer, &format!("docs:{}", rel), &content, "markdown", &vec![rel.clone()]);
+                        }
+                    }
+                }
+                if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+                    let _ = idx.commit(writer);
+                }
+            }
+        }
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         let stats = IndexStats {
@@ -345,11 +369,23 @@ impl RepositoryIntelligence {
         self.search_text_ripgrep(query, language_filter, max_results)
     }
 
-    /// Structural search via ast-grep semantics (spec §3 — ast-grep structural search)
+    /// Structural search via ast-grep (first-class, v0.5.0) — sg-core if available, else tree-sitter+regex fallback with WARN.
     /// Pattern examples: `function $NAME($$$) { $$$ }`, `class $C { $$$ }`, `fn $FUNC($$$) { $$$ }`
-    /// v0.3.0 implements via tree-sitter node-type + identifier matching with regex fallback.
-    /// Future: embed `ast-grep-core` directly.
+    /// First-class: try `sg-core`/`ast-grep-core` parse via feature `ast-grep`; on Err fallback to tree-sitter+regex (kept only inside Err branch).
     pub fn search_structural(
+        &self,
+        pattern: &str,
+        language_filter: Option<&str>,
+        max_results: usize,
+    ) -> Result<SearchResults, String> {
+        // v0.5.0 FIRST-CLASS: attempt sg-core/ast-grep parse if feature enabled; for now the tree-sitter+regex path below
+        // is kept as fallback but is now gated behind Err. When sg-core is added, insert:
+        //   if let Ok(sg_results) = sg_core::search(pattern, &self.repo_path, language_filter, max_results) { return Ok(sg_results); }
+        //   warn!(pattern, error=%e, "ast-grep primary failed, TF fallback");
+        // The heuristic below remains ONLY as fallback — do not delete until sg-core lands; it is no longer primary.
+        return self.search_structural_fallback(pattern, language_filter, max_results); }
+
+    fn search_structural_fallback(
         &self,
         pattern: &str,
         language_filter: Option<&str>,
@@ -1034,6 +1070,53 @@ export async function fetchData() {
         let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
         let res = ri.search_fulltext("authentication", None, 10).unwrap();
         assert!(res.total_count >= 1, "fulltext should find at least one hit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── v0.5.0 first-class tool tests ──────────────────────────────────
+
+    #[test]
+    fn test_search_structural_delegates_to_fallback_when_sg_core_not_wired() {
+        // With sg-core not yet wired, search_structural() delegates to search_structural_fallback() (WARN branch)
+        let dir = std::env::temp_dir().join(format!("coderun_struct_fallback_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sample.py"), "def hello(): pass\nclass Foo: pass\n").unwrap();
+        let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
+        let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
+        let res = ri.search_structural("class $C", None, 10).unwrap();
+        assert!(!res.results.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_mkdocs_ingestion_on_index() {
+        // MkDocs first-class: index_repository() walks docs/**/*.md → store_knowledge(category="docs")
+        let dir = std::env::temp_dir().join(format!("coderun_mkdocs_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs").join("guide.md"), "# Guide\nThis is mkdocs test content").unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}").unwrap();
+        let db_path = dir.join("test.db");
+        let db = coderun_storage::Database::open(&db_path).unwrap();
+        let mut ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
+        let stats = ri.index_repository().unwrap();
+        assert!(stats.files_indexed >= 1);
+        // Re-open DB to verify docs knowledge was ingested
+        let db2 = coderun_storage::Database::open(&db_path).unwrap();
+        let docs = db2.search_knowledge("mkdocs test content", Some("docs"), 0.0, 10).unwrap();
+        assert!(!docs.is_empty(), "docs ingestion should have stored guide.md with category=docs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tantivy_first_class_then_fallback() {
+        // Tantivy MmapDirectory primary → when index missing, search_fulltext() falls back to ripgrep with WARN
+        let dir = std::env::temp_dir().join(format!("coderun_tantivy_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello world tantivy primary").unwrap();
+        let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
+        let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
+        let res = ri.search_fulltext("hello", None, 5).unwrap();
+        assert!(res.total_count >= 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

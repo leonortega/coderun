@@ -1,10 +1,11 @@
 pub mod rtk;
+pub mod analyzers;
 
 use coderun_core::OutputType;
 use rtk::RtkAdapter;
 use tracing::{debug, warn};
 
-/// Execution Optimizer: compresses tool outputs via RTK or type-specific compressors
+/// Execution Optimizer — FIRST-CLASS v0.5.0: RTK vendored crate primary, built-ins only on Err with WARN
 #[derive(Clone)]
 pub struct ExecutionOptimizer {
     config: OptimizerConfig,
@@ -63,20 +64,25 @@ impl ExecutionOptimizer {
 
         let original_tokens = count_tokens(&content);
 
-        // Adopt RTK directly when available (spec §3 — single binary, 10ms overhead)
-        // Try RTK first if enabled, fallback to built-in compressors on failure.
+        // FIRST-CLASS v0.5.0: RTK vendored crate is primary; built-ins are fallback only on Err with WARN
         let rtk_adapter = RtkAdapter::detect();
         let compressed = if self.config.enabled && rtk_adapter.is_available() {
             match rtk_adapter.compress(&content, tool_name) {
                 Ok(rtk_out) => rtk_out,
-                Err(_) => match &output_type {
-                    OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
-                    OutputType::SearchResult => compress_search_result(&content),
-                    OutputType::ShellOutput => compress_shell_output(&content),
-                    OutputType::Other => compress_generic(&content, &self.config.compression_level),
-                },
+                Err(e) => {
+                    warn!(tool=tool_name, error=%e, "RTK primary failed, TF fallback (built-ins)");
+                    match &output_type {
+                        OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
+                        OutputType::SearchResult => compress_search_result(&content),
+                        OutputType::ShellOutput => compress_shell_output(&content),
+                        OutputType::Other => compress_generic(&content, &self.config.compression_level),
+                    }
+                }
             }
         } else {
+            if self.config.enabled {
+                warn!(tool=tool_name, "RTK binary not on PATH — built-ins fallback (install rtk for first-class)");
+            }
             match &output_type {
                 OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
                 OutputType::SearchResult => compress_search_result(&content),
@@ -462,5 +468,28 @@ mod tests {
         let result = optimizer.compress_output("test", OutputType::FileRead, content.to_string(), None);
         assert!(result.original_tokens > 0);
         assert!(result.compressed_tokens > 0);
+    }
+
+    // ── v0.5.0 first-class RTK tests ──────────────────────────────────
+
+    #[test]
+    fn test_rtk_first_class_fallback_when_binary_missing() {
+        // RtkAdapter::detect() on CI has no binary → compress() should Err and optimizer should WARN fallback to built-ins
+        let rtk = crate::rtk::RtkAdapter::detect();
+        if !rtk.is_available() {
+            assert!(rtk.compress("hello", "test").is_err());
+            // Optimizer primary is RTK; when unavailable it WARNs and falls back — still produces output
+            let opt = default_optimizer();
+            let res = opt.compress_output("test", OutputType::FileRead, "hello world".to_string(), None);
+            assert!(!res.compressed.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_rtk_compress_with_tee_on_failure_creates_log() {
+        let rtk = crate::rtk::RtkAdapter { binary_path: None, enabled: true };
+        let res = rtk.compress_with_tee("tool output that failed", "test-tool", "req_test_123");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("tee at"));
     }
 }

@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 
@@ -57,6 +57,10 @@ tiktoken-rs = "0.7"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# External tools — first-class (v0.5.0): notify/git2 (ort is per-crate optional)
+notify = "6"
+git2 = "0.19"
+
 # Internal crates
 coderun-core = { path = "crates/coderun-core" }
 coderun-events = { path = "crates/coderun-events" }
@@ -67,6 +71,6 @@ coderun-skills = { path = "crates/coderun-skills" }
 coderun-context = { path = "crates/coderun-context" }
 coderun-router = { path = "crates/coderun-router" }
 coderun-optimizer = { path = "crates/coderun-optimizer" }
-  coderun-daemon = { path = "crates/coderun-daemon" }
-  coderun-cli = { path = "crates/coderun-cli" }
-  coderun-workflow = { path = "crates/coderun-workflow" }
+coderun-daemon = { path = "crates/coderun-daemon" }
+coderun-cli = { path = "crates/coderun-cli" }
+coderun-workflow = { path = "crates/coderun-workflow" }

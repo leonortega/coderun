@@ -901,4 +901,33 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ── v0.5.0 first-class tool tests ──────────────────────────────────
+
+    #[test]
+    fn test_005_audits_migration_exists() {
+        let db = test_db();
+        // 005 adds audits + workflows tables
+        db.insert_audit(Some("wf_1"), Some("req_1"), "actor", "task", Some("hash"), Some("payload")).unwrap();
+        let audits = db.list_audits(10).unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].workflow_id.as_deref(), Some("wf_1"));
+        db.upsert_workflow("wf_1", "pending", "task1").unwrap();
+        let w = db.get_workflow("wf_1").unwrap().unwrap();
+        assert_eq!(w.status, "pending");
+        db.upsert_workflow("wf_1", "completed", "task1").unwrap();
+        let w2 = db.get_workflow("wf_1").unwrap().unwrap();
+        assert_eq!(w2.status, "completed");
+    }
+
+    #[test]
+    fn test_audit_list_and_workflow_list() {
+        let db = test_db();
+        for i in 0..3 {
+            db.insert_audit(Some(&format!("wf_{i}")), None, "actor", &format!("task {i}"), None, None).unwrap();
+            db.upsert_workflow(&format!("wf_{i}"), "pending", &format!("task {i}")).unwrap();
+        }
+        assert_eq!(db.list_audits(2).unwrap().len(), 2);
+        assert_eq!(db.list_workflows(10).unwrap().len(), 3);
+    }
 }

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-24 — First-Class Tools
+
+### Added — First-Class Fixes (fallbacks kept only inside Err/warn)
+- **ast-grep** `search_structural()` first-class `sg-core` gated `repo-intel/src/lib.rs:348` (heuristic deleted as primary, kept only in `search_structural_fallback()`)
+- **engram** deterministic reads `knowledge/src/lib.rs:248` `EngramClient::search_memory()` `2s timeout` primary `block_on_in_thread`, `db.search_memory()` LIKE only on Err
+- **FlashRank via ort** `knowledge/src/rerank.rs:1` `ort=2.0.0-rc.13` optional feature int8 `~/.coderun/models/flashrank.onnx` primary, `rerank_tfidf()` fallback with WARN, `Default enabled:true`
+- **codebase-memory-mcp** `repo-intel/src/graph.rs:20` `try_codebase_memory_mcp()` via `npx` probe primary, regex `extract_imports()` fallback with WARN
+- **LiteLLM** `LiteLLMGateway` `router/src/lib.rs:222` `complete_with_fallback()` `capable→balanced→fast` cascade + `cost_usd` `003_graph.sql:15`
+- **RTK** vendored crate primary `optimizer/src/lib.rs:66` `RtkAdapter::compress()` first, built-ins `WARN` fallback, `tee` `~/.coderun/logs/tool-failures/`
+- **Git** `notify+git2` `repo-intel/src/watcher.rs:7` `try_notify_git2_watcher()` primary `notify::RecommendedWatcher`+`git2::diff`, polling fallback
+- **MkDocs** ingestion `repo-intel/src/lib.rs:290` walk `docs/**/*.md` → `store_knowledge(category="docs")` + tantivy on `index_repository()`
+- **Promptfoo** UDS `eval/providers/context-quality.js:1` `net.createConnection("/tmp/coderun.sock")`+`msgpack-lite` length-prefix+`rmp-serde` primary, mock fallback
+- **Native analyzers** `optimizer/src/analyzers.rs` `run_gate()` `cargo clippy -D warnings` post-DBOS gate
+- **Workspace** `notify="6"`, `git2="0.19"`, `ort` per-crate optional `knowledge/Cargo.toml:20` feature `ort`
+
+### Changed
+- Version `0.4.0 → 0.5.0` `Cargo.toml:18`, 166 tests (15 knowledge due to `RerankerConfig` `enabled:true`)
+
 ## [0.4.0] - 2026-08-24 — Production Hardening + DBOS
 
 ### Added

@@ -78,20 +78,56 @@ function mockContextEngine(vars) {
 }
 
 /**
- * Promptfoo provider
+ * Promptfoo provider — FIRST-CLASS v0.5.0: hits BuildContext via UDS MessagePack (length-prefix + rmp-serde)
+ * Fallback: mockContextEngine only inside catch (fail-open).
  */
+const net = require("net");
+const fs = require("fs");
+const path = require("path");
+
+async function callBuildContextUDS(prompt, timeoutMs = 2000) {
+  const socketPath = process.env.CODERUN_SOCKET || "/tmp/coderun.sock";
+  if (!fs.existsSync(socketPath)) throw new Error("UDS not found");
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error("UDS timeout")); }, timeoutMs);
+    socket.on("connect", () => {
+      try {
+        const msgpack = require("msgpack-lite");
+        const req = { correlation_id: `req_eval_${Date.now()}`, hook_type: "PreGeneration", payload: { type: "MessageRewrite", session_id: "eval", message: prompt } };
+        const body = msgpack.encode(req);
+        const header = Buffer.alloc(4); header.writeUInt32BE(body.length, 0);
+        socket.write(Buffer.concat([header, body]));
+      } catch (e) { clearTimeout(timer); reject(e); }
+    });
+    let buf = Buffer.alloc(0);
+    socket.on("data", (chunk) => { buf = Buffer.concat([buf, chunk]); if (buf.length >= 4) { const len = buf.readUInt32BE(0); if (buf.length >= 4+len) { clearTimeout(timer); try { const msgpack = require("msgpack-lite"); const resp = msgpack.decode(buf.slice(4, 4+len)); socket.destroy(); resolve(resp); } catch (e) { socket.destroy(); reject(e); } } } });
+    socket.on("error", (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
 module.exports = class ContextQualityProvider {
   id() {
     return "context-quality";
   }
 
-  label = "Context Quality";
+  label = "Context Quality (UDS first-class v0.5.0)";
 
   async callApi(prompt, context) {
+    // FIRST-CLASS: try UDS BuildContext
+    try {
+      const resp = await callBuildContextUDS(prompt);
+      if (resp && resp.payload && resp.payload.type === "RewrittenMessage") {
+        const pack = resp.payload.context_pack || {};
+        return { output: JSON.stringify({ behavioral_skills: pack.behavioral_skills || "", docs_context: pack.docs_context || "", code_context: pack.code_context || "", token_usage: pack.token_usage || {}, routing: resp.payload.routing_decision || {}, source: "uds" }, null, 2) };
+      }
+    } catch (e) {
+      console.warn(`[context-quality] UDS primary failed (${e.message}), fallback to mock`);
+    }
+    // FALLBACK only on Err
     const vars = context?.vars || {};
     const result = mockContextEngine(vars);
-    return {
-      output: JSON.stringify(result, null, 2),
-    };
+    result.source = "mock-fallback";
+    return { output: JSON.stringify(result, null, 2) };
   }
 };
