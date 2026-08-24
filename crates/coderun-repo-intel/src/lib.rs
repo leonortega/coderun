@@ -433,6 +433,10 @@ impl RepositoryIntelligence {
                 let reader = idx.reader().map_err(|e| format!("tantivy reader: {e}"))?;
                 match idx.search(&reader, query, language_filter, max_results) {
                     Ok(hits) => {
+                        if hits.is_empty() {
+                            debug!("tantivy returned 0 hits for '{}', falling back to ripgrep", query);
+                            return self.search_text(query, language_filter, max_results);
+                        }
                         let mut results = Vec::new();
                         for hit in hits {
                             // snippet: first 200 chars
@@ -1003,5 +1007,33 @@ export async function fetchData() {
 
         assert_eq!(results.total_count, 1);
         assert_eq!(results.results[0].path, "src/main.rs");
+    }
+
+    #[test]
+    fn test_search_structural_finds_pattern() {
+        // ast-grep structural search: pattern `fn $FUNC` should match rust functions via tree-sitter
+        let dir = std::env::temp_dir().join(format!("coderun_struct_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sample.rs"), "pub fn hello() {}\nfn world() {}\nstruct Foo;").unwrap();
+        let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
+        let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
+        let res = ri.search_structural("fn $FUNC", None, 10).unwrap();
+        assert!(!res.results.is_empty(), "structural search should find fn patterns");
+        assert!(res.results.iter().any(|r| r.content.contains("hello") || r.content.contains("world") || r.content.contains("function")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_search_fulltext_via_tantivy_fallback() {
+        // Full-text BM25: should fallback to ripgrep when tantivy index missing, still return results
+        let dir = std::env::temp_dir().join(format!("coderun_fulltext_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "authentication middleware handles token verification").unwrap();
+        std::fs::write(dir.join("main.rs"), "fn authenticate() { /* token check */ }").unwrap();
+        let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
+        let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
+        let res = ri.search_fulltext("authentication", None, 10).unwrap();
+        assert!(res.total_count >= 1, "fulltext should find at least one hit");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

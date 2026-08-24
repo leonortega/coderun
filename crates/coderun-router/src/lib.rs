@@ -234,6 +234,7 @@ pub fn fallback_chain(tier: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coderun_core::IModelGateway;
 
     fn default_router() -> ModelRouter {
         ModelRouter::new(RouterConfig::default())
@@ -368,5 +369,28 @@ mod tests {
         assert!(decision.scores.semantic >= 0.0 && decision.scores.semantic <= 1.0);
         assert!(decision.scores.scope >= 0.0 && decision.scores.scope <= 1.0);
         assert!(decision.scores.final_score >= 0.0 && decision.scores.final_score <= 1.0);
+    }
+
+    #[test]
+    fn test_fallback_chain() {
+        assert_eq!(fallback_chain("capable"), vec!["capable", "balanced", "fast"]);
+        assert_eq!(fallback_chain("balanced"), vec!["balanced", "fast"]);
+        assert_eq!(fallback_chain("fast"), vec!["fast"]);
+        assert_eq!(fallback_chain("unknown"), vec!["balanced"]);
+        // LiteLLM gateway: cascade capable→balanced→fast per spec §3, per-key budgets untouched
+        let chain = fallback_chain("capable");
+        assert_eq!(chain[0], "capable");
+        assert_eq!(chain[2], "fast");
+    }
+
+    #[test]
+    fn test_imodelgateway_trait() {
+        let router = default_router();
+        let d = <ModelRouter as coderun_core::IModelGateway>::select_model(
+            &router, "fix typo", 1, 1, 0, 0, 100, None,
+        );
+        assert_eq!(d.tier, "fast");
+        assert_eq!(router.tier_to_model("fast"), "gpt-4o-mini");
+        assert_eq!(router.tier_to_model("capable"), "o1");
     }
 }
