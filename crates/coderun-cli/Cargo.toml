@@ -17,6 +17,7 @@ coderun-context.workspace = true
 coderun-knowledge.workspace = true
 coderun-optimizer.workspace = true
 coderun-router.workspace = true
+coderun-workflow.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -25,3 +26,6 @@ toml.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
 tiktoken-rs.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }

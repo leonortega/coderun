@@ -1,4 +1,4 @@
-// Coderun adapter for Cursor (Tier 1 — programmatic hooks, v0.3.0)
+// Coderun adapter for Cursor (Tier 1 — programmatic hooks, v0.4.0)
 // Spec §3 Adapter Layer: intercept before generation (rewrite) and before tool call (compress)
 // Uses Cursor's hook/extension API analogous to opencode `chat.message` / `tool.execute.before`.
 // Fail-open on timeout (30s) — returns OriginalPassthrough and logs warning.

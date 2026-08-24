@@ -1,17 +1,19 @@
 # Coderun — AI Runtime
 
-An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via HTTP, enriching them with repository context, knowledge, skills, and model routing decisions.
+An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via UDS/MessagePack (HTTP fallback), enriching them with repository context, knowledge, skills, and model routing decisions. v0.4.0 adds durable DBOS workflows, Prometheus metrics, and production hardening.
 
 ## Features
 
-- **Context Engine** — Assembles contextual information from your codebase for better AI responses
-- **Repository Intelligence** — Incremental indexing with symbol extraction and text search (regex-based)
-- **Knowledge Hub** — Stores project conventions, patterns, and domain knowledge (SQLite)
-- **Skill Engine** — Tag-based skill matching from community-format files
-- **Model Router** — Heuristic complexity scoring for tier-based model selection
-- **Execution Optimizer** — Tool-output compression to reduce token consumption
-- **Event Bus** — Async observability for debugging and metrics
-- **Fail-Open Design** — Always returns a response, never blocks the agent
+- **Context Engine** — Assembles contextual information from your codebase for better AI responses (`BuildContext` — `skills → docs → code` + `FROZEN PREFIX END` + dedup)
+- **Repository Intelligence** — Incremental indexing: tree-sitter AST (4 langs) + ripgrep + tantivy BM25 + ast-grep structural (heuristic) + dependency graph (`graph.rs`)
+- **Knowledge Hub** — Unified surface: SQLite+tantivy+FlashRank (TF-IDF fallback) + engram (HTTP, 2s fail-open to local `memory`) + BM25→rerank adaptive K
+- **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io)
+- **Model Router** — Heuristic complexity scoring (structural/semantic/scope) + LiteLLM gateway with `capable→balanced→fast` fallback + `cost_usd`
+- **Execution Optimizer** — RTK adoption (`RtkAdapter` if binary present) + built-in compressors + tee-on-failure + `tiktoken-rs` honest savings reporting
+- **Event Bus** — Async-only observability (`ContextBuilt`…`MemorySaved`) → SQLite `004_events.sql` for `preview`/`replay`
+- **DBOS Workflows (v0.4.0)** — Durable workflows via DBOS Transact (single-node SQLite+Litestream sidecar `workflow/dbos/`, approval gates, audit `005_audits.sql`)
+- **Metrics (v0.4.0)** — Prometheus exposition `GET /metrics` (`coderun_build_context_duration_seconds` histogram), Grafana `docs/dashboards/coderun.json`
+- **Fail-Open Design** — Always returns a response, never blocks the agent (30s hard timeout → `OriginalPassthrough`)
 
 ## Quick Start
 
@@ -54,11 +56,12 @@ cargo build -p coderun-core
 ## Test
 
 ```bash
-# Run all tests (108 tests)
+# Run all tests (165 tests, v0.4.0)
 cargo test
 
 # Run tests for a specific crate
 cargo test -p coderun-core
+cargo test -p coderun-workflow   # DBOS durable workflows
 
 # Run with output
 cargo test -- --nocapture
@@ -78,24 +81,31 @@ cargo audit
 
 ```
 coderun/
-├── Cargo.toml                    # Workspace root
+├── Cargo.toml                    # Workspace root (0.4.0, 12 crates)
 ├── crates/
-│   ├── coderun-core/             # Shared types, errors, config (22 tests)
-│   ├── coderun-daemon/           # Daemon binary — HTTP server (10 tests)
-│   ├── coderun-cli/              # CLI binary — all subcommands (3 tests)
-│   ├── coderun-repo-intel/       # Repository Intelligence — indexing, search (10 tests)
-│   ├── coderun-knowledge/        # Knowledge Hub — storage, retrieval (9 tests)
-│   ├── coderun-skills/           # Skill Engine — parsing, matching (8 tests)
-│   ├── coderun-context/          # Context Engine — pipeline assembly (7 tests)
-│   ├── coderun-router/           # Model Router — complexity scoring (8 tests)
-│   ├── coderun-optimizer/        # Execution Optimizer — compression (11 tests)
-│   ├── coderun-events/           # Event Bus — observability (6 tests)
-│   └── coderun-storage/          # Local Storage — SQLite (12 tests)
+│   ├── coderun-core/             # Shared types, errors, config (WorkflowConfig, HMAC) (~24 tests)
+│   ├── coderun-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics + /workflow/* (RwLock, rate-limit)
+│   ├── coderun-cli/              # CLI — init/index/serve/preview/replay/workflow/doctor (8 cmds + workflow)
+│   ├── coderun-repo-intel/       # Repository Intelligence — tree-sitter + ripgrep + tantivy + graph + watcher + lsp (16 tests)
+│   ├── coderun-knowledge/        # Knowledge Hub — SQLite+tantivy→rerank→engram deterministic reads (14 tests)
+│   ├── coderun-skills/           # Skill Engine — MD/TOML/YAML parsing, tag matching (8 tests)
+│   ├── coderun-context/          # Context Engine — BuildContext (tiktoken, frozen-prefix, dedup, reversible) (11 tests)
+│   ├── coderun-router/           # Model Router — heuristic + LiteLLM fallback chain + cost (11 tests)
+│   ├── coderun-optimizer/        # Execution Optimizer — RTK adapter + compressors (11 tests)
+│   ├── coderun-events/           # Event Bus — broadcast + ring→SQLite 004_events
+│   ├── coderun-storage/          # Local Storage — SQLite WAL + tantivy + audits 005_audits (22 tests)
+│   └── coderun-workflow/         # DBOS Workflows — DBOSWorkflowEngine (HTTP bridge to Node sidecar) (6 tests)
+├── workflow/dbos/                # DBOS Transact sidecar (Node/TS, SQLite+Litestream, governed.ts)
 ├── .coderun/
-│   ├── config.toml               # Default configuration
+│   ├── config.toml               # Default configuration (includes [workflow])
 │   └── skills/                   # Skill definitions
+├── adapters/
+│   ├── cursor/extension.ts       # Cursor Tier 1 (v0.4.0)
+│   ├── gemini/hooks.sh           # Gemini CLI Tier 1 (v0.4.0)
+│   └── tier2/README.md           # Tier 2 best-effort
 ├── .opencode/plugins/            # OpenCode plugin (TypeScript)
 ├── .claude/hooks/                # Claude Code hooks (shell scripts)
+├── benches/                      # criterion benches (BuildContext p95)
 └── docs/                         # Architecture and specification docs
 ```
 
@@ -135,34 +145,57 @@ Output:
 
 ### `coderun serve`
 
-Start the daemon server (HTTP on port 9527).
+Start the daemon server (UDS primary on `/tmp/coderun.sock` + HTTP fallback on `127.0.0.1:9527`, `GET /metrics`).
 
 ```bash
 # Start with default config
 coderun serve
+coderun serve --socket /tmp/coderun.sock --port 9527
 
 # The daemon will:
-# 1. Load configuration
-# 2. Initialize logging
-# 3. Open database
-# 4. Start background indexing
-# 5. Start HTTP server on port 9527
-# 6. Wait for shutdown signal (Ctrl+C)
+# 1. Load configuration (incl. [workflow] for DBOS)
+# 2. Initialize logging + metrics (`/metrics` exposition)
+# 3. Open database (migrations 001-005, WAL) + tantivy (MmapDirectory)
+# 4. Start background indexing + git watcher
+# 5. Spawn DBOS sidecar if workflow.enabled=true (HTTP :3001 health probe)
+# 6. Start UDS+MessagePack primary and HTTP fallback
+# 7. Wait for shutdown signal (Ctrl+C)
 ```
 
 ### `coderun preview <prompt>`
 
-Preview what BuildContext would produce for a prompt.
+Preview what BuildContext would produce for a prompt (probes daemon via HTTP/UDS, falls back to local).
 
 ```bash
 coderun preview "implement a new API endpoint"
+coderun preview "fix auth" --session my-sess --no-cache
 ```
 
 Shows:
-- Skills that would match
-- Knowledge entries that would be included
-- Code files that would be included
-- Model routing decision
+- Skills that would match (incl. `FROZEN PREFIX END` boundary)
+- Knowledge entries (BM25→rerank→engram deterministic read) that would be included
+- Code files (ripgrep/tantivy/graph) that would be included
+- Token budget `by_source` (`behavioral_skills 20% / docs 15% / code 55%`)
+- Model routing decision + fallback chain `capable→balanced→fast`
+
+### `coderun replay <correlation_id>`
+
+Replay persisted events from SQLite `004_events.sql`.
+
+```bash
+coderun replay req_abc123
+```
+
+### `coderun workflow ...` (v0.4.0 — DBOS)
+
+Durable workflows when governance is needed (separate product, local-first).
+
+```bash
+coderun workflow start "refactor auth" --require-approval
+coderun workflow status wf_123
+coderun workflow approve wf_123
+coderun workflow list
+```
 
 ### `coderun status`
 
@@ -238,7 +271,7 @@ coderun config validate
 
 ### `coderun doctor`
 
-Health check for all dependencies.
+Health check for all dependencies (8 probes v0.4.0).
 
 ```bash
 coderun doctor
@@ -246,14 +279,24 @@ coderun doctor
 
 Output:
 ```
-Coderun Doctor
+Coderun Doctor (v0.4.0 — 8 probes)
 ═══════════════════════════════════════
 
-SQLite:          ✓ OK
+SQLite:          ✓ OK (WAL, migrations 001-005)
 Config:          ✓ OK
-Skills directory: ✓ OK (.coderun/skills)
+Skills directory: ✓ OK
+Socket path:     ✓ OK (/tmp/coderun.sock)
+Tree-sitter:     ✓ OK (4 langs)
+Tantivy:         ✓ OK
+Engram:          ✓ Configured (http://localhost:9090, fail-open)
+LiteLLM:         ✓ Configured (http://localhost:4000, fallback chain)
+RTK:             ⚠ Not found — using built-in compressors
+Tiktoken:        ✓ OK (cl100k_base)
+Secrets redact:  ✓ OK
+Workflow/DBOS:   ○ Disabled (enabled with workflow.enabled=true)
+Metrics:         ○ GET /metrics on daemon
 
-✓ All critical checks passed
+✓ All critical checks passed (v0.4.0)
 ```
 
 ## Configuration
@@ -269,13 +312,17 @@ Configuration is loaded in order of priority (highest wins):
 
 | Section | Purpose |
 |---------|---------|
-| `[daemon]` | Socket path, concurrency, timeout |
+| `[daemon]` | Socket path, concurrency, timeout, `metrics_port`, `rate_limit_per_session` |
 | `[database]` | SQLite path, connection pool |
-| `[knowledge]` | Memory settings |
+| `[index]` | Tantivy path, languages |
+| `[knowledge]` | Memory settings (`memory_enabled`, `memory_endpoint`) |
 | `[skills]` | Skills directory, auto-discovery |
-| `[context]` | Token budget, file limits |
+| `[context]` | Token budget, file limits, `cache_order` |
 | `[model]` | Default tier, routing toggle |
 | `[routing]` | Weights, thresholds, model mappings |
+| `[litellm]` | Endpoint, timeout, retries |
+| `[rtk]` | Enabled, max tokens, compression level |
+| `[workflow]` | DBOS durable workflows (`enabled`, `engine=dbos|noop`, `dbos_endpoint`, `dbos_shared_secret`, `auto_governance`) |
 | `[logging]` | Level, file path, retention |
 
 ### Environment Variables
@@ -287,6 +334,11 @@ Configuration is loaded in order of priority (highest wins):
 | `CODERUN_LOG_LEVEL` | logging.level | info |
 | `CODERUN_MODEL_DEFAULT` | model.default_tier | balanced |
 | `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
+| `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
+| `CODERUN_ENGRAM_ENDPOINT` | knowledge.memory_endpoint | http://localhost:9090 |
+| `CODERUN_DBOS_ENDPOINT` | workflow.dbos_endpoint | http://localhost:3001 |
+| `CODERUN_DBOS_SECRET` | workflow.dbos_shared_secret | — |
+| `CODERUN_WORKFLOW_ENABLED` | workflow.enabled | false |
 
 ## Skills
 
@@ -344,6 +396,18 @@ rate limit, throttle, request limit, API limit, middleware, security
 3. Make hooks executable: `chmod +x .claude/hooks/*.sh`
 4. Restart Claude Code
 
+### Cursor (v0.4.0 Tier 1)
+
+1. Start the daemon: `coderun serve`
+2. Install extension from `adapters/cursor/extension.ts`
+3. Extension calls `POST /hook` (UDS/MessagePack primary, HTTP fallback, 30s fail-open)
+
+### Gemini CLI (v0.4.0 Tier 1)
+
+1. Start the daemon: `coderun serve`
+2. Hooks at `adapters/gemini/hooks.sh` (`UserPromptSubmit` + `PreToolUse` analogs)
+3. `chmod +x adapters/gemini/hooks.sh`
+
 ## Architecture
 
 ### Component Overview
@@ -351,46 +415,58 @@ rate limit, throttle, request limit, API limit, middleware, security
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Coding Agent                           │
-│  (opencode, Claude Code, etc.)                              │
+│  (opencode, Claude Code, Cursor, Gemini CLI, etc.)          │
 └─────────────────────────┬───────────────────────────────────┘
-                          │ HTTP (JSON)
-                          ▼
+                           │ UDS/MessagePack primary, HTTP fallback
+                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Adapter Layer                            │
-│  • Request validation                                       │
-│  • Correlation ID generation                                │
-│  • Fail-open behavior                                       │
+│  • Request validation + rate-limit (token-bucket per session)│
+│  • Correlation ID + HMAC verification (DBOS)                │
+│  • Fail-open (30s → OriginalPassthrough)                    │
+│  • Prometheus /metrics                                      │
 └─────────────────────────┬───────────────────────────────────┘
-                          │
-          ┌───────────────┼───────────────┐
-          ▼               ▼               ▼
+                           │
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
 │   Context   │  │  Execution  │  │    Event    │
 │   Engine    │  │  Optimizer  │  │     Bus     │
+│ (RwLock)    │  │ (RTK)       │  │ (→ SQLite)  │
 └──────┬──────┘  └─────────────┘  └─────────────┘
-       │
-       ├──► Repository Intelligence (indexing, search)
-       ├──► Knowledge Hub (conventions, patterns)
-       ├──► Skill Engine (tag-based matching)
-       └──► Model Router (complexity scoring)
+        │
+        ├──► Repository Intelligence (tree-sitter/ast-grep/ripgrep/tantivy/graph/watcher/lsp)
+        ├──► Knowledge Hub (tantivy→FlashRank→engram deterministic reads)
+        ├──► Skill Engine (tag-based, full-instruction injection)
+        └──► Model Router (heuristic + LiteLLM fallback chain)
+                           │
+                    ┌──────┴──────┐
+                    │ DBOS Transact│ (optional sidecar :3001, audits 005)
+                    │  workflow/   │
+                    └─────────────┘
 ```
 
 ### Request Flow
 
-1. Agent sends request via HTTP
-2. Adapter Layer validates and generates correlation ID
-3. Context Engine assembles context pack:
-   - Searches code via Repository Intelligence
-   - Retrieves knowledge via Knowledge Hub
-   - Matches skills via Skill Engine
-   - Orders: skills → docs → code (cache-stable)
-   - Enforces token budget
-4. Model Router selects appropriate model tier
-5. Response returned to agent (or OriginalPassthrough on error)
+1. Agent sends request via UDS/MessagePack (HTTP/JSON fallback on Windows)
+2. Adapter Layer validates, rate-limits (10/s burst 20 per `session_id`), generates correlation ID
+3. Context Engine assembles context pack (`RwLock` read, concurrent sessions):
+   - Searches code via Repository Intelligence (ripgrep/tantivy/graph, `tiktoken-rs` budgets)
+   - Retrieves knowledge via Knowledge Hub (BM25 top20 → rerank adaptive K `5-20` → engram 2s fail-open)
+   - Matches skills via Skill Engine (deterministic tag scoring, dedup via `session_fingerprints`)
+   - Orders: `behavioral_skills` (20%) → `docs_context` (15%) → `code_context` (55%) + `FROZEN PREFIX END` boundary
+   - Reversible truncation (`~/.coderun/cache/originals/{hash}`) + `get_original()`
+4. Model Router selects tier (`capable→balanced→fast` fallback via LiteLLM, `cost_usd` tracked)
+5. Response returned (or `OriginalPassthrough` on error/timeout), `Timer` records `coderun_build_context_duration_seconds`, audit row inserted off hot path
+6. If `workflow.enabled` + `auto_governance` and tier in `require_approval_tiers` → `DBOSWorkflowEngine::start_workflow()` POSTs to sidecar `:3001` (HMAC), sidecar `DBOS.workflow` persists to `~/.coderun/dbos.db` WAL+Litestream
 
 ## IPC Protocol
 
-### Request Format (JSON)
+### Primary: UDS + MessagePack (Unix), `named_pipe`/TCP fallback on Windows
+
+`rmp-serde` encode of `AgentRequest` (`crates/coderun-core/src/ipc.rs`) → `4-byte BE len` → body. HTTP/JSON `POST /hook` remains as fallback (and `POST /metrics`, `POST /workflow/*`). See `daemon/src/adapter.rs:204` (length-prefix + MessagePack) and `http_server.rs:93` (`create_router`).
+
+### Request Format (JSON fallback shown; MessagePack is canonical)
 
 ```json
 {
@@ -403,7 +479,7 @@ rate limit, throttle, request limit, API limit, middleware, security
 }
 ```
 
-### Response Format (JSON)
+### Response Format (JSON fallback)
 
 ```json
 {
@@ -419,6 +495,25 @@ rate limit, throttle, request limit, API limit, middleware, security
 }
 ```
 
+### Metrics
+
+```
+GET /metrics  →  Prometheus exposition (crate daemon/src/metrics.rs)
+coderun_requests_total{key="PreGeneration_balanced"} 12
+coderun_build_context_duration_seconds_bucket{le="0.05"} 42
+coderun_fail_open_total 3
+coderun_index_files 142
+```
+
+### DBOS Workflow (HTTP)
+
+```
+POST /workflow/start     {task, session_id, require_approval} → {workflow_id, status}
+GET  /workflow/:id       → {workflow_id, status, task}
+POST /workflow/:id/approve → {workflow_id, status: "completed"}
+GET  /health             → {status:"ok", engine:"dbos-mock"|"dbos"}
+```
+
 ### Fail-Open Behavior
 
 On any error or timeout, the daemon returns `OriginalPassthrough` with the original message unchanged. The agent always gets a response.
@@ -429,37 +524,45 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | Context build error | OriginalPassthrough | "error" |
 | Any internal error | OriginalPassthrough | "fail-open" |
 
-## Implementation Status (v0.2.0)
+## Implementation Status (v0.4.0)
 
 | Component | Status | Implementation |
 |-----------|--------|----------------|
-| Config System | ✅ Complete | TOML loading, env overrides, validation |
-| Core Types | ✅ Complete | Error enums, IPC types, serde |
-| Event Bus | ✅ Complete | broadcast channel, buffer, correlation |
-| Storage | ✅ Complete | SQLite + WAL + tantivy BM25 |
-| Repository Intelligence | ✅ Complete | tree-sitter AST + ripgrep search |
-| Skill Engine | ✅ Complete | MD/TOML/YAML parsing, tag matching |
-| Knowledge Hub | ✅ Complete | SQLite + engram + FlashRank reranking |
-| Model Router | ✅ Complete | Heuristic scoring + LiteLLM routing |
-| Execution Optimizer | ✅ Complete | File/search/shell compressors |
-| Context Engine | ✅ Complete | Pipeline, cache ordering, token budget |
-| Adapter Layer | ✅ Complete | HTTP server, JSON, fail-open |
-| Daemon Lifecycle | ✅ Complete | Startup, shutdown, signal handling |
-| CLI Commands | ✅ Complete | All 10 subcommands |
-| Agent Adapters | ✅ Complete | OpenCode + Claude Code |
-| Evaluation | ✅ Complete | Promptfoo framework |
+| Config System | ✅ Complete | TOML + env (`CODERUN_DBOS_*`), `[workflow]`, validation |
+| Core Types | ✅ Complete | IPC (MessagePack), `IWorkflowEngine`, HMAC |
+| Event Bus | ✅ Complete | `broadcast` + ring→SQLite `004_events.sql` for `replay` |
+| Storage | ✅ Complete | SQLite WAL + tantivy BM25 + `005_audits.sql` (`audits`+`workflows`) + `cost_usd` |
+| Repository Intelligence | ✅ Complete | tree-sitter (4 langs) + ripgrep + tantivy full-text + `graph.rs` edges + `watcher.rs` polling + stub `lsp.rs` |
+| Skill Engine | ✅ Complete | MD/TOML/YAML, tag matching, conflict detection, full-instruction injection |
+| Knowledge Hub | ✅ Complete | BM25 top20→rerank adaptive K `5-20` (TF-IDF, `ort` int8 deferred) + engram deterministic 2s fail-open |
+| Model Router | ✅ Complete | Heuristic scoring + LiteLLM gateway `capable→balanced→fast` fallback + fallback tests |
+| Execution Optimizer | ✅ Complete | `RtkAdapter` (binary if present, `~10ms`) + tee-on-failure → `~/.coderun/logs/tool-failures/` + `tiktoken-rs` |
+| Context Engine | ✅ Complete | `BuildContext` + `RwLock` concurrency, cache-order `skills→docs→code` + `FROZEN PREFIX END` + dedup + reversible `get_original()` + `tiktoken-rs` budgets |
+| Adapter Layer | ✅ Complete | UDS/MessagePack primary + HTTP fallback, 30s fail-open `OriginalPassthrough`, `/metrics`, `/workflow/*`, rate-limit per `session_id` |
+| Daemon Lifecycle | ✅ Complete | Startup + graceful shutdown + DBOS sidecar spawn if `workflow.enabled` |
+| CLI Commands | ✅ Complete | 12 subcommands (`init --wizard`, `index --watch`, `preview`/`replay`, `workflow start/status/approve/list`, `doctor` 8 probes) |
+| Agent Adapters | ✅ Complete | OpenCode, Claude Code, **Cursor (v0.4.0)**, **Gemini CLI (v0.4.0)** Tier 1; Tier 2 best-effort |
+| DBOS Workflows | ✅ Complete | `coderun-workflow` crate + Node sidecar `workflow/dbos/` (SQLite WAL+Litestream, approval gate, audit) |
+| Metrics | ✅ Complete | `daemon/src/metrics.rs` histogram p95 + `ratelimit.rs` HMAC + Grafana `docs/dashboards/coderun.json` |
+| Evaluation | ✅ Complete | Promptfoo framework + UDS custom provider |
+| Distribution | ✅ Complete | `Dockerfile` (distroless), `Formula/coderun.rb` (brew tap), `cargo-wix` MSI scaffold |
 
-### v0.2.0 External Tool Integration
+### v0.4.0 External Tool Integration
 
 | Tool | Integration | Status |
 |------|-------------|--------|
-| tree-sitter | AST parsing for Rust, Python, JS, TS | ✅ Integrated |
-| ripgrep | Fast text search with .gitignore support | ✅ Integrated |
-| tantivy | BM25 full-text indexing and search | ✅ Integrated |
-| engram | Cross-session memory via HTTP | ✅ Integrated |
-| FlashRank | Reranking with TF-IDF fallback | ✅ Integrated |
-| LiteLLM | Multi-provider model routing | ✅ Integrated |
-| MkDocs | Documentation site | ⏳ Planned for v0.3.0 |
+| tree-sitter | AST parsing for Rust, Python, JS, TS (incremental via old-tree) | ✅ Integrated `repo-intel/src/parser.rs` |
+| ripgrep | Fast text search (`grep-searcher`+`ignore`) | ✅ Integrated `repo-intel/src/lib.rs:338` |
+| tantivy | BM25 in-process MmapDirectory + `tantivy_index.rs` wiring | ✅ Integrated (repo-intel `search_fulltext` + storage `005`) |
+| ast-grep | Structural search `search_structural()` | ✅ Integrated heuristic (tree-sitter+regex, `sg-core` deferred) |
+| engram | Cross-session memory HTTP `2s` timeout, fail-open local `LIKE` | ✅ Integrated `knowledge/src/engram.rs`+`try_engram_search` |
+| FlashRank (`ort`) | Reranking `RerankerConfig` adaptive K, TF-IDF fallback (int8 ONNX deferred) | ✅ Integrated `knowledge/src/rerank.rs` |
+| LiteLLM | Gateway `select_model` + `fallback_chain()` + `cost_usd` | ✅ Integrated `router/src/litellm.rs` |
+| RTK | Tool-output compression `RtkAdapter::detect()` + tee-on-failure | ✅ Integrated `optimizer/src/rtk.rs` (binary optional) |
+| tiktoken-rs | `cl100k_base` local token counting, `heuristic` fallback | ✅ Integrated `context/src/lib.rs:389` `optimizer/src/lib.rs:303` |
+| DBOS Transact | Durable workflows (SQLite+Litestream sidecar, `governed.ts`) | ✅ Integrated `crates/coderun-workflow` + `workflow/dbos/` |
+| MkDocs | Doc site `mkdocs.yml` + `category="docs"` ingestion (best-effort) | ✅ Integrated (build → `gh-pages`) |
+| Prometheus/Grafana | `/metrics` exposition + `docs/dashboards/coderun.json` + `deploy/prometheus/alerts.yml` | ✅ Integrated `daemon/src/metrics.rs` |
 
 ## Development
 
@@ -502,7 +605,21 @@ cargo fmt -- --check
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for v0.2.0 and beyond.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for v0.4.0 (production hardening + DBOS) and beyond. Full plans: `docs/V0_3_0_PLAN.md`, `docs/V0_4_0_PLAN.md`, workflows `docs/02-workflows/DBOS.md`.
+
+## Distribution
+
+```bash
+# Homebrew
+brew tap leonortega/coderun
+brew install coderun
+brew services start coderun  # launchd
+
+# Docker
+docker build -t coderun:0.4.0 .
+docker run -p 9527:9527 -v $PWD:/repo coderun serve
+docker compose --file deploy/docker-compose.yml up  # with DBOS sidecar :3001
+```
 
 ## License
 

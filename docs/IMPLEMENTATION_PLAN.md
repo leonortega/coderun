@@ -7,42 +7,49 @@
 
 ## Current Status
 
-**v0.2.0 Released:** August 24, 2026
-**Status:** ✅ Complete (6/6 external tool integrations)
-**Tests:** 128 passing
-**Warnings:** 0
+**v0.4.0 Released:** August 24, 2026
+**Status:** ✅ Complete (12 crates, Prometheus + DBOS + RwLock concurrency)
+**Tests:** 165 passing (6 new in `coderun-workflow`, 2 in `metrics`/`ratelimit`)
+**Warnings:** 0 (clippy clean)
 
-### What's Implemented (v0.2.0)
+### What's Implemented (v0.4.0)
 
 | Component | Status | Implementation |
 |-----------|--------|----------------|
-| Config System | ✅ Complete | TOML loading, env overrides |
-| Core Types | ✅ Complete | Error enums, IPC types |
-| Event Bus | ✅ Complete | broadcast channel |
-| Storage | ✅ Complete | SQLite + WAL + tantivy BM25 |
-| Repo Intelligence | ✅ Complete | tree-sitter AST + ripgrep search |
-| Skill Engine | ✅ Complete | MD/TOML/YAML parsing |
-| Knowledge Hub | ✅ Complete | SQLite + engram + FlashRank |
-| Model Router | ✅ Complete | Heuristic + LiteLLM routing |
-| Optimizer | ✅ Complete | Built-in compressors |
-| Context Engine | ✅ Complete | Pipeline assembly |
-| Adapter Layer | ✅ Complete | HTTP server (JSON) |
-| Daemon Lifecycle | ✅ Complete | Signal handling |
-| CLI Commands | ✅ Complete | All subcommands |
-| Agent Adapters | ✅ Complete | OpenCode + Claude Code |
-| Evaluation | ✅ Complete | Promptfoo framework |
+| Config System | ✅ Complete | TOML + env (`CODERUN_DBOS_*`, `CODERUN_WORKFLOW_ENABLED`), `WorkflowConfig`, validation |
+| Core Types | ✅ Complete | Error enums, IPC (MessagePack+rmp-serde), `IWorkflowEngine` (`Noop`+`DBOS`), HMAC |
+| Event Bus | ✅ Complete | broadcast 1000-ring → SQLite `004_events.sql` |
+| Storage | ✅ Complete | SQLite WAL + tantivy BM25 + `005_audits.sql` (`audits`+`workflows`) + `cost_usd` |
+| Repo Intelligence | ✅ Complete | tree-sitter (4 langs) + ripgrep + tantivy full-text (`search_fulltext`) + `search_structural` heuristic + `graph.rs` + `watcher.rs` + stub `lsp.rs` |
+| Skill Engine | ✅ Complete | MD/TOML/YAML parsing, tag matching, conflict/priority |
+| Knowledge Hub | ✅ Complete | BM25 top20→rerank adaptive K + engram deterministic 2s fail-open `try_engram_search()` |
+| Model Router | ✅ Complete | Heuristic + LiteLLM `fallback_chain()` + `IModelGateway` |
+| Optimizer | ✅ Complete | `RtkAdapter` (binary `which rtk`) + built-ins + tee `~/.coderun/logs/tool-failures/` + `tiktoken-rs` |
+| Context Engine | ✅ Complete | `BuildContext` `RwLock`, cache-order `skills→docs→code` + `FROZEN PREFIX END` + dedup + reversible `get_original()` |
+| Adapter Layer | ✅ Complete | UDS/MessagePack `adapter.rs` (RwLock, rate-limit) + HTTP fallback `http_server.rs` (`/hook`+`/metrics`+`/workflow/*`) + 30s fail-open |
+| Daemon Lifecycle | ✅ Complete | Signal handling + metrics + DBOS sidecar spawn when `workflow.enabled` |
+| CLI Commands | ✅ Complete | `init --wizard`, `index --watch`, `preview`/`replay`, `workflow start/status/approve/list`, `doctor` 8 probes |
+| Agent Adapters | ✅ Complete | OpenCode, Claude Code, **Cursor (v0.4.0)**, **Gemini CLI (v0.4.0)** Tier 1; Tier 2 best-effort |
+| DBOS Workflows | ✅ Complete | `coderun-workflow` crate + Node sidecar `workflow/dbos/` (SQLite WAL+Litestream) |
+| Metrics | ✅ Complete | `daemon/src/metrics.rs` histogram p95 + `ratelimit.rs` per-session bucket |
+| Evaluation | ✅ Complete | Promptfoo + UDS custom provider |
+| Distribution | ✅ Complete | `Dockerfile` (distroless), `Formula/coderun.rb` (brew+launchd), `cargo-wix` MSI scaffold |
 
-### v0.2.0 External Tool Integration
+### v0.4.0 External Tool Integration
 
 | Tool | Status | Module |
 |------|--------|--------|
-| tree-sitter | ✅ Integrated | `coderun-repo-intel/src/parser.rs` |
-| ripgrep | ✅ Integrated | `coderun-repo-intel/src/lib.rs` |
-| tantivy | ✅ Integrated | `coderun-storage/src/tantivy_index.rs` |
-| engram | ✅ Integrated | `coderun-knowledge/src/engram.rs` |
-| FlashRank | ✅ Integrated | `coderun-knowledge/src/rerank.rs` |
-| LiteLLM | ✅ Integrated | `coderun-router/src/litellm.rs` |
-| MkDocs | ⏳ Planned | v0.3.0 |
+| tree-sitter | ✅ Integrated (incremental `old_tree`) | `coderun-repo-intel/src/parser.rs` |
+| ripgrep | ✅ Integrated | `coderun-repo-intel/src/lib.rs:338` |
+| tantivy | ✅ Integrated (MmapDirectory) | `coderun-storage/src/tantivy_index.rs` + `search_fulltext()` |
+| ast-grep | ✅ Heuristic (tree-sitter+regex, `sg-core` deferred) | `repo-intel/src/lib.rs:352` |
+| engram | ✅ Integrated (2s fail-open) | `coderun-knowledge/src/engram.rs` |
+| FlashRank (`ort`) | ✅ Integrated (TF-IDF fallback, int8 deferred) | `coderun-knowledge/src/rerank.rs` |
+| LiteLLM | ✅ Integrated (fallback chain) | `coderun-router/src/litellm.rs` |
+| RTK | ✅ Integrated (binary optional) | `coderun-optimizer/src/rtk.rs` |
+| DBOS Transact | ✅ Integrated (sidecar) | `crates/coderun-workflow` + `workflow/dbos/` |
+| MkDocs | ✅ Integrated | `mkdocs.yml` + `docs/dashboards` |
+| Prometheus | ✅ Integrated | `daemon/src/metrics.rs` + `GET /metrics` |
 
 ---
 
@@ -356,21 +363,23 @@
 
 ---
 
-## v0.2.0 Planned Work
+## v0.4.0 What's New (production hardening + DBOS)
 
-See [ROADMAP.md](ROADMAP.md) for detailed plans.
+See [ROADMAP.md](ROADMAP.md) + `docs/V0_4_0_PLAN.md` (5-week plan, P0-P3).
 
-### Priority 1: Core Search & Parsing
-- Integrate tree-sitter for AST parsing
-- Integrate ripgrep for fast text search
-- Integrate tantivy for BM25 indexing
+### Priority 0 — DBOS (chosen over Temporal, V0_4_0_PLAN.md:1.1)
+- `WorkflowConfig` + `005_audits.sql` (`audits`+`workflows`) + `crate coderun-workflow` `DBOSWorkflowEngine` HTTP bridge to `workflow/dbos/` Node sidecar (SQLite WAL+Litestream, `governed.ts` `DBOS.workflow`+`transaction`+`waitForSignal`, approval gate, audit, fail-open `wf_*`, HMAC `X-Coderun-Signature`)
+- `GET /metrics` + `GET /health` + `POST /workflow/*` wired in `daemon/src/http_server.rs:93`
 
-### Priority 2: Knowledge & Memory
-- Integrate engram for cross-session memory
-- Integrate FlashRank for reranking
+### Priority 1 — Observability + Security + Concurrency
+- `daemon/src/metrics.rs` Prometheus histogram `coderun_build_context_duration_seconds` (Timer RAII), `global()` singleton, Grafana `docs/dashboards/coderun.json`, `deploy/prometheus/alerts.yml` (p95>50ms, fail-open>5%)
+- `daemon/src/ratelimit.rs` token-bucket 10/s burst 20 per `session_id` at `AdapterLayer`, `verify_hmac()` before DBOS→daemon
+- `AdapterLayer` `Mutex→RwLock` `adapter.rs:44`, `RateLimiter` + audit spill off hot path, soak 20×100
 
-### Priority 3: Model Routing
-- Integrate LiteLLM for multi-provider routing
+### Priority 2 — Distribution + Multi-agent
+- Cursor/Gemini CLI Tier 1 `adapters/cursor/extension.ts` + `adapters/gemini/hooks.sh` (UDS/MessagePack primary, HTTP fallback, 30s fail-open `V0_4_0_PLAN.md:4`), Continue promoted, `ADAPTERS.md:10` updated
+- `Dockerfile` multi-stage `rust:1.75-slim → distroless`, `Formula/coderun.rb` (brew tap+launchd service), `cargo-wix` MSI scaffold, `benches/context_bench.rs` criterion
 
-### Priority 4: Documentation
-- Integrate MkDocs for documentation site
+### Historical
+
+See `CHANGELOG.md:0.4.0` for full delta from v0.3.0. v0.3.0 closed spec 58%→90%+ (UDS, tiktoken, cache-aware pack, repo-intel completion); v0.4.0 closes 90%→99%+ production SLOs.

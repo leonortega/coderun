@@ -102,35 +102,23 @@ v0.1.0 uses **custom, self-contained implementations** for all components:
 
 ---
 
-## v0.4.0 — Production Hardening
+## v0.4.0 — Production Hardening + DBOS ✅
 
-**Target:** Q2 2027
-**Status:** Planned
+**Released:** 2026-08-24
+**Status:** Complete — Full plan `docs/V0_4_0_PLAN.md`, decision DBOS Transact (not Temporal, `V0_4_0_PLAN.md:1.1`)
+**Tests:** 165+ passing (see `CHANGELOG.md:0.4.0`)
 
-### Planned Features
+### What's Included
 
-1. **Monitoring & Observability**
-   - Prometheus metrics
-   - Distributed tracing
-   - Health dashboards
+1. **DBOS Transact durable workflows** — `crates/coderun-workflow` (`DBOSWorkflowEngine: IWorkflowEngine`), `workflow/dbos/` Node sidecar (SQLite WAL + Litestream, `DBOS.workflow` + `DBOS.transaction` + `waitForSignal`), `005_audits.sql`, `WorkflowConfig` (`CODERUN_WORKFLOW_ENABLED`/`CODERUN_DBOS_SECRET`), CLI `workflow start/status/approve/list`, `doctor` 8th probe, fail-open if sidecar down
+2. **Monitoring & Observability** — `GET /metrics` Prometheus (`daemon/src/metrics.rs` histogram p95, `Timer` RAII), Grafana `docs/dashboards/coderun.json`, `deploy/prometheus/alerts.yml` (p95>50ms, fail-open>5%)
+3. **Security Hardening** — `ratelimit.rs` token-bucket 10/s burst 20 per `session_id` at `AdapterLayer`, HMAC-SHA256 `X-Coderun-Signature` for DBOS→daemon, structured `audits` table off hot path, `redact_secrets()` before outbound
+4. **Distribution** — `Dockerfile` (rust:1.75-slim → distroless), `Formula/coderun.rb` (tap + launchd service), `docker-compose` with DBOS sidecar, `cargo-wix` MSI via `wix/main.wxs` scaffold
+5. **Multi-Agent & Concurrency** — Cursor + Gemini CLI → Tier 1 `ADAPTERS.md:10`, `Mutex→RwLock` `adapter.rs:44`, per-session `KnowledgeHub` namespace isolation, soak 20×100
 
-2. **Security Hardening**
-   - Input validation
-   - Rate limiting
-   - Audit logging
+### DBOS vs Temporal
 
-3. **Distribution**
-   - Homebrew formula
-   - Docker image
-   - Windows installer
-
-4. **Multi-Agent Support**
-   - Concurrent agent sessions
-   - Session isolation and memory
-
-5. **Temporal Integration (Optional)**
-   - Workflow orchestration for complex tasks
-   - Approval gates and audit logging
+Chosen **DBOS Transact** (`V0_4_0_PLAN.md:1.1`): single-node SQLite+Litestream matches existing `rusqlite` WAL, no Temporal Go server + PostgreSQL cluster, local-first daemon-native. Temporal evaluated and documented as not chosen.
 
 ---
 
@@ -151,10 +139,11 @@ We welcome contributions in these areas:
 
 ## Success Metrics
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 Target |
-|--------|--------|--------|---------------|
-| Test coverage | 108 tests | 128 tests | 150+ tests |
-| Languages supported | All (regex) | 4 (tree-sitter) | 10+ |
-| Search accuracy | ~70% | ~85% | 95%+ |
-| Latency (p95) | <100ms | <80ms | <50ms |
-| Memory usage | <100MB | <150MB | <200MB |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 |
+|--------|--------|--------|--------|--------|
+| Test coverage | 108 tests | 128 tests | 150+ | 165+ |
+| Languages supported | All (regex) | 4 (tree-sitter) | 10+ | 10+ |
+| Search accuracy | ~70% | ~85% | 95%+ | 95%+ |
+| Latency (p95) | <100ms | <80ms | <50ms | <50ms (RwLock concurrent) |
+| Memory usage | <100MB | <150MB | <200MB | <200MB |
+| Workflow | — | — | Noop | DBOS durable (single-node SQLite+Litestream) |

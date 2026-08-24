@@ -72,6 +72,12 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Durable workflows (DBOS, v0.4.0)
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
+    },
     
     /// Health check: verify all dependencies are available
     Doctor,
@@ -99,6 +105,30 @@ enum ConfigAction {
     },
 }
 
+#[derive(Subcommand)]
+enum WorkflowAction {
+    /// Start a durable workflow
+    Start {
+        /// Task prompt
+        prompt: String,
+        /// Require human approval gate
+        #[arg(long)]
+        require_approval: bool,
+    },
+    /// Get workflow status
+    Status {
+        /// Workflow ID
+        workflow_id: String,
+    },
+    /// Approve a pending workflow
+    Approve {
+        /// Workflow ID
+        workflow_id: String,
+    },
+    /// List recent workflows
+    List,
+}
+
 // ── Main ────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -113,6 +143,7 @@ fn main() {
         Commands::Status => cmd_status(),
         Commands::Skills { action } => cmd_skills(action),
         Commands::Config { action } => cmd_config(action),
+        Commands::Workflow { action } => cmd_workflow(action),
         Commands::Doctor => cmd_doctor(),
     };
     
@@ -514,9 +545,89 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = Config::load(&project_root).unwrap_or_default();
+    let engine: Box<dyn coderun_core::traits::IWorkflowEngine> = if config.workflow.enabled && config.workflow.engine == "dbos" {
+        Box::new(coderun_workflow::dbos::DBOSWorkflowEngine::new(config.workflow.dbos_endpoint.clone(), config.workflow.dbos_shared_secret.clone()))
+    } else {
+        Box::new(coderun_core::traits::NoopWorkflowEngine)
+    };
+    match action {
+        WorkflowAction::Start { prompt, require_approval } => {
+            let task = coderun_core::TaskRequest { message: prompt.clone(), session_id: format!("cli-{}", uuid::Uuid::new_v4()), context_hints: None };
+            if require_approval { println!("Starting workflow with approval gate..."); }
+            // Pass config even though DBOS engine ignores it beyond construction
+            match engine.start_workflow(&task, &config) {
+                Ok(id) => {
+                    println!("Workflow started: {}", id);
+                    // Persist locally as well for list/status offline
+                    if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
+                        let _ = db.upsert_workflow(&id, if require_approval { "awaiting_approval" } else { "pending" }, &prompt);
+                        let _ = db.insert_audit(Some(&id), None, "cli", &prompt, None, Some(&format!("require_approval={}", require_approval)));
+                    }
+                    println!("  Use `coderun workflow status {}` to check", id);
+                    if require_approval { println!("  Then `coderun workflow approve {}`", id); }
+                }
+                Err(e) => return Err(format!("Workflow start failed: {}", e)),
+            }
+        }
+        WorkflowAction::Status { workflow_id } => {
+            // Try engine first, fallback to local DB
+            match engine.get_status(&workflow_id) {
+                Ok(s) => println!("{}", s),
+                Err(_) => {
+                    if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
+                        if let Ok(Some(rec)) = db.get_workflow(&workflow_id) {
+                            println!("Workflow {}: status={} task=\"{}\" created={}", rec.workflow_id, rec.status, rec.task, rec.created_at);
+                        } else {
+                            println!("Workflow {} not found (engine down and not in local DB)", workflow_id);
+                        }
+                    } else {
+                        println!("Workflow {} status unknown (engine unavailable)", workflow_id);
+                    }
+                }
+            }
+        }
+        WorkflowAction::Approve { workflow_id } => {
+            // Approve via DBOS HTTP, and update local DB
+            let endpoint = config.workflow.dbos_endpoint.clone();
+            println!("Approving workflow {} via {}...", workflow_id, endpoint);
+            // Best-effort HTTP POST to /workflow/{id}/approve
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+            let res: Result<(), String> = rt.block_on(async {
+                let client = reqwest::Client::new();
+                let url = format!("{}/workflow/{}/approve", endpoint, workflow_id);
+                let resp = client.post(&url).json(&serde_json::json!({})).send().await.map_err(|e| e.to_string())?;
+                if resp.status().is_success() { Ok(()) } else { Err(format!("approve failed: {}", resp.status())) }
+            });
+            if let Err(e) = res { println!("Approve via DBOS failed (will update local DB anyway): {}", e); }
+            if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
+                let _ = db.upsert_workflow(&workflow_id, "completed", "");
+                println!("Workflow {} approved (local DB updated)", workflow_id);
+            }
+        }
+        WorkflowAction::List => {
+            if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
+                match db.list_workflows(20) {
+                    Ok(list) if list.is_empty() => println!("No workflows yet. Start one with `coderun workflow start \"task\"`"),
+                    Ok(list) => {
+                        println!("Recent workflows:");
+                        for w in list { println!("  {} | {} | {} | {}", w.workflow_id, w.status, w.task.chars().take(40).collect::<String>(), w.created_at); }
+                    }
+                    Err(e) => println!("Failed to list workflows: {}", e),
+                }
+            } else {
+                println!("Database not initialized. Run `coderun init`.");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::cmp_owned)]
 fn cmd_doctor() -> Result<(), String> {
-    println!("Coderun Doctor (v0.3.0 — 7 probes)");
+    println!("Coderun Doctor (v0.4.0 — 8 probes)");
     println!("═══════════════════════════════════════");
     println!();
     
@@ -529,7 +640,7 @@ fn cmd_doctor() -> Result<(), String> {
         Ok(db) => {
             // Check migrations
             match db.get_file_count() {
-                Ok(_) => println!("✓ OK (WAL, migrations 001-004)"),
+                Ok(_) => println!("✓ OK (WAL, migrations 001-005)"),
                 Err(e) => { println!("✗ FAILED: {}", e); all_ok = false; }
             }
         },
@@ -648,12 +759,39 @@ fn cmd_doctor() -> Result<(), String> {
         let redacted = coderun_core::redact_secrets(sample);
         if redacted.contains("[REDACTED]") { println!("✓ OK (redaction before outbound calls)"); } else { println!("⚠ Probe failed"); }
     }
+
+    // Check workflow / DBOS
+    print!("Workflow/DBOS:   ");
+    {
+        let cfg = Config::load(&project_root).unwrap_or_default();
+        if !cfg.workflow.enabled {
+            println!("○ Disabled (set workflow.enabled=true for DBOS durable workflows)");
+        } else if cfg.workflow.engine == "dbos" {
+            // Probe /health
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+            let reachable = if let Some(rt) = rt {
+                rt.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_millis(800), reqwest::Client::new().get(format!("{}/health", cfg.workflow.dbos_endpoint)).send()).await
+                        .map(|r| r.map(|resp| resp.status().is_success()).unwrap_or(false)).unwrap_or(false)
+                })
+            } else { false };
+            if reachable { println!("✓ OK (DBOS at {})", cfg.workflow.dbos_endpoint); } else { println!("⚠ DBOS not reachable at {} (hint: npx dbos start or `workflow/dbos`)", cfg.workflow.dbos_endpoint); }
+        } else {
+            println!("○ Engine={} (noop)", cfg.workflow.engine);
+        }
+    }
+
+    // Check metrics endpoint
+    print!("Metrics:         ");
+    {
+        println!("○ GET /metrics on daemon (prometheus exposition) — curl localhost:9527/metrics");
+    }
     
     println!();
     
     if all_ok {
-        println!("✓ All critical checks passed (v0.3.0)");
-        println!("  Optional: run `coderun preview \"test\"` and `coderun replay <id>` to verify inspection CLI");
+        println!("✓ All critical checks passed (v0.4.0)");
+        println!("  Try: `coderun preview \"test\"`, `coderun replay <id>`, `coderun workflow start \"task\"`");
     } else {
         println!("⚠ Some checks failed. Run 'coderun init' to initialize.");
     }

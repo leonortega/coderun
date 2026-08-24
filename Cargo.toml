@@ -12,10 +12,11 @@ members = [
     "crates/coderun-optimizer",
     "crates/coderun-events",
     "crates/coderun-storage",
+    "crates/coderun-workflow",
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 
@@ -66,5 +67,6 @@ coderun-skills = { path = "crates/coderun-skills" }
 coderun-context = { path = "crates/coderun-context" }
 coderun-router = { path = "crates/coderun-router" }
 coderun-optimizer = { path = "crates/coderun-optimizer" }
-coderun-daemon = { path = "crates/coderun-daemon" }
-coderun-cli = { path = "crates/coderun-cli" }
+  coderun-daemon = { path = "crates/coderun-daemon" }
+  coderun-cli = { path = "crates/coderun-cli" }
+  coderun-workflow = { path = "crates/coderun-workflow" }

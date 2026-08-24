@@ -20,6 +20,7 @@ pub struct Config {
     pub routing: RoutingConfig,
     pub litellm: LiteLlmConfig,
     pub rtk: RtkConfig,
+    pub workflow: WorkflowConfig,
     pub logging: LoggingConfig,
 }
 
@@ -105,6 +106,23 @@ pub struct RtkConfig {
     pub enabled: bool,
     pub max_output_tokens: usize,
     pub compression_level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkflowConfig {
+    /// Enable DBOS durable workflows
+    pub enabled: bool,
+    /// Engine: "dbos" | "noop"
+    pub engine: String,
+    /// DBOS sidecar HTTP endpoint
+    pub dbos_endpoint: String,
+    /// Shared HMAC secret for DBOS→daemon signing
+    pub dbos_shared_secret: Option<String>,
+    /// Auto-governance for tier=capable tasks
+    pub auto_governance: bool,
+    /// Tiers that require approval when governance is on
+    pub require_approval_tiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +255,19 @@ impl Default for RtkConfig {
     }
 }
 
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            engine: "noop".to_string(),
+            dbos_endpoint: "http://localhost:3001".to_string(),
+            dbos_shared_secret: None,
+            auto_governance: false,
+            require_approval_tiers: vec!["capable".to_string()],
+        }
+    }
+}
+
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
@@ -306,10 +337,6 @@ impl Config {
 
     /// Merge another config into this one (non-default values override)
     pub fn merge(&mut self, other: Config) {
-        // For each section, we do a simple overwrite if the other config
-        // differs from the default. This is a simplified merge — in a
-        // production system you'd use Option<T> to detect which fields
-        // were explicitly set.
         self.daemon = other.daemon;
         self.database = other.database;
         self.index = other.index;
@@ -320,6 +347,7 @@ impl Config {
         self.routing = other.routing;
         self.litellm = other.litellm;
         self.rtk = other.rtk;
+        self.workflow = other.workflow;
         self.logging = other.logging;
     }
 
@@ -347,6 +375,15 @@ impl Config {
         }
         if let Ok(val) = std::env::var("CODERUN_ENGRAM_ENDPOINT") {
             self.knowledge.memory_endpoint = val;
+        }
+        if let Ok(val) = std::env::var("CODERUN_DBOS_ENDPOINT") {
+            self.workflow.dbos_endpoint = val;
+        }
+        if let Ok(val) = std::env::var("CODERUN_DBOS_SECRET") {
+            self.workflow.dbos_shared_secret = Some(val);
+        }
+        if let Ok(val) = std::env::var("CODERUN_WORKFLOW_ENABLED") {
+            self.workflow.enabled = val == "true" || val == "1";
         }
     }
 
@@ -459,6 +496,16 @@ impl Config {
                     "must be one of: {}",
                     valid_levels.join(", ")
                 ),
+            }
+            .into());
+        }
+
+        // Workflow
+        let valid_engines = ["noop", "dbos"];
+        if !valid_engines.contains(&self.workflow.engine.as_str()) {
+            return Err(ConfigError::InvalidValue {
+                field: "workflow.engine".to_string(),
+                message: format!("must be one of: {}", valid_engines.join(", ")),
             }
             .into());
         }

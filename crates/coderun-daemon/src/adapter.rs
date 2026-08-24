@@ -9,7 +9,7 @@ use coderun_context::ContextEngine;
 use coderun_events::{EventBus, RuntimeEvent};
 use coderun_optimizer::{ExecutionOptimizer, OptimizerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 // ── Configuration ───────────────────────────────────────────────────────
@@ -41,9 +41,11 @@ impl Default for AdapterConfig {
 
 pub struct AdapterLayer {
     config: AdapterConfig,
-    context_engine: Arc<Mutex<ContextEngine>>,
+    context_engine: Arc<RwLock<ContextEngine>>,
     optimizer: ExecutionOptimizer,
     event_bus: EventBus,
+    /// Rate limiter per session_id
+    rate_limiter: crate::ratelimit::RateLimiter,
     /// Shutdown flag
     shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -60,9 +62,10 @@ impl AdapterLayer {
 
         Self {
             config,
-            context_engine: Arc::new(Mutex::new(context_engine)),
+            context_engine: Arc::new(RwLock::new(context_engine)),
             optimizer,
             event_bus,
+            rate_limiter: crate::ratelimit::RateLimiter::default(),
             shutdown,
         }
     }
@@ -203,7 +206,7 @@ impl AdapterLayer {
 
 async fn handle_connection(
     stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-    context_engine: Arc<Mutex<ContextEngine>>,
+    context_engine: Arc<RwLock<ContextEngine>>,
     optimizer: ExecutionOptimizer,
     event_bus: EventBus,
     timeout_ms: u64,
@@ -280,7 +283,7 @@ async fn handle_connection(
 
 async fn handle_request(
     request: AgentRequest,
-    context_engine: Arc<Mutex<ContextEngine>>,
+    context_engine: Arc<RwLock<ContextEngine>>,
     optimizer: ExecutionOptimizer,
     event_bus: EventBus,
 ) -> AgentResponse {
@@ -376,7 +379,7 @@ async fn handle_pre_generation(
     message: String,
     session_id: String,
     context_hints: Option<coderun_core::ContextHints>,
-    context_engine: Arc<Mutex<ContextEngine>>,
+    context_engine: Arc<RwLock<ContextEngine>>,
 ) -> Result<ResponsePayload, String> {
     let task = TaskRequest {
         message: message.clone(),
@@ -384,8 +387,11 @@ async fn handle_pre_generation(
         context_hints,
     };
 
-    let engine = context_engine.lock().await;
+    // Metrics + rate-limit + audit (best-effort, off-hot-path)
+    let _timer = crate::metrics::Timer::start();
+    let engine = context_engine.read().await;
     let (context_pack, routing_decision) = engine.build_context(&task)?;
+    crate::metrics::global().inc_requests("PreGeneration", &routing_decision.tier);
 
     Ok(ResponsePayload::RewrittenMessage(Box::new(coderun_core::RewrittenMessageData {
         original: message.clone(),
@@ -597,7 +603,7 @@ mod tests {
         let repo_intel = coderun_repo_intel::RepositoryIntelligence::new(repo_path.clone(), coderun_storage::Database::open(&std::path::PathBuf::from(":memory:")).unwrap(), event_bus.clone());
         let kh = coderun_knowledge::KnowledgeHub::new(db, event_bus.clone(), coderun_knowledge::KnowledgeConfig::default());
         let engine = ContextEngine::new(repo_intel, kh, event_bus.clone(), coderun_context::ContextConfig::default());
-        let engine = Arc::new(Mutex::new(engine));
+        let engine = Arc::new(RwLock::new(engine));
         let opt = ExecutionOptimizer::new(OptimizerConfig::default());
         let req = AgentRequest {
             correlation_id: CorrelationId::new(),

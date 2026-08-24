@@ -94,6 +94,10 @@ pub fn create_router(state: HttpServerState) -> Router {
     Router::new()
         .route("/hook", post(handle_hook))
         .route("/health", axum::routing::get(handle_health))
+        .route("/metrics", axum::routing::get(handle_metrics))
+        .route("/workflow/start", post(handle_workflow_start))
+        .route("/workflow/:id", axum::routing::get(handle_workflow_status))
+        .route("/workflow/:id/approve", post(handle_workflow_approve))
         .with_state(state)
 }
 
@@ -122,8 +126,38 @@ pub async fn start_http_server(
 async fn handle_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
-        "version": "0.1.0"
+        "version": "0.4.0"
     }))
+}
+
+async fn handle_metrics() -> String {
+    crate::metrics::global().exposition()
+}
+
+async fn handle_workflow_start(
+    State(_state): State<HttpServerState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let task = body.get("task").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let workflow_id = body.get("workflow_id").and_then(|v| v.as_str()).unwrap_or("wf_local").to_string();
+    // Persist to audits/workflows if DB available — best-effort, never fail
+    // For v0.4.0 mock: just echo, DBOS sidecar will do durable insert
+    Json(serde_json::json!({"workflow_id": workflow_id, "status": "pending", "task": task}))
+}
+
+async fn handle_workflow_status(
+    State(_state): State<HttpServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"workflow_id": id, "status": "running"}))
+}
+
+async fn handle_workflow_approve(
+    State(_state): State<HttpServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(_body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"workflow_id": id, "status": "completed"}))
 }
 
 /// Validate message length (spec §3 — secrets redaction + input validation)

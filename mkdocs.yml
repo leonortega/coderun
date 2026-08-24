@@ -33,6 +33,9 @@ nav:
     - Evaluation: docs/EVALUATION.md
     - Roadmap: docs/ROADMAP.md
     - V0.3.0 Plan: docs/V0_3_0_PLAN.md
+    - V0.4.0 Plan: docs/V0_4_0_PLAN.md
+    - Workflows (DBOS): docs/02-workflows/DBOS.md
+    - Dashboards: docs/dashboards/coderun.json
   - Reference:
     - Principles: docs/00-project/PRINCIPLES.md
     - Scope: docs/00-project/SCOPE.md

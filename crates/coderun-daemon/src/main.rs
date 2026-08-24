@@ -4,6 +4,8 @@
 mod adapter;
 mod http_server;
 mod lifecycle;
+mod metrics;
+mod ratelimit;
 
 use std::path::PathBuf;
 

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-24 — Production Hardening + DBOS
+
+### Added
+- **DBOS Transact** durable workflows: `crates/coderun-workflow` (`DBOSWorkflowEngine: IWorkflowEngine`), Node sidecar `workflow/dbos/` (SQLite WAL + Litestream, approval gates, audit), `005_audits.sql` (`audits` + `workflows`), CLI `coderun workflow start/status/approve/list`, `WorkflowConfig` (`CODERUN_WORKFLOW_ENABLED`, `CODERUN_DBOS_SECRET`)
+- **Observability:** `daemon/src/metrics.rs` Prometheus exposition (`GET /metrics` `coderun_requests_total`, `coderun_build_context_duration_seconds` histogram, `coderun_fail_open_total`), Grafana `docs/dashboards/coderun.json`, alerts `deploy/prometheus/alerts.yml`
+- **Security:** `daemon/src/ratelimit.rs` token-bucket (10/s burst 20 per `session_id`), HMAC-SHA256 `X-Coderun-Signature`, structured audit log off hot path
+- **Concurrency:** `AdapterLayer` `Mutex→RwLock` (`daemon/src/adapter.rs:44`), session-isolated memory namespace, soak test 20×100
+- **Distribution:** `Dockerfile` (multi-stage distroless), `Formula/coderun.rb` (brew tap with service), `deploy/docker-compose.yml` wiring DBOS sidecar
+- **Multi-agent:** Cursor + Gemini CLI promoted to Tier 1 `ADAPTERS.md:10` (RwLock session isolation proof), Continue promoted, Copilot/Factory Droid scaffolds
+- **Benchmarks:** `benches/context_bench.rs` (`criterion` p95 <50ms target)
+
+### Changed
+- Version `0.3.0 → 0.4.0` `Cargo.toml:18`
+- `http_server.rs:93` adds `/metrics`, `/workflow/*` routes; `doctor` now 8 probes (DBOS)
+
 ## [0.2.0] - 2026-08-24
 
 ### Added

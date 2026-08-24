@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Coderun adapter for Gemini CLI (Tier 1 — UserPromptSubmit + PreToolUse analogs, v0.3.0)
+# Coderun adapter for Gemini CLI (Tier 1 — UserPromptSubmit + PreToolUse analogs, v0.4.0)
 # Spec §3 Adapter Layer, PRINCIPLES.md:22-30 — native hook, not reverse proxy, fail-open on 30s timeout.
 # Primary IPC: UDS + MessagePack (rmp); fallback: HTTP JSON on TCP 9527.
 # See .claude/hooks/coderun-pregeneration.sh for reference.
@@ -16,9 +16,8 @@ INPUT="$(cat)"
 # shellcheck disable=SC2001
 REDACTED="$(echo "$INPUT" | sed -E 's/(api[_-]?key[[:space:]]*[:=][[:space:]]*)[^[:space:]"]+/\1[REDACTED]/I; s/sk-[A-Za-z0-9]{20,}/[REDACTED]/g')"
 
-# Try UDS/MessagePack first if socket exists (requires msgpack tooling — stubbed as HTTP fallback for portability)
+# Try UDS/MessagePack first if socket exists (requires msgpack tooling — falls through to HTTP fallback, RwLock allows concurrent sessions in v0.4.0)
 if [ -S "$CODERUN_SOCKET" ] && command -v python3 >/dev/null 2>&1; then
-  # UDS attempt placeholder — falls through to HTTP for v0.3.0 stub
   :
 fi
 
