@@ -153,6 +153,8 @@ else {
   if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
   else {
     $rtkOk = $false
+    # PS5.1: with EAP=Stop, redirected stderr (cargo progress) becomes a terminating error - relax locally
+    $rtkPrevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try {
       # Ensure Rust is up to date for edition2024
       if (Test-Cmd rustup) { rustup update stable 2>&1 | Out-Null; rustup default stable 2>&1 | Out-Null }
@@ -162,6 +164,7 @@ else {
     if (-not $rtkOk) {
       try { cargo install rtk --locked 2>&1 | Out-Null; if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1) (crates.io)"; $rtkOk = $true } } catch {}
     }
+    $ErrorActionPreference = $rtkPrevEap
     if (-not $rtkOk) { Warn "rtk cargo install failed - built-ins fallback (needs Rust 1.85+; try: rustup update stable; cargo install --git https://github.com/rtk-ai/rtk)" }
   }
 
@@ -245,7 +248,7 @@ else {
   }
   $ErrorActionPreference = $prevEA2
 
-  # v1: DBOS sidecar NOT built — future/workflow only, gated behind CODERUN_WORKFLOW_ENABLED=true (TASK-001)
+  # v1: DBOS sidecar NOT built -- future/workflow only, gated behind CODERUN_WORKFLOW_ENABLED=true (TASK-001)
   if ($env:CODERUN_WORKFLOW_ENABLED -eq "true" -and (Test-Path "$Root\future\workflow\dbos\package.json")) {
     Push-Location "$Root\future\workflow\dbos"
     try {
@@ -257,10 +260,10 @@ else {
     Pop-Location
   }
   # legacy workflow/dbos never built in v1 (TASK-001 purge)
-  if (Test-Path "$Root\workflow\dbos\package.json") { Warn "legacy workflow/dbos/package.json found — v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)" }
+  # if (Test-Path "$Root\workflow\dbos\package.json") { Warn "legacy workflow/dbos/package.json found -- v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)" }
 }
 
-# 0b. v1: workflow NOT part of hot path — preserved in future/workflow/ (TASK-001)
+# 0b. v1: workflow NOT part of hot path -- preserved in future/workflow/ (TASK-001)
 # No workflow config required for `coderun serve`/`doctor`. Future opt-in via --features workflow.
 $cfgPath = Join-Path $Root ".coderun/config.toml"
 try {
@@ -268,14 +271,14 @@ try {
   if (Test-Path $cfgPath) {
     $content = Get-Content -LiteralPath $cfgPath -Raw -ErrorAction SilentlyContinue
     if ($content -match '^\[workflow\]' -or $content -match 'dbos_shared_secret') {
-      Info "  workflow config found in $cfgPath — v1 ignores it (future/workflow only)"
+      Info "  workflow config found in $cfgPath -- v1 ignores it (future/workflow only)"
       if ($content -match 'dbos_shared_secret') {
         try { $cleaned = $content -replace '(?m)^\s*dbos_shared_secret\s*=.*\r?\n', ""; [System.IO.File]::WriteAllText($cfgPath, $cleaned, [System.Text.Encoding]::UTF8); Info "  Removed legacy dbos_shared_secret" } catch {}
       }
-    } else { Ok "v1 config at $cfgPath — no [workflow] required (future/workflow opt-in)" }
-  } else { Ok "v1 config — no [workflow] required (future/workflow opt-in)" }
+    } else { Ok "v1 config at $cfgPath -- no [workflow] required (future/workflow opt-in)" }
+  } else { Ok "v1 config -- no [workflow] required (future/workflow opt-in)" }
 } catch { Info "  workflow config check skipped: $_" }
-# v1: DBOS sidecar NOT started — future/workflow only (TASK-001: serve works without DBOS)
+# v1: DBOS sidecar NOT started -- future/workflow only (TASK-001: serve works without DBOS)
 
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
 if ($SkipBuild) { Info "Skipping build check (--SkipBuild)" }

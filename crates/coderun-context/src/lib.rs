@@ -272,26 +272,12 @@ impl ContextEngine {
         Ok((results.join("\n\n"), scored))
     }
 
-    /// Search code via Repository Intelligence (legacy wrapper)
-    fn search_code(
-        &self,
-        query: &str,
-        context_hints: &Option<ContextHints>,
-    ) -> Result<String, String> {
-        Ok(self.search_code_scored(query, context_hints)?.0)
-    }
-
     /// Retrieve knowledge via Knowledge Hub (scored variant)
     fn retrieve_knowledge_scored(&self, query: &str) -> Result<(String, Vec<coderun_core::KnowledgeEntry>), String> {
         let knowledge_hub = self.knowledge_hub.lock().map_err(|e| format!("Lock error: {}", e))?;
         let entries = knowledge_hub.retrieve_knowledge(query, None, 10)?;
         let formatted: Vec<String> = entries.iter().map(|e| format!("// [{}] {}: {}", e.category, e.key, e.value)).collect();
         Ok((formatted.join("\n"), entries))
-    }
-
-    /// Retrieve knowledge via Knowledge Hub (legacy)
-    fn retrieve_knowledge(&self, query: &str) -> Result<String, String> {
-        Ok(self.retrieve_knowledge_scored(query)?.0)
     }
 
     /// Match skills via Knowledge Hub (scored variant — tag overlap)
@@ -307,11 +293,6 @@ impl ContextEngine {
             (m.skill_name, m.match_score, specificity)
         }).collect();
         Ok((formatted.join("\n\n---\n\n"), scored))
-    }
-
-    /// Match skills via Knowledge Hub (legacy)
-    fn match_skills(&self, query: &str) -> Result<String, String> {
-        Ok(self.match_skills_scored(query)?.0)
     }
 
     /// Assemble the context pack with cache-aware ordering + frozen-prefix + reversible compression
@@ -715,7 +696,6 @@ mod tests {
         use coderun_knowledge::{KnowledgeConfig, KnowledgeHub};
         use coderun_repo_intel::RepositoryIntelligence;
         use coderun_storage::Database;
-        use std::path::PathBuf;
 
         // Deterministic: same repo+task+config → same pack content even with different session_id, not deduped
         std::env::set_var("CODERUN_REPO_STATE", "deterministic-test-head-abc123");

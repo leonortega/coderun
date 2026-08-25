@@ -1143,7 +1143,7 @@ export async function fetchData() {
         // modify — hash changes, should re-index
         std::fs::write(dir.join("a.rs"), "fn foo() {} fn bar() {}").unwrap();
         let s2 = ri.index_repository().unwrap();
-        assert!(s2.files_indexed >= 1 || s2.files_skipped >= 0);
+        assert!(s2.files_indexed >= 1, "modified file must be re-indexed");
         // delete — file removed, stale symbols should be cleaned
         std::fs::remove_file(dir.join("a.rs")).unwrap();
         // Re-index should detect deletion
@@ -1204,7 +1204,7 @@ export async function fetchData() {
         let db_g2 = coderun_storage::Database::open(&db_path2).unwrap();
         let mut ri_g2 = RepositoryIntelligence::new(dir2.clone(), db_g2, EventBus::new());
         let sg2 = ri_g2.index_repository().unwrap();
-        assert!(sg2.files_indexed >= 0); // no panic, incremental handles git checkout changes
+        let _ = sg2; // no panic, incremental handles git checkout changes
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }

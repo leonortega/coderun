@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   Coderun v1.0.0 (0.6.0) uninstaller (Windows PowerShell 5.1)
-  V1 scope: local runtime only — reverses scripts/install.ps1 - removes everything by default, preserves future/workflow source unless -RemoveRepo.
+  V1 scope: local runtime only -- reverses scripts/install.ps1 - removes everything by default, preserves future/workflow source unless -RemoveRepo.
 
 .DESCRIPTION
   Default (no flags): stops daemon, removes project build artifacts (target/release/coderun*.exe),
@@ -161,7 +161,7 @@ if ($KeepBuild -or -not $doRemoveRepo) {
       try { Remove-Item -LiteralPath "$Root\target" -Recurse -Force -ErrorAction Stop; Ok "removed target/ (cargo clean)" } catch { Warn "failed to remove target/: $_" }
     } else { Skip "would remove target/ (cargo clean)" }
   }
-  # v1: workflow DBOS is future/workflow only — clean both legacy and future (legacy warned in install)
+  # v1: workflow DBOS is future/workflow only -- clean both legacy and future (legacy warned in install)
   $dbosPaths = @(
     "$Root\workflow\dbos\node_modules",
     "$Root\workflow\dbos\package-lock.json",
@@ -213,13 +213,13 @@ if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins") -and -not (Get-Chil
   }
 }
 
-# 3b. Remove MCP + plugin from opencode (always for coderun entries — so plugin not showing after uninstall, file kept if has other config)
+# 3b. Remove MCP + plugin from opencode (always for coderun entries -- so plugin not showing after uninstall, file kept if has other config)
 Info "Removing opencode MCP (codebase-memory + engram) + plugin (opencode-coderun)..."
 function Remove-OpencodeMcp($configPath, $isRepo) {
   $displayPath = $configPath
   if ($isRepo) { $displayPath = $configPath -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""; if ($displayPath -eq $configPath) { $displayPath = Split-Path $configPath -Leaf } ; if ($configPath -match "\.opencode") { $displayPath = ".opencode/" + (Split-Path $configPath -Leaf) } else { $displayPath = $displayPath } }
   if (-not (Test-Path $configPath)) { Skip "MCP config not found at $displayPath"; return }
-  # v1: always clean coderun plugin/mcp from .opencode, even without -RemoveRepo — otherwise plugin/MCP still shows after uninstall+restart
+  # v1: always clean coderun plugin/mcp from .opencode, even without -RemoveRepo -- otherwise plugin/MCP still shows after uninstall+restart
   try {
     $raw = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { Skip "MCP config empty at $displayPath"; return }
@@ -361,7 +361,7 @@ if (-not $doRemoveExternal) {
       }
     } else { Skip "keeping .opencode/engram/ (contains other files)" }
   }
-  # 3c. Opencode npm plugin (file:../packages/opencode-coderun) — installed into .opencode/node_modules
+  # 3c. Opencode npm plugin (file:../packages/opencode-coderun) -- installed into .opencode/node_modules
   Info "Removing opencode npm plugin (opencode-coderun)..."
   $opencodeNodeModules = @(
     (Join-Path $Root ".opencode\node_modules\opencode-coderun"),
