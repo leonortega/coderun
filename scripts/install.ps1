@@ -32,7 +32,7 @@ function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
-Info "Coderun v0.5.0 installer - $Root"
+Info "Coderun v0.5.0 installer"
 
 # 0. Prereqs
 if (-not (Test-Cmd rustc)) {
@@ -233,21 +233,21 @@ try {
   if (-not (Test-Path $cfgPath)) {
     $initCfg = "[workflow]`r`nenabled = true`r`nengine = `"dbos`"`r`ndbos_endpoint = `"http://localhost:3001`"`r`n"
     Set-Content -LiteralPath $cfgPath -Value $initCfg -Encoding UTF8
-    Ok "Created $cfgPath with [workflow] dbos"
+    Ok "Created .coderun/config.toml with [workflow] dbos"
   } else {
     $content = Get-Content -LiteralPath $cfgPath -Raw -ErrorAction SilentlyContinue
     if ($content -notmatch '\[workflow\]') {
       $append = "`r`n[workflow]`r`nenabled = true`r`nengine = `"dbos`"`r`ndbos_endpoint = `"http://localhost:3001`"`r`n"
-      Add-Content -LiteralPath $cfgPath -Value $append -Encoding UTF8; Ok "Appended [workflow] to $cfgPath"
+      Add-Content -LiteralPath $cfgPath -Value $append -Encoding UTF8; Ok "Appended [workflow] to .coderun/config.toml"
     } else {
-      Ok "workflow config at $cfgPath"
+      Ok "workflow config at .coderun/config.toml"
     }
     # Remove legacy dbos_shared_secret if present (local sidecar no longer uses CODERUN_DBOS_SECRET)
     if ($content -match 'dbos_shared_secret') {
       try {
         $cleaned = $content -replace '(?m)^\s*dbos_shared_secret\s*=.*\r?\n', ""
         [System.IO.File]::WriteAllText($cfgPath, $cleaned, [System.Text.Encoding]::UTF8)
-        Info "  Removed legacy dbos_shared_secret from $cfgPath (no longer required for local DBOS)"
+        Info "  Removed legacy dbos_shared_secret from .coderun/config.toml (no longer required for local DBOS)"
       } catch {}
     }
   }
@@ -315,8 +315,8 @@ if ($SkipBuild) { Info "Skipping build check (--SkipBuild)" }
 Info "Checking prebuilt coderun..."
 $prebuilt = Join-Path $Root "target\release\coderun.exe"
 $prebuiltDaemon = Join-Path $Root "target\release\coderun-daemon.exe"
-if (Test-Path $prebuilt) { Ok "coderun $prebuilt" } else { Warn "coderun binary not found at $prebuilt - build manually: cargo build --release"; Fail "prebuilt coderun.exe missing - expected at target\release\coderun.exe" }
-if (Test-Path $prebuiltDaemon) { Ok "coderun-daemon $prebuiltDaemon" } else { Warn "coderun-daemon.exe not found at $prebuiltDaemon" }
+if (Test-Path $prebuilt) { Ok "coderun at target/release/coderun.exe" } else { Warn "coderun binary not found at target/release/coderun.exe - build manually: cargo build --release"; Fail "prebuilt coderun.exe missing - expected at target/release/coderun.exe" }
+if (Test-Path $prebuiltDaemon) { Ok "coderun-daemon at target/release/coderun-daemon.exe" } else { Warn "coderun-daemon not found at target/release/coderun-daemon.exe" }
 
 # 2. init + index + doctor
 Info "Initializing repo..."
@@ -324,18 +324,46 @@ Info "Initializing repo..."
 & ".\target\release\coderun.exe" index 2>&1 | Out-Null
 & ".\target\release\coderun.exe" doctor
 
-# 3. opencode MCPs + plugin
+# 3. opencode MCPs + plugin (use .opencode folder, no absolute repo path)
 Info "Configuring opencode MCPs and plugin..."
-$opencodeDir = "$Root\.opencode"
+$opencodeDir = Join-Path $Root ".opencode"
 $opencodeCfg = Join-Path $opencodeDir "opencode.jsonc"
 New-Item -ItemType Directory -Force -Path $opencodeDir | Out-Null
-# Resolve engram binary for MCP (use installed bin if available, else repo fallback)
-$engramMcpBin = $engramBinPath
-if (-not (Test-Path $engramMcpBin)) {
-  $engramMcpBin = (Get-Command engram -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
-  if (-not $engramMcpBin) { $engramMcpBin = "$env:USERPROFILE\bin\engram.exe" }
+# Copy engram binary into .opencode/engram/ for portable relative reference (never use C:\LeonRepository\coderun\ absolute)
+$opencodeEngramDir = Join-Path $opencodeDir "engram"
+$opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
+New-Item -ItemType Directory -Force -Path $opencodeEngramDir | Out-Null
+# Resolve source engram binary (prefer installed user bin, else repo zip)
+$engramSrc = $null
+if (Test-Path $engramBinPath) { $engramSrc = $engramBinPath }
+elseif (Get-Command engram -ErrorAction SilentlyContinue) { $engramSrc = (Get-Command engram -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source) }
+if ($engramSrc -and (Test-Path $engramSrc)) {
+  try {
+    Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBin -Force
+    # Also copy without .exe for Unix portability
+    $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
+    Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBinNoExt -Force
+    Ok "engram copied to .opencode/engram/engram(.exe) (portable)"
+  } catch { Warn "failed to copy engram to .opencode: $_" }
+} else {
+  # Fallback: copy directly from .coderun/engram zip if user bin not yet available
+  $repoZip = Get-ChildItem -LiteralPath "$Root\.coderun\engram" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($repoZip) {
+    try {
+      $tmp = Join-Path $env:TEMP "engram_opencode_copy"
+      if (Test-Path $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+      Expand-Archive -LiteralPath $repoZip.FullName -DestinationPath $tmp -Force
+      $src = Get-ChildItem -LiteralPath $tmp -Recurse -Filter "engram.exe" | Select-Object -First 1
+      if ($src) {
+        Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBin -Force
+        $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
+        Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBinNoExt -Force
+        Ok "engram copied to .opencode/engram/engram(.exe) (from zip)"
+      }
+    } catch { Warn "failed to copy engram to .opencode from zip: $_" }
+  }
 }
-$engramEscaped = $engramMcpBin -replace '\\', '\\'
+# Use relative .opencode path for MCP (never absolute C:\LeonRepository\coderun\)
 $opencodeJsonc = @"
 {
     "`$schema": "https://opencode.ai/config.json",
@@ -346,20 +374,20 @@ $opencodeJsonc = @"
             "enabled": true
         },
         "engram": {
-            "command": ["$engramEscaped", "mcp", "--tools=agent"],
+            "command": [".opencode/engram/engram.exe", "mcp", "--tools=agent"],
             "type": "local",
             "enabled": true
         }
     }
 }
 "@
-try { Set-Content -LiteralPath $opencodeCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode MCPs at $opencodeCfg (codebase-memory + engram -> $engramMcpBin)" } catch { Warn "failed to write $opencodeCfg : $_" }
+try { Set-Content -LiteralPath $opencodeCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode MCPs at .opencode/opencode.jsonc (codebase-memory + engram -> .opencode/engram/engram.exe)" } catch { Warn "failed to write $opencodeCfg : $_" }
 
 $srcPlugin = Join-Path $opencodeDir "plugins\coderun.ts"
 $pluginsDir = Join-Path $opencodeDir "plugins"
 New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
 if (Test-Path $srcPlugin) {
-  Ok "opencode plugin at $srcPlugin"
+  Ok "opencode plugin at .opencode/plugins/coderun.ts"
   # Global fallback for opencode installed via user config
   $globalPluginDir = "$env:USERPROFILE\.config\opencode\plugins"
   try {

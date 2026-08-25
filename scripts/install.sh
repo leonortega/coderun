@@ -9,7 +9,7 @@ SKIP_BUILD=false; SKIP_EXTERNAL=false
 for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; esac; done
 info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
-info "Coderun v0.5.0 installer - $ROOT"
+info "Coderun v0.5.0 installer"
 command -v rustc >/dev/null || { info "Installing Rust 1.75..."; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.75; export PATH="$HOME/.cargo/bin:$PATH"; }
 ok "rustc $(rustc --version)"
 command -v node >/dev/null || warn "node not found - install Node >=20 https://nodejs.org"; command -v node >/dev/null && ok "node $(node --version)"
@@ -73,13 +73,13 @@ enabled = true
 engine = "dbos"
 dbos_endpoint = "http://localhost:3001"
 EOF
-  ok "Created $CFG_PATH with [workflow] dbos"
+  ok "Created .coderun/config.toml with [workflow] dbos"
 else
   if ! grep -q "^\[workflow\]" "$CFG_PATH" 2>/dev/null; then
     printf '\n[workflow]\nenabled = true\nengine = "dbos"\ndbos_endpoint = "http://localhost:3001"\n' >> "$CFG_PATH"
-    ok "Appended [workflow] to $CFG_PATH"
+    ok "Appended [workflow] to .coderun/config.toml"
   else
-    ok "workflow config at $CFG_PATH"
+    ok "workflow config at .coderun/config.toml"
   fi
   # Remove legacy dbos_shared_secret if present (local sidecar no longer uses CODERUN_DBOS_SECRET)
   if grep -q "dbos_shared_secret" "$CFG_PATH" 2>/dev/null; then
@@ -139,8 +139,8 @@ fi
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
 if [ "$SKIP_BUILD" = true ]; then info "Skipping build check (--skip-build)"; fi
 info "Checking prebuilt coderun..."
-if [ -f "$ROOT/target/release/coderun" ] || [ -f "$ROOT/target/release/coderun.exe" ]; then ok "coderun at $ROOT/target/release/coderun(.exe)"; else warn "coderun binary not found at $ROOT/target/release/coderun - build manually: cargo build --release"; echo "prebuilt coderun missing - expected at target/release/coderun" >&2; exit 1; fi
-if [ -f "$ROOT/target/release/coderun-daemon" ] || [ -f "$ROOT/target/release/coderun-daemon.exe" ]; then ok "coderun-daemon at $ROOT/target/release/coderun-daemon(.exe)"; else warn "coderun-daemon not found at $ROOT/target/release"; fi
+if [ -f "$ROOT/target/release/coderun" ] || [ -f "$ROOT/target/release/coderun.exe" ]; then ok "coderun at target/release/coderun(.exe)"; else warn "coderun binary not found at target/release/coderun - build manually: cargo build --release"; echo "prebuilt coderun missing - expected at target/release/coderun" >&2; exit 1; fi
+if [ -f "$ROOT/target/release/coderun-daemon" ] || [ -f "$ROOT/target/release/coderun-daemon.exe" ]; then ok "coderun-daemon at target/release/coderun-daemon(.exe)"; else warn "coderun-daemon not found at target/release/coderun-daemon"; fi
 
 info "Initializing repo..."
 CODERUN_BIN="$ROOT/target/release/coderun"
@@ -149,13 +149,28 @@ CODERUN_BIN="$ROOT/target/release/coderun"
 "$CODERUN_BIN" index 2>/dev/null || true
 "$CODERUN_BIN" doctor
 
-info "Configuring opencode MCPs and plugin..."
-mkdir -p "$ROOT/.opencode" "$ROOT/.opencode/plugins"
-ENGRAM_MCP_BIN="$HOME/bin/engram"
-if [ -f "$ENGRAM_MCP_BIN" ]; then ENGRAM_MCP="$ENGRAM_MCP_BIN"
-elif command -v engram >/dev/null 2>&1; then ENGRAM_MCP=$(command -v engram)
-else ENGRAM_MCP="$HOME/bin/engram"
+info "Configuring opencode MCPs and plugin (use .opencode folder, no absolute repo path)..."
+mkdir -p "$ROOT/.opencode" "$ROOT/.opencode/plugins" "$ROOT/.opencode/engram"
+# Copy engram binary into .opencode/engram/ for portable relative reference (never use C:\LeonRepository\coderun\ absolute)
+ENGRAM_SRC=""
+if [ -f "$HOME/bin/engram" ]; then ENGRAM_SRC="$HOME/bin/engram"
+elif [ -f "$HOME/bin/engram.exe" ]; then ENGRAM_SRC="$HOME/bin/engram.exe"
+elif command -v engram >/dev/null 2>&1; then ENGRAM_SRC=$(command -v engram)
 fi
+if [ -n "$ENGRAM_SRC" ] && [ -f "$ENGRAM_SRC" ]; then
+  cp -f "$ENGRAM_SRC" "$ROOT/.opencode/engram/engram" 2>/dev/null && chmod +x "$ROOT/.opencode/engram/engram" 2>/dev/null && ok "engram copied to .opencode/engram/engram (portable)"
+  # Also handle .exe for Windows
+  if [ -f "$ROOT/.opencode/engram/engram" ] && [ ! -f "$ROOT/.opencode/engram/engram.exe" ]; then cp -f "$ROOT/.opencode/engram/engram" "$ROOT/.opencode/engram/engram.exe" 2>/dev/null || true; fi
+else
+  REPO_ZIP=$(ls "$ROOT/.coderun/engram/"*.zip 2>/dev/null | head -1 || true)
+  if [ -n "$REPO_ZIP" ] && [ -f "$REPO_ZIP" ] && command -v unzip >/dev/null 2>&1; then
+    mkdir -p "$HOME/.cache/tmp/engram_opencode" 2>/dev/null
+    unzip -o "$REPO_ZIP" -d "$HOME/.cache/tmp/engram_opencode" 2>/dev/null
+    SRC=$(find "$HOME/.cache/tmp/engram_opencode" -name "engram*" -type f 2>/dev/null | head -1 || true)
+    if [ -n "$SRC" ] && [ -f "$SRC" ]; then cp -f "$SRC" "$ROOT/.opencode/engram/engram" 2>/dev/null && chmod +x "$ROOT/.opencode/engram/engram" 2>/dev/null && ok "engram copied to .opencode/engram/engram (from zip)"; fi
+  fi
+fi
+# Use relative .opencode path for MCP (never absolute C:\LeonRepository\coderun\)
 cat > "$ROOT/.opencode/opencode.jsonc" <<EOF
 {
     "\$schema": "https://opencode.ai/config.json",
@@ -166,22 +181,22 @@ cat > "$ROOT/.opencode/opencode.jsonc" <<EOF
             "enabled": true
         },
         "engram": {
-            "command": ["$ENGRAM_MCP", "mcp", "--tools=agent"],
+            "command": [".opencode/engram/engram", "mcp", "--tools=agent"],
             "type": "local",
             "enabled": true
         }
     }
 }
 EOF
-ok "opencode MCPs at $ROOT/.opencode/opencode.jsonc (codebase-memory + engram -> $ENGRAM_MCP)"
+ok "opencode MCPs at .opencode/opencode.jsonc (codebase-memory + engram -> .opencode/engram/engram)"
 SRC_PLUGIN="$ROOT/.opencode/plugins/coderun.ts"
 if [ -f "$SRC_PLUGIN" ]; then
-  ok "opencode plugin at $SRC_PLUGIN"
+  ok "opencode plugin at .opencode/plugins/coderun.ts"
   GLOBAL_PLUGIN_DIR="$HOME/.config/opencode/plugins"
   mkdir -p "$GLOBAL_PLUGIN_DIR" 2>/dev/null
   cp -f "$SRC_PLUGIN" "$GLOBAL_PLUGIN_DIR/" 2>/dev/null && ok "opencode plugin copied to $GLOBAL_PLUGIN_DIR (global)" || info "  global plugin copy skipped"
   info "Restart opencode to load plugin (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527)"
-else warn "opencode plugin source not found at $SRC_PLUGIN"; fi
+else warn "opencode plugin source not found at .opencode/plugins/coderun.ts"; fi
 
 info "Done - next: coderun serve | coderun preview 'add auth' | coderun workflow start 'refactor' --require-approval | curl http://127.0.0.1:9527/metrics"
 info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"

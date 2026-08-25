@@ -7,7 +7,7 @@
             "enabled": true
         },
         "engram": {
-            "command": ["C:\\Users\\marce\\bin\\engram.exe", "mcp", "--tools=agent"],
+            "command": [".opencode/engram/engram.exe", "mcp", "--tools=agent"],
             "type": "local",
             "enabled": true
         }
