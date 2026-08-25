@@ -191,12 +191,12 @@ EOF
 ok "opencode MCPs at .opencode/opencode.jsonc (codebase-memory + engram -> .opencode/engram/engram)"
 SRC_PLUGIN="$ROOT/.opencode/plugins/coderun.ts"
 if [ -f "$SRC_PLUGIN" ]; then
-  ok "opencode plugin at .opencode/plugins/coderun.ts"
+  ok "opencode plugin 'coderun' at .opencode/plugins/coderun.ts"
   GLOBAL_PLUGIN_DIR="$HOME/.config/opencode/plugins"
   mkdir -p "$GLOBAL_PLUGIN_DIR" 2>/dev/null
-  cp -f "$SRC_PLUGIN" "$GLOBAL_PLUGIN_DIR/" 2>/dev/null && ok "opencode plugin copied to $GLOBAL_PLUGIN_DIR (global)" || info "  global plugin copy skipped"
-  info "Restart opencode to load plugin (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527)"
-else info "  opencode plugin not in repository (removed) - skipping"; fi
+  cp -f "$SRC_PLUGIN" "$GLOBAL_PLUGIN_DIR/" 2>/dev/null && ok "opencode plugin 'coderun' copied to global" || info "  global plugin copy skipped"
+  info "Restart opencode to load plugin 'coderun' (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527)"
+else info "  opencode plugin 'coderun' not in repository (removed) - skipping"; fi
 
 info "Done - next: coderun serve | coderun preview 'add auth' | coderun workflow start 'refactor' --require-approval | curl http://127.0.0.1:9527/metrics"
 info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"

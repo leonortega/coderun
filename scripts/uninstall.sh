@@ -73,12 +73,12 @@ else
   done
 fi
 
-# 3. Plugins (use .opencode folder, never absolute repo)
+# 3. Plugins (use .opencode folder, never absolute repo) - plugin 'coderun'
 info "Removing opencode plugins..."
 for pp in ".opencode/plugins/coderun.ts" "$HOME/.config/opencode/plugins/coderun.ts"; do
   check_pp="$pp"
   [ "$pp" = ".opencode/plugins/coderun.ts" ] && check_pp="$ROOT/.opencode/plugins/coderun.ts"
-  if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$check_pp" && ok "removed plugin $pp"; fi; else skip "not found $pp"; fi
+  if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm plugin 'coderun' at $pp"; else rm -f "$check_pp" && ok "removed plugin 'coderun' at $pp"; fi; else skip "not found plugin 'coderun' at $pp"; fi
 done
 # Also clean portable engram in .opencode
 for pp in ".opencode/engram/engram" ".opencode/engram/engram.exe"; do

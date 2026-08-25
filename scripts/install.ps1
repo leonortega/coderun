@@ -389,16 +389,16 @@ $srcPlugin = Join-Path $opencodeDir "plugins\coderun.ts"
 $pluginsDir = Join-Path $opencodeDir "plugins"
 New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
 if (Test-Path $srcPlugin) {
-  Ok "opencode plugin at .opencode/plugins/coderun.ts"
+  Ok "opencode plugin 'coderun' at .opencode/plugins/coderun.ts"
   # Global fallback for opencode installed via user config
   $globalPluginDir = "$env:USERPROFILE\.config\opencode\plugins"
   try {
     New-Item -ItemType Directory -Force -Path $globalPluginDir | Out-Null
     Copy-Item -LiteralPath $srcPlugin -Destination $globalPluginDir -Force
-    Ok "opencode plugin copied to $globalPluginDir (global)"
+    Ok "opencode plugin 'coderun' copied to global"
   } catch { Info "  global plugin copy skipped: $_" }
-  Info "Restart opencode to load plugin (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open)"
-} else { Info "  opencode plugin not in repository (removed) - skipping" }
+  Info "Restart opencode to load plugin 'coderun' (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open)"
+} else { Info "  opencode plugin 'coderun' not in repository (removed) - skipping" }
 
 Info "Done - next: coderun serve  |  coderun preview 'add auth'  |  coderun workflow start 'refactor' --require-approval  |  curl http://127.0.0.1:9527/metrics"
 Info "Docs: mkdocs serve  |  promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
