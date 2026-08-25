@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   Coderun v0.5.0 first-class installer (Windows PowerShell 5.1)
@@ -329,7 +329,7 @@ Info "Configuring opencode MCPs and plugin..."
 $opencodeDir = Join-Path $Root ".opencode"
 $opencodeCfg = Join-Path $opencodeDir "opencode.jsonc"
 New-Item -ItemType Directory -Force -Path $opencodeDir | Out-Null
-# Copy engram binary into .opencode/engram/ for portable relative reference (never use C:\LeonRepository\coderun\ absolute)
+# Copy engram binary into .opencode/engram/ for portable relative reference (never use  absolute)
 $opencodeEngramDir = Join-Path $opencodeDir "engram"
 $opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
 New-Item -ItemType Directory -Force -Path $opencodeEngramDir | Out-Null
@@ -363,7 +363,7 @@ if ($engramSrc -and (Test-Path $engramSrc)) {
     } catch { Warn "failed to copy engram to .opencode from zip: $_" }
   }
 }
-# Use relative .opencode path for MCP (never absolute C:\LeonRepository\coderun\)
+# Use relative .opencode path for MCP (never absolute )
 $opencodeJsonc = @"
 {
     "`$schema": "https://opencode.ai/config.json",

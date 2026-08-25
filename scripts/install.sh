@@ -151,7 +151,7 @@ CODERUN_BIN="$ROOT/target/release/coderun"
 
 info "Configuring opencode MCPs and plugin (use .opencode folder, no absolute repo path)..."
 mkdir -p "$ROOT/.opencode" "$ROOT/.opencode/plugins" "$ROOT/.opencode/engram"
-# Copy engram binary into .opencode/engram/ for portable relative reference (never use C:\LeonRepository\coderun\ absolute)
+# Copy engram binary into .opencode/engram/ for portable relative reference (never use  absolute)
 ENGRAM_SRC=""
 if [ -f "$HOME/bin/engram" ]; then ENGRAM_SRC="$HOME/bin/engram"
 elif [ -f "$HOME/bin/engram.exe" ]; then ENGRAM_SRC="$HOME/bin/engram.exe"
@@ -170,7 +170,7 @@ else
     if [ -n "$SRC" ] && [ -f "$SRC" ]; then cp -f "$SRC" "$ROOT/.opencode/engram/engram" 2>/dev/null && chmod +x "$ROOT/.opencode/engram/engram" 2>/dev/null && ok "engram copied to .opencode/engram/engram (from zip)"; fi
   fi
 fi
-# Use relative .opencode path for MCP (never absolute C:\LeonRepository\coderun\)
+# Use relative .opencode path for MCP (never absolute )
 cat > "$ROOT/.opencode/opencode.jsonc" <<EOF
 {
     "\$schema": "https://opencode.ai/config.json",

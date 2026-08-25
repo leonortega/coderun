@@ -33,7 +33,7 @@ warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 skip(){ echo -e "  \033[90m[SKIP]\033[0m $*"; }
 run(){ if $DRY_RUN; then skip "would $*"; else eval "$*"; fi; }
 
-info "Coderun v0.6.0 uninstaller - $ROOT"
+info "Coderun v0.6.0 uninstaller"
 $DRY_RUN && warn "DryRun active - no changes will be made"
 info "Options: RemoveExternal(effective=$DO_REMOVE_EXTERNAL KeepExternal=$KEEP_EXTERNAL) RemoveData(effective=$DO_REMOVE_DATA KeepData=$KEEP_DATA) KeepBuild=$KEEP_BUILD Force=$FORCE"
 
@@ -49,32 +49,45 @@ for p in coderun-daemon coderun; do
     if $DRY_RUN; then skip "would pkill $p"; else pkill -TERM "$p" 2>/dev/null || true; ok "stopped $p"; fi
   else skip "no running $p process"; fi
 done
-for sock in "$HOME/.coderun/coderun.sock" "/tmp/coderun.sock" "$ROOT/.coderun/coderun.sock" "/tmp/coderun.sock.lock"; do
-  if [ -e "$sock" ]; then
-    if $DRY_RUN; then skip "would rm $sock"; else rm -f "$sock" && ok "removed socket $sock" || warn "failed $sock"; fi
+for sock in "$HOME/.coderun/coderun.sock" "/tmp/coderun.sock" ".coderun/coderun.sock" "/tmp/coderun.sock.lock"; do
+  # Use absolute for check but log relative for repo file
+  check_sock="$sock"
+  [ "$sock" = ".coderun/coderun.sock" ] && check_sock="$ROOT/.coderun/coderun.sock"
+  if [ -e "$check_sock" ]; then
+    if $DRY_RUN; then skip "would rm $sock"; else rm -f "$check_sock" && ok "removed socket $sock" || warn "failed $sock"; fi
   fi
 done
 
-# 2. Build artifacts
+# 2. Build artifacts (use .opencode/.coderun relative, not absolute repo)
 if $KEEP_BUILD; then info "Skipping build artifact removal (--keep-build)";
 else
   info "Removing build artifacts..."
-  for bin in "$ROOT/target/release/coderun" "$ROOT/target/release/coderun-daemon" "$ROOT/target/debug/coderun" "$ROOT/target/debug/coderun-daemon"; do
-    if [ -e "$bin" ]; then if $DRY_RUN; then skip "would rm $bin"; else rm -f "$bin" && ok "removed $bin"; fi; else skip "not found $bin"; fi
+  for bin in "target/release/coderun" "target/release/coderun-daemon" "target/debug/coderun" "target/debug/coderun-daemon"; do
+    if [ -e "$ROOT/$bin" ]; then if $DRY_RUN; then skip "would rm $bin"; else rm -f "$ROOT/$bin" && ok "removed $bin"; fi; else skip "not found $bin"; fi
   done
   if $DO_REMOVE_DATA && [ -d "$ROOT/target" ]; then
-    if $DRY_RUN; then skip "would rm -rf $ROOT/target"; else rm -rf "$ROOT/target" && ok "removed target/ (cargo clean)"; fi
+    if $DRY_RUN; then skip "would rm -rf target/"; else rm -rf "$ROOT/target" && ok "removed target/ (cargo clean)"; fi
   else skip "keeping target/ cache (--keep-data)"; fi
-  for p in "$ROOT/workflow/dbos/node_modules" "$ROOT/workflow/dbos/package-lock.json"; do
-    if [ -e "$p" ]; then if $DRY_RUN; then skip "would rm -rf $p"; else rm -rf "$p" && ok "removed $p"; fi; else skip "not found $p"; fi
+  for p in "workflow/dbos/node_modules" "workflow/dbos/package-lock.json"; do
+    if [ -e "$ROOT/$p" ]; then if $DRY_RUN; then skip "would rm -rf $p"; else rm -rf "$ROOT/$p" && ok "removed $p"; fi; else skip "not found $p"; fi
   done
 fi
 
-# 3. Plugins
+# 3. Plugins (use .opencode folder, never absolute repo)
 info "Removing opencode plugins..."
-for pp in "$ROOT/.opencode/plugins/coderun.ts" "$HOME/.config/opencode/plugins/coderun.ts"; do
-  if [ -e "$pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$pp" && ok "removed plugin $pp"; fi; else skip "not found $pp"; fi
+for pp in ".opencode/plugins/coderun.ts" "$HOME/.config/opencode/plugins/coderun.ts"; do
+  check_pp="$pp"
+  [ "$pp" = ".opencode/plugins/coderun.ts" ] && check_pp="$ROOT/.opencode/plugins/coderun.ts"
+  if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$check_pp" && ok "removed plugin $pp"; fi; else skip "not found $pp"; fi
 done
+# Also clean portable engram in .opencode
+for pp in ".opencode/engram/engram" ".opencode/engram/engram.exe"; do
+  check_pp="$ROOT/$pp"
+  if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$check_pp" && ok "removed $pp (portable engram)"; fi; fi
+done
+if [ -d "$ROOT/.opencode/engram" ] && [ -z "$(ls -A "$ROOT/.opencode/engram" 2>/dev/null)" ]; then
+  if $DRY_RUN; then skip "would rmdir .opencode/engram"; else rmdir "$ROOT/.opencode/engram" 2>/dev/null && ok "removed empty .opencode/engram/"; fi
+fi
 
 # 4. External tools (default: remove)
 if ! $DO_REMOVE_EXTERNAL; then info "Skipping external tools (--keep-external)";
@@ -87,8 +100,8 @@ else
       if npm list -g "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g $pkg"; else npm uninstall -g "$pkg" 2>/dev/null && ok "uninstalled $pkg (npm -g)"; fi; else skip "$pkg not installed"; fi
     done
   fi
-  if [ -d "$ROOT/../engram" ]; then if $DRY_RUN; then skip "would rm -rf $ROOT/../engram"; else rm -rf "$ROOT/../engram" && ok "removed engram clone"; fi; else skip "engram clone not found"; fi
-  if [ -f "$HOME/.coderun/models/flashrank.onnx" ]; then if $DRY_RUN; then skip "would rm $HOME/.coderun/models/flashrank.onnx"; else rm -f "$HOME/.coderun/models/flashrank.onnx" && ok "removed FlashRank model"; fi; else skip "FlashRank model not found"; fi
+  if [ -d "$ROOT/../engram" ]; then if $DRY_RUN; then skip "would rm -rf ../engram"; else rm -rf "$ROOT/../engram" && ok "removed engram clone at ../engram"; fi; else skip "engram clone not found at ../engram"; fi
+  if [ -f "$HOME/.coderun/models/flashrank.onnx" ]; then if $DRY_RUN; then skip "would rm ~/.coderun/models/flashrank.onnx"; else rm -f "$HOME/.coderun/models/flashrank.onnx" && ok "removed FlashRank model at ~/.coderun/models/flashrank.onnx"; fi; else skip "FlashRank model not found"; fi
   if command -v pip3 >/dev/null 2>&1; then
     for pkg in litellm mkdocs mkdocs-material pymdown-extensions; do
       if pip3 show "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would pip3 uninstall -y $pkg"; else pip3 uninstall -y "$pkg" 2>/dev/null && ok "uninstalled $pkg (pip)"; fi; else skip "$pkg not installed"; fi
@@ -96,14 +109,16 @@ else
   fi
 fi
 
-# 5. Data (default: remove)
+# 5. Data (default: remove) - use .coderun relative
 if ! $DO_REMOVE_DATA; then
   info "Skipping data removal (--keep-data)"
-  info "  Kept: ~/.coderun and $ROOT/.coderun"
+  info "  Kept: ~/.coderun and .coderun/"
 else
   info "Removing data (strict default)..."
   for d in "$HOME/.coderun" "$ROOT/.coderun"; do
-    if [ -d "$d" ] || [ -f "$d" ]; then if $DRY_RUN; then skip "would rm -rf $d"; else rm -rf "$d" && ok "removed $d"; fi; else skip "not found $d"; fi
+    disp="$d"
+    [ "$d" = "$ROOT/.coderun" ] && disp=".coderun/"
+    if [ -d "$d" ] || [ -f "$d" ]; then if $DRY_RUN; then skip "would rm -rf $disp"; else rm -rf "$d" && ok "removed $disp"; fi; else skip "not found $disp"; fi
   done
 fi
 

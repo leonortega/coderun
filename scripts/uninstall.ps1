@@ -85,13 +85,13 @@ $doRemoveRepo = $RemoveRepo  # only if explicitly requested
 
 if ($DryRun) { $PSBoundParameters["WhatIf"] = $true; $WhatIfPreference = $true }
 
-Info "Coderun v0.6.0 uninstaller - $Root"
+Info "Coderun v0.6.0 uninstaller"
 if ($WhatIfPreference) { Warn "DryRun/WhatIf active - no changes will be made" }
 Info "Options: RemoveExternal( effective=$doRemoveExternal KeepExternal=$KeepExternal ) RemoveData( effective=$doRemoveData KeepData=$KeepData ) KeepBuild=$KeepBuild Force=$Force"
 
 # 0. Confirmation for destructive data removal - only for repository data (global is safe to delete)
 if ($doRemoveRepo -and $doRemoveData -and -not $Force -and -not $WhatIfPreference) {
-  $msg = "This will permanently delete repository .coderun/ (config, skills, models) at $Root\.coderun. Global ~\.coderun will also be deleted. Continue?"
+  $msg = "This will permanently delete repository .coderun/ (config, skills, models) at .coderun/. Global ~\.coderun will also be deleted. Continue?"
   $choice = Read-Host "$msg [y/N]"
   if ($choice -notin @("y","Y","yes","YES")) {
     Info "Aborted by user. Re-run with -Force to skip prompt or -KeepData to keep data."
@@ -136,8 +136,8 @@ foreach ($sp in $socketPaths | Select-Object -Unique) {
 # 2. Remove build artifacts - repository folders are NEVER deleted by default (use -RemoveRepo)
 if ($KeepBuild -or -not $doRemoveRepo) {
   Info "Skipping build artifact removal (repository folders preserved - use -RemoveRepo to delete target/)"
-  Skip "keeping $Root\target (repository - not deleted)"
-  Skip "keeping $Root\workflow\dbos\node_modules (repository - not deleted)"
+  Skip "keeping target/ (repository - not deleted)"
+  Skip "keeping workflow/dbos/node_modules (repository - not deleted)"
 } else {
   Info "Removing build artifacts (--RemoveRepo)..."
   $binaries = @(
@@ -147,29 +147,31 @@ if ($KeepBuild -or -not $doRemoveRepo) {
     "$Root\target\debug\coderun-daemon.exe"
   )
   foreach ($bin in $binaries) {
+    $display = $bin -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
     if (Test-Path $bin) {
-      if ($PSCmdlet.ShouldProcess($bin, "Remove-Item")) {
-        try { Remove-Item -LiteralPath $bin -Force -ErrorAction Stop; Ok "removed $bin" } catch { Warn "failed to remove $bin : $_" }
-      } else { Skip "would remove $bin" }
-    } else { Skip "not found $bin" }
+      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
+        try { Remove-Item -LiteralPath $bin -Force -ErrorAction Stop; Ok "removed $display" } catch { Warn "failed to remove $display : $_" }
+      } else { Skip "would remove $display" }
+    } else { Skip "not found $display" }
   }
   if (Test-Path "$Root\target") {
-    if ($PSCmdlet.ShouldProcess("$Root\target", "Remove-Item -Recurse")) {
+    if ($PSCmdlet.ShouldProcess("target/", "Remove-Item -Recurse")) {
       try { Remove-Item -LiteralPath "$Root\target" -Recurse -Force -ErrorAction Stop; Ok "removed target/ (cargo clean)" } catch { Warn "failed to remove target/: $_" }
     } else { Skip "would remove target/ (cargo clean)" }
   }
   $dbosNodeModules = "$Root\workflow\dbos\node_modules"
   $dbosLock = "$Root\workflow\dbos\package-lock.json"
   foreach ($p in @($dbosNodeModules, $dbosLock)) {
+    $display = $p -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
     if (Test-Path $p) {
-      if ($PSCmdlet.ShouldProcess($p, "Remove-Item")) {
-        try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; Ok "removed $p" } catch { Warn "failed to remove $p : $_" }
-      } else { Skip "would remove $p" }
-    } else { Skip "not found $p" }
+      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
+        try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; Ok "removed $display" } catch { Warn "failed to remove $display : $_" }
+      } else { Skip "would remove $display" }
+    } else { Skip "not found $display" }
   }
 }
 
-# 3. Remove opencode plugins - repository plugin is NEVER deleted by default (use -RemoveRepo)
+# 3. Remove opencode plugins - repository plugin is NEVER deleted by default (use -RemoveRepo) - use .opencode folder
 Info "Removing opencode plugins..."
 $pluginProject = Join-Path $Root ".opencode\plugins\coderun.ts"
 $pluginGlobal = Join-Path $env:USERPROFILE ".config\opencode\plugins\coderun.ts"
@@ -179,14 +181,14 @@ if (Test-Path $pluginGlobal) {
     try { Remove-Item -LiteralPath $pluginGlobal -Force -ErrorAction Stop; Ok "removed global plugin $pluginGlobal" } catch { Warn "failed to remove $pluginGlobal : $_" }
   } else { Skip "would remove global plugin $pluginGlobal" }
 } else { Skip "not found $pluginGlobal" }
-# Repository plugin - keep unless -RemoveRepo
+# Repository plugin - keep unless -RemoveRepo (use .opencode folder, not absolute repo path in logs)
 if (Test-Path $pluginProject) {
   if ($doRemoveRepo) {
-    if ($PSCmdlet.ShouldProcess($pluginProject, "Remove-Item")) {
-      try { Remove-Item -LiteralPath $pluginProject -Force -ErrorAction Stop; Ok "removed repository plugin $pluginProject (--RemoveRepo)" } catch { Warn "failed to remove $pluginProject : $_" }
-    } else { Skip "would remove repository plugin $pluginProject" }
-  } else { Skip "keeping repository plugin $pluginProject (use -RemoveRepo to delete)" }
-} else { Skip "not found $pluginProject" }
+    if ($PSCmdlet.ShouldProcess(".opencode/plugins/coderun.ts", "Remove-Item")) {
+      try { Remove-Item -LiteralPath $pluginProject -Force -ErrorAction Stop; Ok "removed repository plugin .opencode/plugins/coderun.ts (--RemoveRepo)" } catch { Warn "failed to remove .opencode/plugins/coderun.ts : $_" }
+    } else { Skip "would remove repository plugin .opencode/plugins/coderun.ts" }
+  } else { Skip "keeping repository plugin .opencode/plugins/coderun.ts (use -RemoveRepo to delete)" }
+} else { Skip "not found .opencode/plugins/coderun.ts" }
 # Only clean global empty dir by default; repo dir is kept
 if ((Test-Path $env:USERPROFILE\.config\opencode\plugins) -and -not (Get-ChildItem -LiteralPath "$env:USERPROFILE\.config\opencode\plugins" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ".gitkeep" })) {
   if ($PSCmdlet.ShouldProcess("$env:USERPROFILE\.config\opencode\plugins", "Remove-Item")) {
@@ -194,19 +196,21 @@ if ((Test-Path $env:USERPROFILE\.config\opencode\plugins) -and -not (Get-ChildIt
   }
 }
 if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins") -and -not (Get-ChildItem -LiteralPath "$Root\.opencode\plugins" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ".gitkeep" })) {
-  if ($PSCmdlet.ShouldProcess("$Root\.opencode\plugins", "Remove-Item")) {
-    try { Remove-Item -LiteralPath "$Root\.opencode\plugins" -Force -ErrorAction SilentlyContinue; Ok "removed empty repo dir (--RemoveRepo)" } catch {}
+  if ($PSCmdlet.ShouldProcess(".opencode/plugins", "Remove-Item")) {
+    try { Remove-Item -LiteralPath "$Root\.opencode\plugins" -Force -ErrorAction SilentlyContinue; Ok "removed empty .opencode/plugins (--RemoveRepo)" } catch {}
   }
 }
 
-# 3b. Remove MCP from opencode (after plugin) - global always, repository only with -RemoveRepo
+# 3b. Remove MCP from opencode (after plugin) - global always, repository only with -RemoveRepo - use .opencode relative
 Info "Removing opencode MCP (codebase-memory + engram)..."
 function Remove-OpencodeMcp($configPath, $isRepo) {
-  if (-not (Test-Path $configPath)) { Skip "MCP config not found at $configPath"; return }
-  if ($isRepo -and -not $doRemoveRepo) { Skip "keeping repository MCP at $configPath (use -RemoveRepo to delete)"; return }
+  $displayPath = $configPath
+  if ($isRepo) { $displayPath = $configPath -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""; if ($displayPath -eq $configPath) { $displayPath = Split-Path $configPath -Leaf } ; if ($configPath -match "\.opencode") { $displayPath = ".opencode/" + (Split-Path $configPath -Leaf) } else { $displayPath = $displayPath } }
+  if (-not (Test-Path $configPath)) { Skip "MCP config not found at $displayPath"; return }
+  if ($isRepo -and -not $doRemoveRepo) { Skip "keeping repository MCP at $displayPath (use -RemoveRepo to delete)"; return }
   try {
     $raw = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
-    if (-not $raw) { Skip "MCP config empty at $configPath"; return }
+    if (-not $raw) { Skip "MCP config empty at $displayPath"; return }
     $noComments = $raw -replace '(?m)^\s*//.*$','' -replace '/\*.*?\*/',''
     $noComments = $noComments -replace ',\s*([\}\]])', '$1'
     $json = $null
@@ -222,7 +226,7 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
         }
       }
     } catch {}
-    if ($null -eq $json -or -not $json.ContainsKey('mcp')) { Skip "no MCP to remove at $configPath"; return }
+    if ($null -eq $json -or -not $json.ContainsKey('mcp')) { Skip "no MCP to remove at $displayPath"; return }
     $mcp = $json['mcp']
     if ($mcp -is [PSCustomObject]) {
       $tmp = @{}
@@ -233,14 +237,14 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
     foreach ($k in @('codebase-memory','engram','codebase-memory-mcp')) {
       if ($mcp.ContainsKey($k)) { $mcp.Remove($k); $removed += $k }
     }
-    if ($removed.Count -eq 0) { Skip "no coderun MCP entries at $configPath"; return }
+    if ($removed.Count -eq 0) { Skip "no coderun MCP entries at $displayPath"; return }
     if ($mcp.Count -eq 0) { $json.Remove('mcp') }
     if ($PSCmdlet.ShouldProcess($configPath, "Remove MCP $removed")) {
       $out = $json | ConvertTo-Json -Depth 10
       [System.IO.File]::WriteAllText($configPath, $out, [System.Text.UTF8Encoding]::new($false))
-      Ok "removed MCP [$($removed -join ', ')] from $configPath"
-    } else { Skip "would remove MCP [$($removed -join ', ')] from $configPath" }
-  } catch { Warn "MCP remove failed for $configPath : $_" }
+      Ok "removed MCP [$($removed -join ', ')] from $displayPath"
+    } else { Skip "would remove MCP [$($removed -join ', ')] from $displayPath" }
+  } catch { Warn "MCP remove failed for $displayPath : $_" }
 }
 Remove-OpencodeMcp "$env:USERPROFILE\.config\opencode\opencode.jsonc" $false
 Remove-OpencodeMcp "$env:USERPROFILE\.config\opencode\opencode.json" $false
@@ -289,23 +293,40 @@ if (-not $doRemoveExternal) {
     }
   }
 
-  # engram: remove extracted binary from user bin (not the zip in repo - repo files are kept)
+  # engram: remove from user bin and .opencode/engram (portable, never use  absolute in logs)
   $engramBin = "$env:USERPROFILE\bin\engram.exe"
   $engramBinDir = "$env:USERPROFILE\bin"
+  $opencodeEngramDir = Join-Path $Root ".opencode\engram"
+  $opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
+  $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
   $engramLegacyClone = Resolve-Path -LiteralPath "$Root\..\engram" -ErrorAction SilentlyContinue
   if (-not $engramLegacyClone) { $engramLegacyClone = "$Root\..\engram" }
   if (Test-Path $engramBin) {
     if ($PSCmdlet.ShouldProcess($engramBin, "Remove-Item")) {
       try { Remove-Item -LiteralPath $engramBin -Force -ErrorAction Stop; Ok "removed engram binary $engramBin" } catch { Warn "failed to remove $engramBin : $_" }
-      # Also clean up empty bin dir if now empty (but never delete if it contains other user files)
       if ((Test-Path $engramBinDir) -and -not (Get-ChildItem -LiteralPath $engramBinDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "engram.exe" })) {
-        # Keep bin dir itself - user may have other tools, just note
         Skip "keeping $engramBinDir (user bin folder - not deleted, may contain other tools)"
       }
     } else { Skip "would remove engram binary $engramBin" }
   } else { Skip "engram binary not found at $engramBin (zip kept at .coderun\engram\)" }
+  # Also remove portable copy in .opencode (use .opencode folder, not repo absolute)
+  foreach ($p in @($opencodeEngramBin, $opencodeEngramBinNoExt)) {
+    $display = ".opencode/engram/$(Split-Path $p -Leaf)"
+    if (Test-Path $p) {
+      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
+        try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed engram portable $display" } catch { Warn "failed to remove $display : $_" }
+      } else { Skip "would remove engram portable $display" }
+    }
+  }
+  if (Test-Path $opencodeEngramDir) {
+    if (-not (Get-ChildItem -LiteralPath $opencodeEngramDir -Force -ErrorAction SilentlyContinue)) {
+      if ($PSCmdlet.ShouldProcess(".opencode/engram", "Remove-Item")) {
+        try { Remove-Item -LiteralPath $opencodeEngramDir -Force -ErrorAction SilentlyContinue; Ok "removed empty .opencode/engram/" } catch {}
+      }
+    } else { Skip "keeping .opencode/engram/ (contains other files)" }
+  }
   if (Test-Path $engramLegacyClone) {
-    Skip "keeping legacy engram clone at $engramLegacyClone (repository folder - not deleted per policy)"
+    Skip "keeping legacy engram clone at ../engram (repository folder - not deleted per policy)"
   }
 
   $modelPath = "$env:USERPROFILE\.coderun\models\flashrank.onnx"
@@ -334,11 +355,11 @@ if (-not $doRemoveExternal) {
   Skip "keeping rustup component clippy (shared toolchain - remove manually via 'rustup component remove clippy' if desired)"
 }
 
-# 5. Remove data - global data is removed, repository .coderun is NEVER deleted by default (use -RemoveRepo)
+# 5. Remove data - global data is removed, repository .coderun is NEVER deleted by default (use -RemoveRepo) - use .opencode/.coderun relative
 if (-not $doRemoveData) {
   Info "Skipping data removal (--KeepData)"
   Info "  Kept: $env:USERPROFILE\.coderun (global)"
-  Info "  Kept: $Root\.coderun (repository - use -RemoveRepo to delete)"
+  Info "  Kept: .coderun/ (repository - use -RemoveRepo to delete)"
 } else {
   Info "Removing data (global only, repository preserved)..."
   $globalData = "$env:USERPROFILE\.coderun"
@@ -352,10 +373,10 @@ if (-not $doRemoveData) {
   if (Test-Path $projData) {
     if ($doRemoveRepo) {
       if ($PSCmdlet.ShouldProcess($projData, "Remove-Item -Recurse")) {
-        try { Remove-Item -LiteralPath $projData -Recurse -Force -ErrorAction Stop; Ok "removed $projData (--RemoveRepo)" } catch { Warn "failed to remove $projData : $_" }
-      } else { Skip "would remove $projData" }
-    } else { Skip "keeping repository $projData (use -RemoveRepo to delete)" }
-  } else { Skip "not found $projData" }
+        try { Remove-Item -LiteralPath $projData -Recurse -Force -ErrorAction Stop; Ok "removed .coderun/ (--RemoveRepo)" } catch { Warn "failed to remove .coderun/ : $_" }
+      } else { Skip "would remove .coderun/" }
+    } else { Skip "keeping repository .coderun/ (use -RemoveRepo to delete)" }
+  } else { Skip "not found .coderun/" }
 }
 
 # 6. Final status
