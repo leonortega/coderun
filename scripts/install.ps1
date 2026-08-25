@@ -36,12 +36,29 @@ function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
 Info "Coderun v0.5.0 installer"
 
-# 0. Prereqs
-if (-not (Test-Cmd rustc)) {
-  Info "Installing Rust 1.75 via rustup..."
-  Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile "$env:TEMP\rustup-init.exe"
-  & "$env:TEMP\rustup-init.exe" -y --default-toolchain 1.75
-  $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+# 0. Prereqs - Rust 1.85+ required for RTK (edition2024)
+$needRustInstall = $false
+$rustVerStr = ""
+if (-not (Test-Cmd rustc)) { $needRustInstall = $true }
+else {
+  try {
+    $rustVerStr = (rustc --version 2>&1 | Out-String).Trim()
+    if ($rustVerStr -match "rustc 1\.(\d+)\.") {
+      $minor = [int]$Matches[1]
+      if ($minor -lt 85) { Info "Rust $rustVerStr too old for RTK (needs 1.85+ for edition2024), upgrading..."; $needRustInstall = $true }
+    }
+  } catch {}
+}
+if ($needRustInstall) {
+  Info "Installing Rust stable via rustup..."
+  try {
+    if (Test-Cmd rustup) { rustup update stable 2>&1 | Out-Null; rustup default stable 2>&1 | Out-Null; Ok "rustc $(rustc --version) (updated)" }
+    else {
+      Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile "$env:TEMP\rustup-init.exe" -UseBasicParsing
+      & "$env:TEMP\rustup-init.exe" -y --default-toolchain stable 2>&1 | Out-Null
+      $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+    }
+  } catch { Warn "rustup update failed: $_" }
 }
 if (-not (Test-Cmd rustc)) { Fail "rustc not found after install" } else { Ok "rustc $(rustc --version)" }
 
@@ -131,9 +148,21 @@ else {
   # LiteLLM proxy
   if (Test-Cmd pip) { try { pip show litellm 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { pip install "litellm[proxy]" 2>&1 | Out-Null }; Ok "litellm pip" } catch { Warn "litellm pip install failed" } }
 
-  # RTK
+  # RTK (needs Rust 1.85+ for edition2024)
   if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
-  else { try { cargo install --git https://github.com/rtk-ai/rtk 2>&1 | Out-Null; Ok "rtk installed via cargo git" } catch { Warn "rtk cargo git install failed - built-ins fallback" } }
+  else {
+    $rtkOk = $false
+    try {
+      # Ensure Rust is up to date for edition2024
+      if (Test-Cmd rustup) { rustup update stable 2>&1 | Out-Null; rustup default stable 2>&1 | Out-Null }
+      cargo install --git https://github.com/rtk-ai/rtk --locked 2>&1 | Out-Null
+      if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1) (cargo git)"; $rtkOk = $true }
+    } catch {}
+    if (-not $rtkOk) {
+      try { cargo install rtk --locked 2>&1 | Out-Null; if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1) (crates.io)"; $rtkOk = $true } } catch {}
+    }
+    if (-not $rtkOk) { Warn "rtk cargo install failed - built-ins fallback (needs Rust 1.85+; try: rustup update stable; cargo install --git https://github.com/rtk-ai/rtk)" }
+  }
 
   # MkDocs (docs) - pymdownx is provided by pymdown-extensions
   $mkdocsOk = $false
@@ -341,12 +370,21 @@ if (Test-Path $engramBinPath) { $engramSrc = $engramBinPath }
 elseif (Get-Command engram -ErrorAction SilentlyContinue) { $engramSrc = (Get-Command engram -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source) }
 if ($engramSrc -and (Test-Path $engramSrc)) {
   try {
-    Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBin -Force
-    # Also copy without .exe for Unix portability
-    $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
-    Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBinNoExt -Force
-    Ok "engram copied to .opencode/engram/engram(.exe) (portable)"
-  } catch { Warn "failed to copy engram to .opencode: $_" }
+    $doCopy = $true
+    if ((Test-Path $opencodeEngramBin) -and (Test-Path $engramSrc)) {
+      try { if ((Get-Item $engramSrc).Length -eq (Get-Item $opencodeEngramBin).Length) { $doCopy = $false; Ok "engram already at .opencode/engram/engram(.exe) (portable)" } } catch {}
+    }
+    if ($doCopy) {
+      Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBin -Force -ErrorAction Stop
+      $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
+      Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBinNoExt -Force -ErrorAction Stop
+      Ok "engram copied to .opencode/engram/engram(.exe) (portable)"
+    }
+  } catch {
+    # If file in use but already exists, treat as OK (portable copy already there)
+    if (Test-Path $opencodeEngramBin) { Ok "engram at .opencode/engram/engram(.exe) (portable, in use)" }
+    else { Warn "failed to copy engram to .opencode: $_" }
+  }
 } else {
   # Fallback: copy directly from .coderun/engram zip if user bin not yet available
   $repoZip = Get-ChildItem -LiteralPath "$Root\.coderun\engram" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -357,10 +395,15 @@ if ($engramSrc -and (Test-Path $engramSrc)) {
       Expand-Archive -LiteralPath $repoZip.FullName -DestinationPath $tmp -Force
       $src = Get-ChildItem -LiteralPath $tmp -Recurse -Filter "engram.exe" | Select-Object -First 1
       if ($src) {
-        Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBin -Force
-        $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
-        Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBinNoExt -Force
-        Ok "engram copied to .opencode/engram/engram(.exe) (from zip)"
+        try {
+          Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBin -Force -ErrorAction Stop
+          $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
+          Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBinNoExt -Force -ErrorAction Stop
+          Ok "engram copied to .opencode/engram/engram(.exe) (from zip)"
+        } catch {
+          if (Test-Path $opencodeEngramBin) { Ok "engram at .opencode/engram/engram(.exe) (portable, in use)" }
+          else { Warn "failed to copy engram to .opencode from zip: $_" }
+        }
       }
     } catch { Warn "failed to copy engram to .opencode from zip: $_" }
   }

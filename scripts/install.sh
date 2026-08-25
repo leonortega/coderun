@@ -10,7 +10,18 @@ for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-extern
 info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
 info "Coderun v0.5.0 installer"
-command -v rustc >/dev/null || { info "Installing Rust 1.75..."; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.75; export PATH="$HOME/.cargo/bin:$PATH"; }
+# Rust 1.85+ required for RTK (edition2024)
+NEED_RUST=false
+if ! command -v rustc >/dev/null 2>&1; then NEED_RUST=true
+else
+  RUST_VER=$(rustc --version 2>&1 || echo "0")
+  if echo "$RUST_VER" | grep -qE "rustc 1\.([0-7][0-9]|[0-8][0-4])\."; then NEED_RUST=true; info "Rust $RUST_VER too old for RTK (needs 1.85+), upgrading..."; fi
+fi
+if [ "$NEED_RUST" = true ]; then
+  info "Installing Rust stable via rustup..."
+  if command -v rustup >/dev/null 2>&1; then rustup update stable 2>/dev/null; rustup default stable 2>/dev/null; ok "rustc $(rustc --version) (updated)"
+  else curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>/dev/null; export PATH="$HOME/.cargo/bin:$PATH"; fi
+fi
 ok "rustc $(rustc --version)"
 command -v node >/dev/null || warn "node not found - install Node >=20 https://nodejs.org"; command -v node >/dev/null && ok "node $(node --version)"
 if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
@@ -57,7 +68,10 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
   else warn "FlashRank model missing at $MODEL_DIR/flashrank.onnx - TF-IDF fallback (expected at .coderun/models/flashrank.onnx)"
   command -v npx >/dev/null && { npm list -g codebase-memory-mcp >/dev/null 2>&1 || npm i -g codebase-memory-mcp 2>/dev/null; ok "codebase-memory-mcp"; } || true
   pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm"
-  command -v rtk >/dev/null && ok "rtk $(rtk --version 2>/dev/null | head -1)" || { cargo install --git https://github.com/rtk-ai/rtk 2>/dev/null && ok "rtk" || warn "rtk failed - built-ins fallback"; }
+   if command -v rtk >/dev/null 2>&1; then ok "rtk $(rtk --version 2>/dev/null | head -1)"; else
+     if command -v rustup >/dev/null 2>&1; then rustup update stable 2>/dev/null; rustup default stable 2>/dev/null; fi
+     cargo install --git https://github.com/rtk-ai/rtk --locked 2>/dev/null && ok "rtk $(rtk --version 2>/dev/null | head -1) (cargo git)" || cargo install rtk --locked 2>/dev/null && ok "rtk $(rtk --version 2>/dev/null | head -1) (crates.io)" || warn "rtk cargo install failed - built-ins fallback (needs Rust 1.85+; try: rustup update stable)"
+   fi
    if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else pip3 install --user mkdocs mkdocs-material pymdown-extensions >/dev/null 2>&1; if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else warn "mkdocs install failed - try: pip3 install --user mkdocs mkdocs-material pymdown-extensions"; fi; fi
    rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "eslint/promptfoo check"
     if [ -f "$ROOT/workflow/dbos/package.json" ]; then (cd "$ROOT/workflow/dbos" && npm install >/dev/null 2>&1 && npx tsc >/dev/null 2>&1 && npx tsc --noEmit >/dev/null 2>&1 && [ -f dist/main.js ] && ok "DBOS sidecar deps + built dist/main.js" || warn "DBOS build failed"); fi
