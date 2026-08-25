@@ -1,0 +1,57 @@
+{
+  "commands": {
+    "build": "cargo build",
+    "test": "cargo test"
+  },
+  "frameworks": [
+    "cargo",
+    "rust-workspace"
+  ],
+  "generated_at_unix": 1787691334,
+  "git_branch": "dev",
+  "important_dirs": [
+    "crates",
+    "packages",
+    "docs",
+    "scripts",
+    "benches",
+    "deploy"
+  ],
+  "index": {
+    "dependency_edges": 798,
+    "files_indexed": 3,
+    "symbols_extracted": 30
+  },
+  "languages": [
+    {
+      "files": 44,
+      "name": "rust"
+    },
+    {
+      "files": 7,
+      "name": "shell"
+    },
+    {
+      "files": 7,
+      "name": "typescript"
+    },
+    {
+      "files": 5,
+      "name": "sql"
+    },
+    {
+      "files": 2,
+      "name": "javascript"
+    },
+    {
+      "files": 2,
+      "name": "python"
+    },
+    {
+      "files": 1,
+      "name": "ruby"
+    }
+  ],
+  "project": "coderun",
+  "version": 1
+}

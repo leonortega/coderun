@@ -90,11 +90,19 @@ if ($SkipExternal) { Info "Skipping external tools (--SkipExternal)" }
 else {
   Info "Installing first-class external tools..."
 
-  # ast-grep (binary is `ast-grep`, `sg` is deprecated alias - check ast-grep only to avoid warning)
-  if (Test-Cmd ast-grep) { Ok "ast-grep $(ast-grep --version)" } elseif (Test-Cmd cargo) {
-    Info "  ast-grep via cargo (sg-core)..."
-    try { cargo install ast-grep --locked 2>&1 | Out-Null; Ok "ast-grep installed" } catch { Warn "ast-grep cargo install failed - heuristic fallback will WARN" }
+  # ast-grep (npm @ast-grep/cli - PREBUILT, fast; provides ast-grep + sg commands)
+  if (Test-Cmd ast-grep) { Ok "ast-grep $(ast-grep --version)" }
+  elseif (Test-Cmd npm) {
+    Info "  ast-grep via npm (@ast-grep/cli, prebuilt)..."
+    try {
+      & npm i -g "@ast-grep/cli" *>&1 | Out-Null
+      $npmPrefix = $null; try { $npmPrefix = (& npm prefix -g 2>$null | Out-String).Trim() } catch {}
+      if ($npmPrefix -and (Test-Path $npmPrefix)) { $env:Path = "$npmPrefix;$env:Path" }
+      if ((Test-Cmd ast-grep) -or (Test-Cmd sg)) { Ok "ast-grep installed (npm @ast-grep/cli)" }
+      else { Warn "ast-grep npm install did not put 'ast-grep'/'sg' on PATH - heuristic fallback will WARN" }
+    } catch { Warn "ast-grep npm install failed - heuristic fallback will WARN" }
   }
+  else { Warn "npm not found - cannot install ast-grep (heuristic fallback will WARN)" }
 
   # engram - local binary from .coderun/engram/*.zip (no git clone, no external repo)
   $engramBinPath = "$env:USERPROFILE\bin\engram.exe"
@@ -149,23 +157,34 @@ else {
   # LiteLLM proxy
   if (Test-Cmd pip) { try { pip show litellm 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { pip install "litellm[proxy]" 2>&1 | Out-Null }; Ok "litellm pip" } catch { Warn "litellm pip install failed" } }
 
-  # RTK (needs Rust 1.85+ for edition2024)
+  # RTK - PREBUILT binary from .coderun\rtk\rtk.exe -> ~\bin\rtk.exe (NO COMPILE). Cargo source build only as last resort.
+  $rtkBinPath = "$env:USERPROFILE\bin\rtk.exe"
   if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
-  else {
+  elseif (Test-Path $rtkBinPath) { $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; Ok "rtk binary at $rtkBinPath" }
+  elseif (Test-Path "$Root\.coderun\rtk\rtk.exe") {
+    try {
+      New-Item -ItemType Directory -Force -Path (Split-Path $rtkBinPath -Parent) | Out-Null
+      Copy-Item -LiteralPath "$Root\.coderun\rtk\rtk.exe" -Destination $rtkBinPath -Force -ErrorAction Stop
+      $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"
+      Ok "rtk installed to $rtkBinPath (from .coderun\rtk\rtk.exe - no compile)"
+    } catch { Warn "rtk copy from .coderun\rtk failed: $_" }
+  }
+  if (-not ((Test-Cmd rtk) -or (Test-Path $rtkBinPath))) {
     $rtkOk = $false
-    # PS5.1: with EAP=Stop, redirected stderr (cargo progress) becomes a terminating error - relax locally
+    # Long compile - stream output LIVE (silence looks like a freeze). EAP relaxed locally: under Stop, redirected cargo stderr becomes terminating
     $rtkPrevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try {
+      Info "  No prebuilt rtk found - building via cargo... FIRST BUILD TAKES SEVERAL MINUTES (not frozen)"
       # Ensure Rust is up to date for edition2024
-      if (Test-Cmd rustup) { rustup update stable 2>&1 | Out-Null; rustup default stable 2>&1 | Out-Null }
-      cargo install --git https://github.com/rtk-ai/rtk --locked 2>&1 | Out-Null
-      if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1) (cargo git)"; $rtkOk = $true }
+      if (Test-Cmd rustup) { & rustup update stable; & rustup default stable }
+      & cargo install --git https://github.com/rtk-ai/rtk --locked
+      if ($LASTEXITCODE -eq 0 -and (Test-Cmd rtk)) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1) (cargo git)"; $rtkOk = $true }
     } catch {}
     if (-not $rtkOk) {
-      try { cargo install rtk --locked 2>&1 | Out-Null; if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1) (crates.io)"; $rtkOk = $true } } catch {}
+      try { & cargo install rtk --locked; if ($LASTEXITCODE -eq 0 -and (Test-Cmd rtk)) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1) (crates.io)"; $rtkOk = $true } } catch {}
     }
     $ErrorActionPreference = $rtkPrevEap
-    if (-not $rtkOk) { Warn "rtk cargo install failed - built-ins fallback (needs Rust 1.85+; try: rustup update stable; cargo install --git https://github.com/rtk-ai/rtk)" }
+    if (-not $rtkOk) { Warn "rtk cargo install failed - built-ins fallback (or drop a prebuilt rtk.exe into .coderun\rtk\)" }
   }
 
   # MkDocs (docs) - pymdownx is provided by pymdown-extensions
@@ -296,13 +315,14 @@ try { & ".\target\release\coderun.exe" index 2>&1 | Out-Null } catch { Info "  i
 try { & ".\target\release\coderun.exe" doctor } catch {}
 $ErrorActionPreference = $prevEA2
 
-# 3. opencode MCPs + plugin (use .opencode folder, no absolute repo path)
-Info "Configuring opencode MCPs and plugin..."
-$opencodeDir = Join-Path $Root ".opencode"
-$opencodeCfg = Join-Path $opencodeDir "opencode.jsonc"
-New-Item -ItemType Directory -Force -Path $opencodeDir | Out-Null
-# Copy engram binary into .opencode/engram/ for portable relative reference (never use  absolute)
-$opencodeEngramDir = Join-Path $opencodeDir "engram"
+# 3. opencode MCPs + plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
+Info "Configuring opencode MCPs and plugin (global ~\.config\opencode)..."
+$opencodeDir = Join-Path $Root ".opencode"   # legacy project dir - cleaned below
+$ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
+$ocGlobalCfg = Join-Path $ocGlobalDir "opencode.jsonc"
+New-Item -ItemType Directory -Force -Path $ocGlobalDir | Out-Null
+# Copy engram binary into global opencode dir (ABSOLUTE path reference - must resolve from any project)
+$opencodeEngramDir = Join-Path $ocGlobalDir "engram"
 $opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
 New-Item -ItemType Directory -Force -Path $opencodeEngramDir | Out-Null
 # Resolve source engram binary (prefer installed user bin, else repo zip)
@@ -313,18 +333,18 @@ if ($engramSrc -and (Test-Path $engramSrc)) {
   try {
     $doCopy = $true
     if ((Test-Path $opencodeEngramBin) -and (Test-Path $engramSrc)) {
-      try { if ((Get-Item $engramSrc).Length -eq (Get-Item $opencodeEngramBin).Length) { $doCopy = $false; Ok "engram already at .opencode/engram/engram(.exe) (portable)" } } catch {}
+      try { if ((Get-Item $engramSrc).Length -eq (Get-Item $opencodeEngramBin).Length) { $doCopy = $false; Ok "engram already at ~\.config\opencode\engram\engram(.exe)" } } catch {}
     }
     if ($doCopy) {
       Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBin -Force -ErrorAction Stop
       $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
       Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBinNoExt -Force -ErrorAction Stop
-      Ok "engram copied to .opencode/engram/engram(.exe) (portable)"
+      Ok "engram copied to $opencodeEngramBin"
     }
   } catch {
     # If file in use but already exists, treat as OK (portable copy already there)
-    if (Test-Path $opencodeEngramBin) { Ok "engram at .opencode/engram/engram(.exe) (portable, in use)" }
-    else { Warn "failed to copy engram to .opencode: $_" }
+    if (Test-Path $opencodeEngramBin) { Ok "engram at $opencodeEngramBin (in use)" }
+    else { Warn "failed to copy engram to global opencode dir: $_" }
   }
 } else {
   # Fallback: copy directly from .coderun/engram zip if user bin not yet available
@@ -340,16 +360,17 @@ if ($engramSrc -and (Test-Path $engramSrc)) {
           Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBin -Force -ErrorAction Stop
           $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
           Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBinNoExt -Force -ErrorAction Stop
-          Ok "engram copied to .opencode/engram/engram(.exe) (from zip)"
+          Ok "engram copied to $opencodeEngramBin (from zip)"
         } catch {
-          if (Test-Path $opencodeEngramBin) { Ok "engram at .opencode/engram/engram(.exe) (portable, in use)" }
-          else { Warn "failed to copy engram to .opencode from zip: $_" }
+          if (Test-Path $opencodeEngramBin) { Ok "engram at $opencodeEngramBin (in use)" }
+          else { Warn "failed to copy engram to global opencode dir from zip: $_" }
         }
       }
-    } catch { Warn "failed to copy engram to .opencode from zip: $_" }
+    } catch { Warn "failed to copy engram to global opencode dir from zip: $_" }
   }
 }
-# Use relative .opencode path for MCP + npm plugin (no absolute repo path)
+# Global config: ABSOLUTE engram path (project-relative .opencode paths only resolve inside this repo)
+$ocEngramAbs = $opencodeEngramBin -replace '\\','/'
 $opencodeJsonc = @"
 {
     "`$schema": "https://opencode.ai/config.json",
@@ -361,20 +382,28 @@ $opencodeJsonc = @"
             "enabled": true
         },
         "engram": {
-            "command": [".opencode/engram/engram.exe", "mcp", "--tools=agent"],
+            "command": ["$ocEngramAbs", "mcp", "--tools=agent"],
             "type": "local",
             "enabled": true
         }
     }
 }
 "@
-try { Set-Content -LiteralPath $opencodeCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode MCPs + plugin at .opencode/opencode.jsonc (codebase-memory + engram -> .opencode/engram/engram.exe, plugin: opencode-coderun)" } catch { Warn "failed to write $opencodeCfg : $_" }
+try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode MCPs + plugin GLOBAL at $ocGlobalCfg (codebase-memory + engram -> $ocEngramAbs, plugin: opencode-coderun)" } catch { Warn "failed to write $ocGlobalCfg : $_" }
 
 # Remove legacy global path plugin (now npm) and local path plugin
 $globalPlugin = "$env:USERPROFILE\.config\opencode\plugins\coderun.ts"
 if (Test-Path $globalPlugin) { try { Remove-Item -LiteralPath $globalPlugin -Force; Info "Removed legacy global path plugin coderun.ts" } catch {} }
 $localPlugin = Join-Path $opencodeDir "plugins\coderun.ts"
 if (Test-Path $localPlugin) { try { Remove-Item -LiteralPath $localPlugin -Force; Info "Removed legacy local path plugin .opencode/plugins/coderun.ts" } catch {} }
+
+# Migrate: remove per-project opencode config/deps (MCPs + plugin are global now)
+foreach ($lc in @((Join-Path $opencodeDir "opencode.jsonc"), (Join-Path $opencodeDir "opencode.json"))) {
+  if (Test-Path $lc) { try { Remove-Item -LiteralPath $lc -Force; Info "Removed legacy project config $(Split-Path $lc -Leaf) (MCPs/plugin are global now)" } catch {} }
+}
+foreach ($lp in @((Join-Path $opencodeDir "package.json"), (Join-Path $opencodeDir "package-lock.json"))) {
+  if (Test-Path $lp) { try { Remove-Item -LiteralPath $lp -Force; Info "Removed legacy project $(Split-Path $lp -Leaf) (plugin installs globally now)" } catch {} }
+}
 
 # Ensure npm plugin is built
 $pluginDir = Join-Path $Root "packages\opencode-coderun"
@@ -392,16 +421,17 @@ if (Test-Path $pluginDir) {
       Pop-Location
     } else { Warn "npm not found - cannot build opencode-coderun (install Node.js 18+)" }
   } else { Ok "opencode-coderun dist at packages/opencode-coderun/dist/index.js" }
-  # Install npm plugin into .opencode via file: reference
+  # Install npm plugin GLOBALLY (~/.config/opencode/node_modules) via file: reference to this repo
   if (Test-Cmd npm) {
-    Info "Installing opencode-coderun into .opencode via npm..."
-    $pkgJson = Join-Path $opencodeDir "package.json"
+    Info "Installing opencode-coderun globally (~\.config\opencode)..."
+    $pkgJson = Join-Path $ocGlobalDir "package.json"
+    $pluginFileRef = "file:" + ((Join-Path $Root "packages\opencode-coderun") -replace '\\','/')
     if (-not (Test-Path $pkgJson)) {
       $initPkg = @"
 {
   "dependencies": {
     "@opencode-ai/plugin": "1.18.22",
-    "opencode-coderun": "file:../packages/opencode-coderun"
+    "opencode-coderun": "$pluginFileRef"
   }
 }
 "@
@@ -410,19 +440,53 @@ if (Test-Path $pluginDir) {
       try {
         $j = Get-Content -LiteralPath $pkgJson -Raw | ConvertFrom-Json
         if (-not $j.dependencies) { $j | Add-Member -NotePropertyName dependencies -NotePropertyValue @{} }
+        # Always refresh the file: ref (repo may have moved)
+        if ($j.dependencies.PSObject.Properties["opencode-coderun"]) { $j.dependencies."opencode-coderun" = $pluginFileRef }
+        else { $j.dependencies | Add-Member -NotePropertyName "opencode-coderun" -NotePropertyValue $pluginFileRef }
         $needsSave = $false
-        if (-not $j.dependencies.PSObject.Properties["opencode-coderun"]) { $j.dependencies | Add-Member -NotePropertyName "opencode-coderun" -NotePropertyValue "file:../packages/opencode-coderun"; $needsSave = $true }
-        if (-not $j.dependencies.PSObject.Properties["@opencode-ai/plugin"]) { $j.dependencies | Add-Member -NotePropertyName "@opencode-ai/plugin" -NotePropertyValue "1.18.22"; $needsSave = $true }
+        if (-not $j.dependencies.PSObject.Properties["@opencode-ai/plugin"]) { $j.dependencies | Add-Member -NotePropertyName "@opencode-ai/plugin" -NotePropertyValue "1.18.22"; $needsSave = $true } else { $needsSave = $true }
         if ($needsSave) { $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJson -Encoding UTF8 }
       } catch {}
     }
-    Push-Location $opencodeDir
-    try { & npm install --silent 2>&1 | Out-Null; if (Test-Path "node_modules\opencode-coderun\dist\index.js") { Ok "opencode-coderun installed to .opencode/node_modules" } else { Warn "opencode-coderun npm install failed - try: cd .opencode; npm install" } } catch { Warn "opencode-coderun npm install failed: $_" }
+    Push-Location $ocGlobalDir
+    try { & npm install --silent 2>&1 | Out-Null; if (Test-Path "node_modules\opencode-coderun\dist\index.js") { Ok "opencode-coderun installed to ~\.config\opencode\node_modules (global)" } else { Warn "opencode-coderun npm install failed - try: cd ~\.config\opencode; npm install" } } catch { Warn "opencode-coderun npm install failed: $_" }
     Pop-Location
-  } else { Warn "npm not found - skipping .opencode install (install Node.js 18+)" }
+  } else { Warn "npm not found - skipping global opencode plugin install (install Node.js 18+)" }
 } else { Warn "packages/opencode-coderun not found - skipping npm plugin install" }
-Info "Restart opencode to load plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open)"
+Info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open). MCPs+plugin now load in EVERY project (global ~\.config\opencode)."
 
-Info "Done (v1) - next: coderun serve  |  coderun preview 'add auth'  |  curl http://127.0.0.1:9527/metrics  |  coderun doctor (v1 disabled, no DBOS)"
+# 4. Start daemon - coderun must be in RUNNING state after installation
+function Test-DaemonHealth {
+  try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9527/health" -UseBasicParsing -TimeoutSec 2; return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) } catch { return $false }
+}
+Info "Starting coderun daemon..."
+$daemonUp = Test-DaemonHealth
+if ($daemonUp) {
+  Ok "coderun daemon already running at http://127.0.0.1:9527 (status: running)"
+} elseif (-not (Test-Path $prebuiltDaemon)) {
+  Warn "coderun-daemon.exe not found at target/release/coderun-daemon.exe - build first (cargo build --release) then re-run installer or start manually"
+} else {
+  # Stale processes (holding old binary/port but not answering /health) - stop them before restart
+  foreach ($procName in @("coderun-daemon", "coderun")) {
+    Get-Process -Name $procName -ErrorAction SilentlyContinue | ForEach-Object {
+      try { Stop-Process -Id $_.Id -Force -ErrorAction Stop; Info "  stopped stale $procName PID $($_.Id)" } catch {}
+    }
+  }
+  $prevEA3 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+  try {
+    $daemonProc = Start-Process -FilePath $prebuiltDaemon -WorkingDirectory $Root -WindowStyle Hidden -PassThru -ErrorAction Stop
+    for ($i = 0; $i -lt 40; $i++) {
+      Start-Sleep -Milliseconds 500
+      if ($daemonProc.HasExited) { break }
+      if (Test-DaemonHealth) { $daemonUp = $true; break }
+    }
+    if ($daemonUp) { Ok "coderun daemon RUNNING (PID $($daemonProc.Id), http://127.0.0.1:9527)" }
+    elseif ($daemonProc.HasExited) { Warn "daemon exited immediately (exit code $($daemonProc.ExitCode)) - start manually: .\target\release\coderun-daemon.exe (check .coderun\config.toml)" }
+    else { Warn "daemon started (PID $($daemonProc.Id)) but /health not responding within 20s - verify: curl http://127.0.0.1:9527/metrics" }
+  } catch { Warn "failed to start daemon: $_ - start manually: .\target\release\coderun-daemon.exe" }
+  $ErrorActionPreference = $prevEA3
+}
+
+Info "Done (v1) - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: .\target\release\coderun-daemon.exe)' }) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
 Info "Docs: mkdocs serve  |  promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
 Info "Opt-in workflow: `$env:CODERUN_WORKFLOW_ENABLED='true'; bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

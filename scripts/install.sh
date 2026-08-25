@@ -36,7 +36,7 @@ command -v git >/dev/null || { echo "git not found"; exit 1; }; ok "$(git --vers
 
 if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-external)"; else
   info "Installing first-class external tools..."
-  command -v ast-grep >/dev/null && ok "ast-grep $(ast-grep --version)" || { info "  ast-grep via cargo..."; cargo install ast-grep --locked 2>/dev/null && ok "ast-grep" || warn "ast-grep install failed - fallback WARN"; }
+  command -v ast-grep >/dev/null && ok "ast-grep $(ast-grep --version)" || { info "  ast-grep via npm (@ast-grep/cli, prebuilt)..."; npm i -g @ast-grep/cli 2>/dev/null && ok "ast-grep installed" || warn "ast-grep npm install failed - fallback WARN"; }
   # engram - local binary from .coderun/engram/*.zip or .coderun/engram/engram (no git clone)
   ENGRAM_BIN="$HOME/bin/engram"
   if command -v engram >/dev/null 2>&1; then ok "engram $(engram --version 2>/dev/null | head -1)"
@@ -67,11 +67,22 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
   if [ -f "$MODEL_DIR/flashrank.onnx" ]; then ok "FlashRank $MODEL_DIR/flashrank.onnx"
   elif [ -f "$REPO_MODEL" ]; then cp -f "$REPO_MODEL" "$MODEL_DIR/flashrank.onnx" 2>/dev/null && ok "FlashRank installed to $MODEL_DIR/flashrank.onnx (from .coderun/models)" || warn "FlashRank copy failed - TF-IDF fallback"
   else warn "FlashRank model missing at $MODEL_DIR/flashrank.onnx - TF-IDF fallback (expected at .coderun/models/flashrank.onnx)"
+  fi
   command -v npx >/dev/null && { npm list -g codebase-memory-mcp >/dev/null 2>&1 || npm i -g codebase-memory-mcp 2>/dev/null; ok "codebase-memory-mcp"; } || true
   pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm"
-   if command -v rtk >/dev/null 2>&1; then ok "rtk $(rtk --version 2>/dev/null | head -1)"; else
+   # RTK - PREBUILT binary from .coderun/rtk/rtk(.exe) -> ~/bin/rtk (NO COMPILE). Cargo only as last resort.
+   RTK_BIN="$HOME/bin/rtk"
+   REPO_RTK="$ROOT/.coderun/rtk/rtk"; [ -f "$REPO_RTK" ] || REPO_RTK="$ROOT/.coderun/rtk/rtk.exe"
+   if command -v rtk >/dev/null 2>&1; then ok "rtk $(rtk --version 2>/dev/null | head -1)"
+   elif [ -f "$RTK_BIN" ]; then ok "rtk binary at $RTK_BIN"
+   elif [ -f "$REPO_RTK" ]; then
+     mkdir -p "$(dirname "$RTK_BIN")"
+     cp -f "$REPO_RTK" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "rtk installed to $RTK_BIN (from .coderun/rtk - no compile)" || warn "rtk copy failed - cargo fallback"
+   fi
+   if ! command -v rtk >/dev/null 2>&1 && [ ! -f "$RTK_BIN" ]; then
+     info "  No prebuilt rtk found - building via cargo... FIRST BUILD TAKES SEVERAL MINUTES"
      if command -v rustup >/dev/null 2>&1; then rustup update stable 2>/dev/null; rustup default stable 2>/dev/null; fi
-     cargo install --git https://github.com/rtk-ai/rtk --locked 2>/dev/null && ok "rtk $(rtk --version 2>/dev/null | head -1) (cargo git)" || cargo install rtk --locked 2>/dev/null && ok "rtk $(rtk --version 2>/dev/null | head -1) (crates.io)" || warn "rtk cargo install failed - built-ins fallback (needs Rust 1.85+; try: rustup update stable)"
+     cargo install --git https://github.com/rtk-ai/rtk --locked 2>/dev/null && ok "rtk (cargo git)" || cargo install rtk --locked 2>/dev/null && ok "rtk (crates.io)" || warn "rtk cargo install failed (or drop a prebuilt rtk into .coderun/rtk/)"
    fi
    if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else pip3 install --user mkdocs mkdocs-material pymdown-extensions >/dev/null 2>&1; if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else warn "mkdocs install failed - try: pip3 install --user mkdocs mkdocs-material pymdown-extensions"; fi; fi
    rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "eslint/promptfoo check"
@@ -116,29 +127,33 @@ CODERUN_BIN="$ROOT/target/release/coderun"
 "$CODERUN_BIN" index 2>/dev/null || true
 "$CODERUN_BIN" doctor
 
-info "Configuring opencode MCPs and plugin (use .opencode folder, no absolute repo path)..."
-mkdir -p "$ROOT/.opencode" "$ROOT/.opencode/plugins" "$ROOT/.opencode/engram"
-# Copy engram binary into .opencode/engram/ for portable relative reference (never use  absolute)
+# 3. opencode MCPs + plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
+OC_GLOBAL="$HOME/.config/opencode"
+OC_GLOBAL_CFG="$OC_GLOBAL/opencode.jsonc"
+ROOT_OPENCODE="$ROOT/.opencode"   # legacy project dir - cleaned below
+info "Configuring opencode MCPs and plugin (global ~/.config/opencode)..."
+mkdir -p "$OC_GLOBAL" "$OC_GLOBAL/engram"
+# Copy engram binary into global opencode dir (ABSOLUTE path reference - must resolve from any project)
 ENGRAM_SRC=""
 if [ -f "$HOME/bin/engram" ]; then ENGRAM_SRC="$HOME/bin/engram"
 elif [ -f "$HOME/bin/engram.exe" ]; then ENGRAM_SRC="$HOME/bin/engram.exe"
 elif command -v engram >/dev/null 2>&1; then ENGRAM_SRC=$(command -v engram)
 fi
 if [ -n "$ENGRAM_SRC" ] && [ -f "$ENGRAM_SRC" ]; then
-  cp -f "$ENGRAM_SRC" "$ROOT/.opencode/engram/engram" 2>/dev/null && chmod +x "$ROOT/.opencode/engram/engram" 2>/dev/null && ok "engram copied to .opencode/engram/engram (portable)"
+  cp -f "$ENGRAM_SRC" "$OC_GLOBAL/engram/engram" 2>/dev/null && chmod +x "$OC_GLOBAL/engram/engram" 2>/dev/null && ok "engram copied to $OC_GLOBAL/engram/engram"
   # Also handle .exe for Windows
-  if [ -f "$ROOT/.opencode/engram/engram" ] && [ ! -f "$ROOT/.opencode/engram/engram.exe" ]; then cp -f "$ROOT/.opencode/engram/engram" "$ROOT/.opencode/engram/engram.exe" 2>/dev/null || true; fi
+  if [ -f "$OC_GLOBAL/engram/engram" ] && [ ! -f "$OC_GLOBAL/engram/engram.exe" ]; then cp -f "$OC_GLOBAL/engram/engram" "$OC_GLOBAL/engram/engram.exe" 2>/dev/null || true; fi
 else
   REPO_ZIP=$(ls "$ROOT/.coderun/engram/"*.zip 2>/dev/null | head -1 || true)
   if [ -n "$REPO_ZIP" ] && [ -f "$REPO_ZIP" ] && command -v unzip >/dev/null 2>&1; then
-    mkdir -p "$HOME/.cache/tmp/engram_opencode" 2>/dev/null
-    unzip -o "$REPO_ZIP" -d "$HOME/.cache/tmp/engram_opencode" 2>/dev/null
-    SRC=$(find "$HOME/.cache/tmp/engram_opencode" -name "engram*" -type f 2>/dev/null | head -1 || true)
-    if [ -n "$SRC" ] && [ -f "$SRC" ]; then cp -f "$SRC" "$ROOT/.opencode/engram/engram" 2>/dev/null && chmod +x "$ROOT/.opencode/engram/engram" 2>/dev/null && ok "engram copied to .opencode/engram/engram (from zip)"; fi
+    mkdir -p "$HOME/.cache/tmp/engram_global" 2>/dev/null
+    unzip -o "$REPO_ZIP" -d "$HOME/.cache/tmp/engram_global" 2>/dev/null
+    SRC=$(find "$HOME/.cache/tmp/engram_global" -name "engram*" -type f 2>/dev/null | head -1 || true)
+    if [ -n "$SRC" ] && [ -f "$SRC" ]; then cp -f "$SRC" "$OC_GLOBAL/engram/engram" 2>/dev/null && chmod +x "$OC_GLOBAL/engram/engram" 2>/dev/null && ok "engram copied to $OC_GLOBAL/engram/engram (from zip)"; fi
   fi
 fi
-# Use relative .opencode path for MCP (never absolute )
-cat > "$ROOT/.opencode/opencode.jsonc" <<EOF
+# Global config: ABSOLUTE engram path (project-relative .opencode paths only resolve inside this repo)
+cat > "$OC_GLOBAL_CFG" <<EOF
 {
     "\$schema": "https://opencode.ai/config.json",
     "plugin": ["opencode-coderun"],
@@ -149,19 +164,23 @@ cat > "$ROOT/.opencode/opencode.jsonc" <<EOF
             "enabled": true
         },
         "engram": {
-            "command": [".opencode/engram/engram", "mcp", "--tools=agent"],
+            "command": ["$OC_GLOBAL/engram/engram", "mcp", "--tools=agent"],
             "type": "local",
             "enabled": true
         }
     }
 }
 EOF
-ok "opencode MCPs + plugin at .opencode/opencode.jsonc (codebase-memory + engram -> .opencode/engram/engram, plugin: opencode-coderun)"
+ok "opencode MCPs + plugin GLOBAL at $OC_GLOBAL_CFG (codebase-memory + engram -> $OC_GLOBAL/engram/engram, plugin: opencode-coderun)"
 # Remove legacy global path plugin (now npm)
 GLOBAL_PLUGIN="$HOME/.config/opencode/plugins/coderun.ts"
 if [ -f "$GLOBAL_PLUGIN" ]; then rm -f "$GLOBAL_PLUGIN" 2>/dev/null && info "Removed legacy global path plugin coderun.ts" || true; fi
 LOCAL_PLUGIN="$ROOT/.opencode/plugins/coderun.ts"
 if [ -f "$LOCAL_PLUGIN" ]; then rm -f "$LOCAL_PLUGIN" 2>/dev/null && info "Removed legacy local path plugin .opencode/plugins/coderun.ts" || true; fi
+# Migrate: remove per-project opencode config/deps (MCPs + plugin are global now)
+for f in "$ROOT_OPENCODE/opencode.jsonc" "$ROOT_OPENCODE/opencode.json" "$ROOT_OPENCODE/package.json" "$ROOT_OPENCODE/package-lock.json"; do
+  if [ -f "$f" ]; then rm -f "$f" 2>/dev/null && info "Removed legacy project $(basename "$f") (MCPs/plugin are global now)" || true; fi
+done
 # Ensure npm plugin is built
 if [ -d "$ROOT/packages/opencode-coderun" ]; then
   if [ ! -f "$ROOT/packages/opencode-coderun/dist/index.js" ]; then
@@ -174,33 +193,51 @@ if [ -d "$ROOT/packages/opencode-coderun" ]; then
   else
     ok "opencode-coderun dist at packages/opencode-coderun/dist/index.js"
   fi
-  # Install npm plugin into .opencode (file: reference, no registry needed)
+  # Install npm plugin GLOBALLY (~/.config/opencode/node_modules) via file: reference to this repo
   if command -v npm >/dev/null 2>&1; then
-    info "Installing opencode-coderun into .opencode via npm..."
-    mkdir -p "$ROOT/.opencode"
-    # Ensure package.json has file: dependency (idempotent)
-    if [ ! -f "$ROOT/.opencode/package.json" ]; then
-      printf '%s\n' '{' '  "dependencies": {' '    "@opencode-ai/plugin": "1.18.22",' '    "opencode-coderun": "file:../packages/opencode-coderun"' '  }' '}' > "$ROOT/.opencode/package.json"
-    else
-      # Use node to inject file: dependency if missing (fallback to sed)
-      if ! grep -q "opencode-coderun" "$ROOT/.opencode/package.json" 2>/dev/null; then
-        if command -v node >/dev/null 2>&1; then
-          node -e "const fs=require('fs');const p='$ROOT/.opencode/package.json';let j=JSON.parse(fs.readFileSync(p,'utf8'));j.dependencies=j.dependencies||{};j.dependencies['opencode-coderun']='file:../packages/opencode-coderun';j.dependencies['@opencode-ai/plugin']=j.dependencies['@opencode-ai/plugin']||'1.18.22';fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null || true
-        else
-          # sed fallback: inject before last }
-          sed -i 's/"@opencode-ai\/plugin"[[:space:]]*:[^,}]*/"&,\n    \"opencode-coderun\": \"file:..\/packages\/opencode-coderun\"/' "$ROOT/.opencode/package.json" 2>/dev/null || true
-        fi
-      fi
+    info "Installing opencode-coderun globally (~/.config/opencode)..."
+    PKG_JSON="$OC_GLOBAL/package.json"
+    PLUGIN_REF="file:$ROOT/packages/opencode-coderun"
+    if [ ! -f "$PKG_JSON" ]; then
+      printf '%s\n' '{' '  "dependencies": {' '    "@opencode-ai/plugin": "1.18.22",' "    \"opencode-coderun\": \"$PLUGIN_REF\"" '  }' '}' > "$PKG_JSON"
+    elif command -v node >/dev/null 2>&1; then
+      # Merge + always refresh the file: ref (repo may have moved)
+      PKG_JSON_PATH="$PKG_JSON" PLUGIN_REF="$PLUGIN_REF" node -e "const fs=require('fs');const p=process.env.PKG_JSON_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};j.dependencies=j.dependencies||{};j.dependencies['opencode-coderun']=process.env.PLUGIN_REF;j.dependencies['@opencode-ai/plugin']=j.dependencies['@opencode-ai/plugin']||'1.18.22';fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null || true
     fi
-    (cd "$ROOT/.opencode" && npm install --silent 2>/dev/null && ok "opencode-coderun installed to .opencode/node_modules") || warn "opencode-coderun npm install failed - try: cd .opencode && npm install"
+    (cd "$OC_GLOBAL" && npm install --silent 2>/dev/null && [ -f node_modules/opencode-coderun/dist/index.js ] && ok "opencode-coderun installed to ~/.config/opencode/node_modules (global)") || warn "opencode-coderun npm install failed - try: cd ~/.config/opencode && npm install"
   else
-    warn "npm not found - skipping .opencode install (install Node.js 18+)"
+    warn "npm not found - skipping global opencode plugin install (install Node.js 18+)"
   fi
 else
   warn "packages/opencode-coderun not found - skipping npm plugin install"
 fi
-info "Restart opencode to load plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527)"
+info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). MCPs+plugin now load in EVERY project (global ~/.config/opencode)."
 
-info "Done (v1) - next: coderun serve | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor (v1 disabled, no DBOS)"
+# 4. Start daemon - coderun must be in RUNNING state after installation
+daemon_health() { curl -s -o /dev/null -m 2 http://127.0.0.1:9527/health; }
+DAEMON_UP=no
+if command -v curl >/dev/null 2>&1 && daemon_health; then
+  DAEMON_UP=yes
+  ok "coderun daemon already running at http://127.0.0.1:9527 (status: running)"
+elif [ ! -x "$ROOT/target/release/coderun-daemon" ]; then
+  warn "coderun-daemon binary not found at target/release/coderun-daemon - build first (cargo build --release) then re-run installer or start manually"
+else
+  # Stale processes (holding old binary/port but not answering /health) - stop them before restart
+  pkill -f coderun-daemon >/dev/null 2>&1 || true
+  info "Starting coderun daemon..."
+  (cd "$ROOT" && nohup ./target/release/coderun-daemon >/dev/null 2>&1 &)
+  if command -v curl >/dev/null 2>&1; then
+    for _ in $(seq 1 40); do
+      sleep 0.5
+      if daemon_health; then DAEMON_UP=yes; break; fi
+    done
+  else
+    sleep 3
+    if pgrep -f coderun-daemon >/dev/null 2>&1; then DAEMON_UP=yes; fi
+  fi
+  if [ "$DAEMON_UP" = yes ]; then ok "coderun daemon RUNNING (http://127.0.0.1:9527)"; else warn "daemon not responding on :9527 within 20s - start manually: ./target/release/coderun-daemon"; fi
+fi
+
+info "Done (v1) - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo 'NOT running (start: ./target/release/coderun-daemon)'; fi) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
 info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
 info "Opt-in workflow: CODERUN_WORKFLOW_ENABLED=true bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

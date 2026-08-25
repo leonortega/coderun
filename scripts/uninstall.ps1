@@ -295,17 +295,34 @@ if (-not $doRemoveExternal) {
 } else {
   Info "Removing external tools (strict default)..."
 
-  if (Test-Cmd sg) {
-    if ($PSCmdlet.ShouldProcess("ast-grep (cargo uninstall ast-grep)", "cargo uninstall")) {
-      try { cargo uninstall ast-grep 2>&1 | Out-Null; Ok "uninstalled ast-grep (cargo)" } catch { Warn "ast-grep cargo uninstall failed: $_" }
+  # ast-grep: npm @ast-grep/cli (current) or legacy cargo install
+  if (Test-Cmd npm) {
+    $hasAgCli = $false
+    try { npm list -g "@ast-grep/cli" 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasAgCli = $true } } catch {}
+    if ($hasAgCli) {
+      if ($PSCmdlet.ShouldProcess("@ast-grep/cli (npm -g)", "npm uninstall -g")) {
+        try { npm uninstall -g "@ast-grep/cli" 2>&1 | Out-Null; Ok "uninstalled @ast-grep/cli (npm -g)" } catch { Warn "npm uninstall @ast-grep/cli failed: $_" }
+      } else { Skip "would npm uninstall -g @ast-grep/cli" }
+    } else { Skip "@ast-grep/cli not installed (npm -g)" }
+  }
+  if (Test-Cmd sg -or (Test-Cmd ast-grep)) {
+    if ($PSCmdlet.ShouldProcess("ast-grep (legacy cargo)", "cargo uninstall ast-grep")) {
+      try { cargo uninstall ast-grep 2>&1 | Out-Null; Ok "uninstalled ast-grep (legacy cargo)" } catch { Warn "ast-grep cargo uninstall failed: $_" }
     } else { Skip "would cargo uninstall ast-grep" }
-  } else { Skip "ast-grep not installed (sg not on PATH)" }
+  } else { Skip "no legacy cargo ast-grep" }
 
+  # rtk: user-bin prebuilt copy (current) + legacy cargo install
+  $rtkUserBin = "$env:USERPROFILE\bin\rtk.exe"
+  if (Test-Path $rtkUserBin) {
+    if ($PSCmdlet.ShouldProcess($rtkUserBin, "Remove-Item")) {
+      try { Remove-Item -LiteralPath $rtkUserBin -Force -ErrorAction Stop; Ok "removed rtk binary $rtkUserBin" } catch { Warn "failed to remove $rtkUserBin : $_" }
+    } else { Skip "would remove rtk binary $rtkUserBin" }
+  } else { Skip "not found rtk binary at $rtkUserBin" }
   if (Test-Cmd rtk) {
-    if ($PSCmdlet.ShouldProcess("rtk (cargo uninstall rtk)", "cargo uninstall")) {
-      try { cargo uninstall rtk 2>&1 | Out-Null; Ok "uninstalled rtk (cargo)" } catch { Warn "rtk cargo uninstall failed: $_" }
+    if ($PSCmdlet.ShouldProcess("rtk (legacy cargo)", "cargo uninstall rtk")) {
+      try { cargo uninstall rtk 2>&1 | Out-Null; Ok "uninstalled rtk (legacy cargo)" } catch { Warn "rtk cargo uninstall failed: $_" }
     } else { Skip "would cargo uninstall rtk" }
-  } else { Skip "rtk not installed" }
+  } else { Skip "no legacy cargo rtk on PATH" }
 
   if (Test-Cmd npm) {
     $hasMcp = $false
@@ -329,9 +346,13 @@ if (-not $doRemoveExternal) {
     }
   }
 
-  # engram: remove from user bin and .opencode/engram (portable, never use  absolute in logs)
+  # engram: remove from user bin, GLOBAL ~/.config/opencode/engram and legacy .opencode/engram
   $engramBin = "$env:USERPROFILE\bin\engram.exe"
   $engramBinDir = "$env:USERPROFILE\bin"
+  $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
+  $globalEngramDir = Join-Path $ocGlobalDir "engram"
+  $globalEngramBin = Join-Path $globalEngramDir "engram.exe"
+  $globalEngramBinNoExt = Join-Path $globalEngramDir "engram"
   $opencodeEngramDir = Join-Path $Root ".opencode\engram"
   $opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
   $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
@@ -345,42 +366,53 @@ if (-not $doRemoveExternal) {
       }
     } else { Skip "would remove engram binary $engramBin" }
   } else { Skip "engram binary not found at $engramBin (zip kept at .coderun\engram\)" }
-  # Also remove portable copy in .opencode (use .opencode folder, not repo absolute)
-  foreach ($p in @($opencodeEngramBin, $opencodeEngramBinNoExt)) {
-    $display = ".opencode/engram/$(Split-Path $p -Leaf)"
-    if (Test-Path $p) {
-      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
-        try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed engram portable $display" } catch { Warn "failed to remove $display : $_" }
-      } else { Skip "would remove engram portable $display" }
-    }
-  }
-  if (Test-Path $opencodeEngramDir) {
-    if (-not (Get-ChildItem -LiteralPath $opencodeEngramDir -Force -ErrorAction SilentlyContinue)) {
-      if ($PSCmdlet.ShouldProcess(".opencode/engram", "Remove-Item")) {
-        try { Remove-Item -LiteralPath $opencodeEngramDir -Force -ErrorAction SilentlyContinue; Ok "removed empty .opencode/engram/" } catch {}
+  # Remove portable engram copies: global ~/.config/opencode/engram (current install) + legacy .opencode/engram
+  foreach ($engramLoc in @(
+    @{ Bins = @($globalEngramBin, $globalEngramBinNoExt); Dir = $globalEngramDir; Label = "~/.config/opencode/engram" },
+    @{ Bins = @($opencodeEngramBin, $opencodeEngramBinNoExt); Dir = $opencodeEngramDir; Label = ".opencode/engram" }
+  )) {
+    foreach ($p in $engramLoc.Bins) {
+      if (Test-Path $p) {
+        $display = "$($engramLoc.Label)/$(Split-Path $p -Leaf)"
+        if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
+          try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed engram copy $display" } catch { Warn "failed to remove $display : $_" }
+        } else { Skip "would remove engram copy $display" }
       }
-    } else { Skip "keeping .opencode/engram/ (contains other files)" }
+    }
+    if (Test-Path $engramLoc.Dir) {
+      if (-not (Get-ChildItem -LiteralPath $engramLoc.Dir -Force -ErrorAction SilentlyContinue)) {
+        if ($PSCmdlet.ShouldProcess($engramLoc.Label, "Remove-Item")) {
+          try { Remove-Item -LiteralPath $engramLoc.Dir -Force -ErrorAction SilentlyContinue; Ok "removed empty $($engramLoc.Label)/" } catch {}
+        }
+      } else { Skip "keeping $($engramLoc.Label)/ (contains other files)" }
+    } else { Skip "not found $($engramLoc.Label)/" }
   }
-  # 3c. Opencode npm plugin (file:../packages/opencode-coderun) -- installed into .opencode/node_modules
+  # 3c. Opencode npm plugin -- installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
   Info "Removing opencode npm plugin (opencode-coderun)..."
   $opencodeNodeModules = @(
+    (Join-Path $ocGlobalDir "node_modules\opencode-coderun"),
+    (Join-Path $ocGlobalDir "node_modules\@opencode-ai"),
+    (Join-Path $ocGlobalDir "package-lock.json"),
     (Join-Path $Root ".opencode\node_modules\opencode-coderun"),
     (Join-Path $Root ".opencode\node_modules\@opencode-ai"),
-    (Join-Path $Root ".opencode\package-lock.json")
+    (Join-Path $Root ".opencode\package-lock.json"),
+    (Join-Path $env:USERPROFILE ".cache\opencode\node_modules\opencode-coderun")
   )
   foreach ($p in $opencodeNodeModules) {
     $display = $p -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
+    if ($display -eq $p) { $display = $p -replace [regex]::Escape($env:USERPROFILE + "\"), "~\" }
     if (Test-Path $p) {
       if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
         try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; Ok "removed $display (opencode npm plugin)" } catch { Warn "failed to remove $display : $_" }
       } else { Skip "would remove $display" }
     } else { Skip "not found $display" }
   }
-  $opencodePkgJson = Join-Path $Root ".opencode\package.json"
-  if (Test-Path $opencodePkgJson) {
-    if ($PSCmdlet.ShouldProcess(".opencode/package.json", "clean opencode-coderun dep")) {
+  # Clean package.json deps: GLOBAL ~/.config/opencode/package.json + legacy .opencode/package.json
+  foreach ($pkgJsonPath in @((Join-Path $ocGlobalDir "package.json"), (Join-Path $Root ".opencode\package.json"))) {
+    if (-not (Test-Path $pkgJsonPath)) { Skip "not found $pkgJsonPath"; continue }
+    if ($PSCmdlet.ShouldProcess($pkgJsonPath, "clean opencode-coderun dep")) {
       try {
-        $raw = Get-Content -LiteralPath $opencodePkgJson -Raw -ErrorAction Stop
+        $raw = Get-Content -LiteralPath $pkgJsonPath -Raw -ErrorAction Stop
         $obj = $raw | ConvertFrom-Json -ErrorAction Stop
         $changed = $false
         if ($obj.PSObject.Properties["dependencies"] -and $obj.dependencies.PSObject.Properties["opencode-coderun"]) {
@@ -389,13 +421,13 @@ if (-not $doRemoveExternal) {
         # If dependencies empty, remove file; else write back
         $depCount = 0; if ($obj.PSObject.Properties["dependencies"]) { $depCount = @($obj.dependencies.PSObject.Properties).Count }
         if ($depCount -eq 0) {
-          Remove-Item -LiteralPath $opencodePkgJson -Force -ErrorAction Stop; Ok "removed empty .opencode/package.json"
+          Remove-Item -LiteralPath $pkgJsonPath -Force -ErrorAction Stop; Ok "removed empty $pkgJsonPath"
         } elseif ($changed) {
-          $obj | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $opencodePkgJson -Encoding UTF8; Ok "cleaned opencode-coderun from .opencode/package.json"
-        } else { Skip "no opencode-coderun in .opencode/package.json" }
-      } catch { Warn "failed to clean .opencode/package.json : $_" }
-    } else { Skip "would clean .opencode/package.json" }
-  } else { Skip "not found .opencode/package.json" }
+          $obj | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJsonPath -Encoding UTF8; Ok "cleaned opencode-coderun from $pkgJsonPath"
+        } else { Skip "no opencode-coderun in $pkgJsonPath" }
+      } catch { Warn "failed to clean ${pkgJsonPath} : $_" }
+    } else { Skip "would clean $pkgJsonPath" }
+  }
   # Remove empty .opencode dir if only empty after plugin removal (keep if has opencode.jsonc)
   if ((Test-Path "$Root\.opencode") -and -not (Get-ChildItem -LiteralPath "$Root\.opencode" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @(".gitkeep") })) {
     if ($PSCmdlet.ShouldProcess(".opencode", "Remove-Item")) {
@@ -480,3 +512,7 @@ Info "To reinstall: powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 # Only warn if global plugin still present after uninstall (repo plugin is intentionally kept)
 if (Test-Path "$env:USERPROFILE\.config\opencode\plugins\coderun.ts") { Warn "global plugin still present at $env:USERPROFILE\.config\opencode\plugins\coderun.ts - may need manual removal or restart opencode" }
 if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins\coderun.ts")) { Warn "repository plugin still present at .opencode/plugins/coderun.ts even after --RemoveRepo" }
+if ($doRemoveExternal) {
+  if (Test-Path "$env:USERPROFILE\.config\opencode\engram") { Warn "global engram copy still present at ~\.config\opencode\engram - remove manually if not shared with other tools" }
+  if (Test-Path "$env:USERPROFILE\.config\opencode\package.json") { Warn "global ~\.config\opencode\package.json still references coderun deps - inspect before removing (may contain your own deps)" }
+}

@@ -1,5 +1,6 @@
 #![allow(linker_messages)]
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use coderun_core::Config;
@@ -27,7 +28,7 @@ enum Commands {
         socket: Option<String>,
     },
     
-    /// Initialize runtime for current repository (with optional wizard)
+    /// One-command repository bootstrap: scaffold → discovery → indexing → knowledge → engram → profile
     Init {
         /// Run interactive setup wizard
         #[arg(long)]
@@ -164,25 +165,24 @@ fn cmd_serve(_port: u16, _socket: Option<String>) -> Result<(), String> {
 
 fn cmd_init(wizard: bool) -> Result<(), String> {
     if wizard {
-        println!("Coderun Setup Wizard (v0.3.0)");
-        println!("═══════════════════════════════════════");
-        let langs = ["rust", "python", "typescript", "javascript", "go"];
-        println!("  Detected languages: {}", langs.join(", "));
-        println!("  LiteLLM endpoint [http://localhost:4000]: (press enter for default)");
-        println!("  Engram endpoint  [http://localhost:9090]: (press enter for default)");
-        println!("  Token budget     [12000]: (press enter for default)");
-        println!("  (Wizard uses defaults in non-interactive mode — edit .coderun/config.toml afterwards)");
+        println!("(wizard mode is non-interactive — defaults applied, edit .coderun/config.toml afterwards)");
         println!();
     }
-    println!("Initializing coderun for current repository...");
-    
-    // Create .coderun directory
+    let started = std::time::Instant::now();
+    let project_root = std::env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let project_name = project_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repository".to_string());
+
+    println!("Coderun Bootstrap — {}", project_name);
+    println!("═══════════════════════════════════════");
+
+    println!("[1/6] Scaffold (.coderun/, config, skills, database)");
     let coderun_dir = PathBuf::from(".coderun");
     std::fs::create_dir_all(&coderun_dir)
         .map_err(|e| format!("Failed to create .coderun directory: {}", e))?;
-    println!("  Created .coderun/");
-    
-    // Create default config if not exists
     let config_path = coderun_dir.join("config.toml");
     if !config_path.exists() {
         let default_config = Config::default();
@@ -190,36 +190,440 @@ fn cmd_init(wizard: bool) -> Result<(), String> {
             .map_err(|e| format!("Failed to serialize default config: {}", e))?;
         std::fs::write(&config_path, config_toml)
             .map_err(|e| format!("Failed to write config: {}", e))?;
-        println!("  Created .coderun/config.toml");
-    } else {
-        println!("  Config already exists, skipping");
     }
-    
-    // Create skills directory
-    let skills_dir = coderun_dir.join("skills");
-    std::fs::create_dir_all(&skills_dir)
+    std::fs::create_dir_all(coderun_dir.join("skills"))
         .map_err(|e| format!("Failed to create skills directory: {}", e))?;
-    println!("  Created .coderun/skills/");
-    
-    // Initialize database
-    let db_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("data.db");
+    let db_path = get_db_path();
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create database directory: {}", e))?;
     }
-    let _db = coderun_storage::Database::open(&db_path)
+    let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to initialize database: {}", e))?;
-    println!("  Initialized database at {}", db_path.display());
-    
+
+    println!("[2/6] Repository discovery (languages, frameworks, commands)");
+    let discovery = discover_repository(&project_root);
+    println!(
+        "      languages: {}",
+        discovery
+            .languages
+            .iter()
+            .map(|(l, n)| format!("{}({})", l, n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    println!("[3/6] Indexing (tree-sitter symbols + tantivy BM25 + dependency graph)");
+    let event_bus = coderun_events::EventBus::new();
+    let mut repo_intel = coderun_repo_intel::RepositoryIntelligence::new(
+        project_root.clone(),
+        db,
+        event_bus.clone(),
+    );
+    let stats = repo_intel
+        .index_repository()
+        .map_err(|e| format!("Indexing failed: {}", e))?;
+    let dep_edges = repo_intel
+        .build_dependency_graph()
+        .map(|g| g.edge_count())
+        .unwrap_or(0);
+    drop(repo_intel);
+    let db = coderun_storage::Database::open(&db_path)
+        .map_err(|e| format!("Failed to reopen database: {}", e))?;
+
+    println!("[4/6] Knowledge initialization (README, decision records)");
+    let (knowledge_seeded, readme) = ingest_seed_documents(&project_root, &db);
+
+    println!("[5/6] Engram memory initialization");
+    let config = Config::load(&project_root).unwrap_or_default();
+    let profile = build_profile_json(
+        &project_name,
+        &discovery,
+        stats.files_indexed,
+        stats.symbols_extracted,
+        dep_edges,
+    );
+    let profile_json =
+        serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string());
+    let engram_status = init_engram(&config, &project_name, &profile_json, readme.as_deref());
+    println!("      {}", engram_status);
+
+    println!("[6/6] Repository profile");
+    let profile_path = coderun_dir.join("profile.json");
+    std::fs::write(&profile_path, &profile_json)
+        .map_err(|e| format!("Failed to write profile: {}", e))?;
+    let _ = db.store_knowledge("profile", "repository-profile", &profile_json, 1.0, "bootstrap");
+
     println!();
-    println!("✓ Initialization complete!");
+    println!("✓ Bootstrap complete in {}ms", started.elapsed().as_millis());
+    println!();
+    println!("  Files indexed:     {}", stats.files_indexed);
+    println!("  Symbols extracted: {}", stats.symbols_extracted);
+    println!("  Dependency edges:  {}", dep_edges);
+    println!(
+        "  Languages:         {}",
+        if discovery.languages.is_empty() {
+            "-".to_string()
+        } else {
+            discovery
+                .languages
+                .iter()
+                .map(|(l, _)| l.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!(
+        "  Frameworks:        {}",
+        if discovery.frameworks.is_empty() {
+            "-".to_string()
+        } else {
+            discovery.frameworks.join(", ")
+        }
+    );
+    println!(
+        "  Build command:     {}",
+        discovery.build_command.as_deref().unwrap_or("-")
+    );
+    println!(
+        "  Test command:      {}",
+        discovery.test_command.as_deref().unwrap_or("-")
+    );
+    println!("  Knowledge seeded:  {} entries", knowledge_seeded);
+    println!("  Profile:           {}", profile_path.display());
     println!();
     println!("Next steps:");
-    println!("  1. Run 'coderun index' to index your repository");
-    println!("  2. Run 'coderun serve' to start the daemon");
-    println!("  3. Configure your coding agent to use coderun");
-    
+    println!("  1. Run 'coderun serve' to start the daemon");
+    println!("  2. Configure your coding agent to use coderun");
+    println!("  Re-run 'coderun init' anytime — incremental and safe to repeat.");
+
     Ok(())
+}
+
+#[derive(Default, Debug)]
+struct Discovery {
+    languages: Vec<(String, usize)>,
+    frameworks: Vec<String>,
+    build_command: Option<String>,
+    test_command: Option<String>,
+    important_dirs: Vec<String>,
+    git_branch: Option<String>,
+}
+
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".github",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".idea",
+    ".vscode",
+    ".next",
+    "coverage",
+    ".coderun",
+];
+
+fn discover_repository(root: &Path) -> Discovery {
+    let mut d = Discovery::default();
+
+    let mut ext_counts: HashMap<String, usize> = HashMap::new();
+    walk_ext_counts(root, 0, &mut ext_counts);
+    let mut langs: Vec<(String, usize)> = ext_counts
+        .into_iter()
+        .filter_map(|(ext, n)| ext_language(&ext).map(|l| (l.to_string(), n)))
+        .collect();
+    langs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    d.languages = langs.into_iter().take(10).collect();
+
+    for candidate in [
+        "src",
+        "crates",
+        "lib",
+        "packages",
+        "apps",
+        "services",
+        "docs",
+        "tests",
+        "test",
+        "scripts",
+        "benches",
+        "examples",
+        "deploy",
+    ] {
+        if root.join(candidate).is_dir() {
+            d.important_dirs.push(candidate.to_string());
+        }
+    }
+
+    detect_stack(root, &mut d);
+
+    if root.join(".git").exists() {
+        if let Ok(head) = std::fs::read_to_string(root.join(".git").join("HEAD")) {
+            let head = head.trim();
+            d.git_branch = head
+                .strip_prefix("ref: refs/heads/")
+                .map(|s| s.to_string())
+                .or_else(|| Some(head.chars().take(12).collect()));
+        }
+    }
+
+    d
+}
+
+fn walk_ext_counts(dir: &Path, depth: usize, counts: &mut HashMap<String, usize>) {
+    if depth > 12 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            walk_ext_counts(&entry.path(), depth + 1, counts);
+        } else if ft.is_file() {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                if !ext.is_empty() {
+                    *counts.entry(ext.to_lowercase()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+}
+
+fn ext_language(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "ts" | "mts" | "cts" | "tsx" => "typescript",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "scala" => "scala",
+        "sh" | "bash" => "shell",
+        "sql" => "sql",
+        _ => return None,
+    })
+}
+
+fn detect_stack(root: &Path, d: &mut Discovery) {
+    if root.join("Cargo.toml").exists() {
+        d.frameworks.push("cargo".to_string());
+        if let Ok(s) = std::fs::read_to_string(root.join("Cargo.toml")) {
+            if s.contains("[workspace]") {
+                d.frameworks.push("rust-workspace".to_string());
+            }
+        }
+        d.build_command.get_or_insert_with(|| "cargo build".into());
+        d.test_command.get_or_insert_with(|| "cargo test".into());
+    }
+    let pkg = root.join("package.json");
+    if pkg.exists() {
+        d.frameworks.push("node".to_string());
+        if let Ok(content) = std::fs::read_to_string(&pkg) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                for fw in ["react", "vue", "svelte", "next", "express", "@nestjs/core"] {
+                    if v["dependencies"].get(fw).is_some()
+                        || v["devDependencies"].get(fw).is_some()
+                    {
+                        d.frameworks.push(fw.trim_start_matches('@').replace('/', "-"));
+                    }
+                }
+                if let Some(b) = v["scripts"]["build"].as_str() {
+                    d.build_command.get_or_insert_with(|| b.to_string());
+                }
+                if let Some(t) = v["scripts"]["test"].as_str() {
+                    d.test_command.get_or_insert_with(|| t.to_string());
+                }
+            }
+        }
+        if d.test_command.is_none() {
+            d.test_command = Some("npm test".to_string());
+        }
+    }
+    if root.join("go.mod").exists() {
+        d.frameworks.push("go-modules".to_string());
+        d.build_command
+            .get_or_insert_with(|| "go build ./...".into());
+        d.test_command.get_or_insert_with(|| "go test ./...".into());
+    }
+    if root.join("pyproject.toml").exists()
+        || root.join("requirements.txt").exists()
+        || root.join("setup.py").exists()
+    {
+        d.frameworks.push("python".to_string());
+        if let Ok(s) = std::fs::read_to_string(root.join("pyproject.toml")) {
+            if s.contains("[tool.poetry]") {
+                d.frameworks.push("poetry".to_string());
+                d.test_command
+                    .get_or_insert_with(|| "poetry run pytest".into());
+            } else if s.contains("[tool.uv]") {
+                d.frameworks.push("uv".to_string());
+            }
+        }
+        d.test_command.get_or_insert_with(|| "pytest".into());
+    }
+    if root.join("pom.xml").exists() {
+        d.frameworks.push("maven".to_string());
+        d.build_command.get_or_insert_with(|| "mvn package".into());
+        d.test_command.get_or_insert_with(|| "mvn test".into());
+    } else if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
+        d.frameworks.push("gradle".to_string());
+        d.build_command.get_or_insert_with(|| "gradle build".into());
+        d.test_command.get_or_insert_with(|| "gradle test".into());
+    }
+    if root.join("Makefile").exists() || root.join("makefile").exists() {
+        d.frameworks.push("make".to_string());
+    }
+}
+
+fn ingest_seed_documents(root: &Path, db: &coderun_storage::Database) -> (usize, Option<String>) {
+    let mut seeded = 0usize;
+    let mut readme = None;
+    for name in ["README.md", "Readme.md", "readme.md", "README"] {
+        let path = root.join(name);
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let truncated: String = content.chars().take(65_536).collect();
+                if db
+                    .store_knowledge("docs", name, &truncated, 0.9, "bootstrap")
+                    .is_ok()
+                {
+                    seeded += 1;
+                }
+                readme = Some(content);
+            }
+            break;
+        }
+    }
+    for adr_dir in ["docs/adr", "docs/decisions", "adr", "decisions"] {
+        let dir = root.join(adr_dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+                    if db
+                        .store_knowledge("adr", &rel, &content, 1.0, "bootstrap")
+                        .is_ok()
+                    {
+                        seeded += 1;
+                    }
+                }
+            }
+        }
+    }
+    (seeded, readme)
+}
+
+fn build_profile_json(
+    project_name: &str,
+    d: &Discovery,
+    files_indexed: usize,
+    symbols_extracted: usize,
+    dep_edges: usize,
+) -> serde_json::Value {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| t.as_secs())
+        .unwrap_or(0);
+    serde_json::json!({
+        "version": 1,
+        "project": project_name,
+        "generated_at_unix": ts,
+        "git_branch": d.git_branch,
+        "languages": d.languages
+            .iter()
+            .map(|(name, files)| serde_json::json!({"name": name, "files": files}))
+            .collect::<Vec<_>>(),
+        "frameworks": d.frameworks,
+        "commands": {"build": d.build_command, "test": d.test_command},
+        "important_dirs": d.important_dirs,
+        "index": {
+            "files_indexed": files_indexed,
+            "symbols_extracted": symbols_extracted,
+            "dependency_edges": dep_edges,
+        },
+    })
+}
+
+fn init_engram(
+    config: &Config,
+    namespace: &str,
+    profile_json: &str,
+    readme: Option<&str>,
+) -> String {
+    if !config.knowledge.memory_enabled {
+        return "disabled in config (knowledge.memory_enabled=false)".to_string();
+    }
+    let endpoint = config.knowledge.memory_endpoint.clone();
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => return format!("runtime error ({})", e),
+    };
+    rt.block_on(async move {
+        let client = match coderun_knowledge::engram::EngramClient::new(
+            coderun_knowledge::engram::EngramConfig {
+                endpoint: endpoint.clone(),
+                timeout_ms: 3000,
+                ..Default::default()
+            },
+        ) {
+            Ok(c) => c,
+            Err(e) => return format!("client error ({})", e),
+        };
+        if !client.health_check().await {
+            return format!(
+                "endpoint unreachable at {} (seed skipped, fail-open)",
+                endpoint
+            );
+        }
+        let mut saved = 0usize;
+        let profile_entry = coderun_knowledge::engram::MemoryEntry {
+            namespace: namespace.to_string(),
+            key: "repository-profile".to_string(),
+            value: profile_json.to_string(),
+            metadata: Some(serde_json::json!({"source": "bootstrap", "type": "profile"})),
+        };
+        if client.save_memory(&profile_entry).await.is_ok() {
+            saved += 1;
+        }
+        if let Some(r) = readme {
+            let entry = coderun_knowledge::engram::MemoryEntry {
+                namespace: namespace.to_string(),
+                key: "readme".to_string(),
+                value: r.chars().take(4000).collect(),
+                metadata: Some(serde_json::json!({"source": "bootstrap", "type": "doc"})),
+            };
+            if client.save_memory(&entry).await.is_ok() {
+                saved += 1;
+            }
+        }
+        format!(
+            "✓ seeded {} entries at {} (namespace '{}')",
+            saved, endpoint, namespace
+        )
+    })
 }
 
 fn cmd_index(watch: bool) -> Result<(), String> {
@@ -633,6 +1037,17 @@ fn cmd_doctor() -> Result<(), String> {
         println!("⚠ NOT FOUND (run 'coderun init')");
     }
 
+    // Check repository profile
+    print!("Repo profile:     ");
+    {
+        let prof = PathBuf::from(".coderun/profile.json");
+        if prof.exists() {
+            println!("✓ OK ({})", prof.display());
+        } else {
+            println!("⚠ NOT FOUND (run 'coderun init' to bootstrap)");
+        }
+    }
+
     // Check socket path writable (new v0.3.0)
     print!("Socket path:     ");
     let cfg = Config::load(&project_root).unwrap_or_default();
@@ -800,5 +1215,40 @@ mod tests {
     fn test_dirs_exists() {
         let dirs = dirs();
         assert!(dirs.is_some());
+    }
+
+    #[test]
+    fn test_ext_language() {
+        assert_eq!(ext_language("rs"), Some("rust"));
+        assert_eq!(ext_language("tsx"), Some("typescript"));
+        assert_eq!(ext_language("hpp"), Some("cpp"));
+        assert_eq!(ext_language(""), None);
+        assert_eq!(ext_language("png"), None);
+    }
+
+    #[test]
+    fn test_discovery_and_profile_json() {
+        let tmp = std::env::temp_dir().join(format!("coderun-disc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"x\"\n[workspace]\n").unwrap();
+        std::fs::write(tmp.join("src").join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(tmp.join("README.md"), "# demo").unwrap();
+
+        let d = discover_repository(&tmp);
+        assert!(d.frameworks.contains(&"cargo".to_string()));
+        assert!(d.frameworks.contains(&"rust-workspace".to_string()));
+        assert_eq!(d.build_command.as_deref(), Some("cargo build"));
+        assert_eq!(d.test_command.as_deref(), Some("cargo test"));
+        assert!(d.important_dirs.contains(&"src".to_string()));
+        assert!(d.languages.iter().any(|(l, n)| l == "rust" && *n >= 1));
+
+        let profile = build_profile_json("x", &d, 1, 2, 3);
+        assert_eq!(profile["project"], "x");
+        assert_eq!(profile["index"]["files_indexed"], 1);
+        assert_eq!(profile["commands"]["test"], "cargo test");
+        let json = serde_json::to_string_pretty(&profile).unwrap();
+        assert!(json.contains("rust"));
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

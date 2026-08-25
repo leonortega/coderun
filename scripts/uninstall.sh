@@ -82,7 +82,13 @@ for pp in ".opencode/plugins/coderun.ts" "$HOME/.config/opencode/plugins/coderun
   [ "$pp" = ".opencode/plugins/coderun.ts" ] && check_pp="$ROOT/.opencode/plugins/coderun.ts"
   if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm plugin 'coderun'"; else rm -f "$check_pp" && ok "removed plugin 'coderun'"; fi; else skip "not found plugin 'coderun'"; fi
 done
-# Also clean portable engram in .opencode
+# Also clean portable engram copies: GLOBAL ~/.config/opencode/engram (current install) + legacy .opencode/engram
+for pp in "$HOME/.config/opencode/engram/engram" "$HOME/.config/opencode/engram/engram.exe"; do
+  if [ -e "$pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$pp" && ok "removed $pp (global engram copy)"; fi; fi
+done
+if [ -d "$HOME/.config/opencode/engram" ] && [ -z "$(ls -A "$HOME/.config/opencode/engram" 2>/dev/null)" ]; then
+  if $DRY_RUN; then skip "would rmdir ~/.config/opencode/engram"; else rmdir "$HOME/.config/opencode/engram" 2>/dev/null && ok "removed empty ~/.config/opencode/engram/"; fi
+fi
 for pp in ".opencode/engram/engram" ".opencode/engram/engram.exe"; do
   check_pp="$ROOT/$pp"
   if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$check_pp" && ok "removed $pp (portable engram)"; fi; fi
@@ -91,22 +97,25 @@ if [ -d "$ROOT/.opencode/engram" ] && [ -z "$(ls -A "$ROOT/.opencode/engram" 2>/
   if $DRY_RUN; then skip "would rmdir .opencode/engram"; else rmdir "$ROOT/.opencode/engram" 2>/dev/null && ok "removed empty .opencode/engram/"; fi
 fi
 
-# 3b. Opencode npm plugin (file:../packages/opencode-coderun) — installed into .opencode/node_modules
+# 3b. Opencode npm plugin — installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
 info "Removing opencode npm plugin (opencode-coderun)..."
-for pp in ".opencode/node_modules/opencode-coderun" ".opencode/node_modules/@opencode-ai" ".opencode/package-lock.json"; do
-  if [ -e "$ROOT/$pp" ]; then if $DRY_RUN; then skip "would rm -rf $pp"; else rm -rf "$ROOT/$pp" && ok "removed $pp (opencode npm plugin)"; fi; else skip "not found $pp"; fi
+for pp in "$HOME/.config/opencode/node_modules/opencode-coderun" "$HOME/.config/opencode/node_modules/@opencode-ai" "$HOME/.config/opencode/package-lock.json" "$HOME/.cache/opencode/node_modules/opencode-coderun" ".opencode/node_modules/opencode-coderun" ".opencode/node_modules/@opencode-ai" ".opencode/package-lock.json"; do
+  case "$pp" in /*) check_pp="$pp" ;; *) check_pp="$ROOT/$pp" ;; esac
+  if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm -rf $pp"; else rm -rf "$check_pp" && ok "removed $pp (opencode npm plugin)"; fi; else skip "not found $pp"; fi
 done
-# Also handle .opencode/package.json — remove opencode-coderun dep or delete if only that
-if [ -f "$ROOT/.opencode/package.json" ]; then
-  if $DRY_RUN; then skip "would clean .opencode/package.json (remove opencode-coderun dep)"; else
-    if command -v node >/dev/null 2>&1; then
-      node -e "const fs=require('fs');const p='$ROOT/.opencode/package.json';try{let j=JSON.parse(fs.readFileSync(p,'utf8'));let changed=false;if(j.dependencies&&j.dependencies['opencode-coderun']){delete j.dependencies['opencode-coderun'];changed=true}if(j.dependencies&&Object.keys(j.dependencies).length===0){fs.unlinkSync(p); console.log('removed empty .opencode/package.json');}else if(changed){fs.writeFileSync(p,JSON.stringify(j,null,2)); console.log('cleaned opencode-coderun from .opencode/package.json')} }catch(e){}" 2>/dev/null && ok "cleaned .opencode/package.json" || warn "failed to clean .opencode/package.json"
-    else
-      # fallback: remove file if it only contains opencode-coderun
-      if grep -q "opencode-coderun" "$ROOT/.opencode/package.json" 2>/dev/null && [ "$(wc -l < "$ROOT/.opencode/package.json")" -lt 10 ]; then rm -f "$ROOT/.opencode/package.json" && ok "removed .opencode/package.json"; fi
+# Clean package.json deps: GLOBAL ~/.config/opencode/package.json + legacy .opencode/package.json — remove opencode-coderun dep or delete if only that
+for pj in "$HOME/.config/opencode/package.json" "$ROOT/.opencode/package.json"; do
+  if [ -f "$pj" ]; then
+    if $DRY_RUN; then skip "would clean $pj (remove opencode-coderun dep)"; else
+      if command -v node >/dev/null 2>&1; then
+        PKG_JSON_PATH="$pj" node -e "const fs=require('fs');const p=process.env.PKG_JSON_PATH;try{let j=JSON.parse(fs.readFileSync(p,'utf8'));let changed=false;if(j.dependencies&&j.dependencies['opencode-coderun']){delete j.dependencies['opencode-coderun'];changed=true}if(j.dependencies&&Object.keys(j.dependencies).length===0){fs.unlinkSync(p);console.log('removed empty '+p)}else if(changed){fs.writeFileSync(p,JSON.stringify(j,null,2));console.log('cleaned opencode-coderun from '+p)} }catch(e){}" 2>/dev/null && ok "cleaned $pj" || warn "failed to clean $pj"
+      else
+        # fallback: remove file if it only contains opencode-coderun
+        if grep -q "opencode-coderun" "$pj" 2>/dev/null && [ "$(wc -l < "$pj")" -lt 10 ]; then rm -f "$pj" && ok "removed $pj"; fi
+      fi
     fi
-  fi
-else skip "not found .opencode/package.json"; fi
+  else skip "not found $pj"; fi
+done
 # Remove empty .opencode dir if only empty after plugin removal (keep if has other config)
 if [ -d "$ROOT/.opencode" ] && [ -z "$(ls -A "$ROOT/.opencode" 2>/dev/null)" ]; then
   if $DRY_RUN; then skip "would rmdir .opencode (empty)"; else rmdir "$ROOT/.opencode" 2>/dev/null && ok "removed empty .opencode/"; fi
@@ -173,8 +182,12 @@ fi
 if ! $DO_REMOVE_EXTERNAL; then info "Skipping external tools (--keep-external)";
 else
   info "Removing external tools (strict default)..."
-  if command -v sg >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall ast-grep"; else cargo uninstall ast-grep 2>/dev/null && ok "uninstalled ast-grep" || warn "ast-grep uninstall failed"; fi; else skip "ast-grep not installed"; fi
-  if command -v rtk >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall rtk"; else cargo uninstall rtk 2>/dev/null && ok "uninstalled rtk" || warn "rtk uninstall failed"; fi; else skip "rtk not installed"; fi
+  # ast-grep: npm @ast-grep/cli (current) or legacy cargo install
+  if command -v npm >/dev/null 2>&1 && npm list -g @ast-grep/cli >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g @ast-grep/cli"; else npm uninstall -g @ast-grep/cli 2>/dev/null && ok "uninstalled @ast-grep/cli (npm -g)" || warn "@ast-grep/cli uninstall failed"; fi; else skip "@ast-grep/cli not installed (npm -g)"; fi
+  if command -v sg >/dev/null 2>&1 || command -v ast-grep >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall ast-grep (legacy)"; else cargo uninstall ast-grep 2>/dev/null && ok "uninstalled ast-grep (legacy cargo)" || warn "ast-grep cargo uninstall failed"; fi; else skip "legacy cargo ast-grep not installed"; fi
+  # rtk: user-bin prebuilt copy (current) + legacy cargo install
+  if [ -f "$HOME/bin/rtk" ]; then if $DRY_RUN; then skip "would rm ~/bin/rtk"; else rm -f "$HOME/bin/rtk" && ok "removed ~/bin/rtk"; fi; else skip "~/bin/rtk not found"; fi
+  if command -v rtk >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall rtk (legacy)"; else cargo uninstall rtk 2>/dev/null && ok "uninstalled rtk (legacy cargo)" || warn "rtk cargo uninstall failed"; fi; else skip "legacy cargo rtk not installed"; fi
   if command -v npm >/dev/null 2>&1; then
     for pkg in codebase-memory-mcp promptfoo eslint; do
       if npm list -g "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g $pkg"; else npm uninstall -g "$pkg" 2>/dev/null && ok "uninstalled $pkg (npm -g)"; fi; else skip "$pkg not installed"; fi
