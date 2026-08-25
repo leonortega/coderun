@@ -357,14 +357,12 @@ if (-not $doRemoveExternal) {
     }
   } else { Skip "pip not found - skipping pip package removal" }
 
-  # clippy + rustup (was skipped, now actually removed as requested)
+  # clippy (never uninstall rustup itself)
   if (Test-Cmd rustup) {
     if ($PSCmdlet.ShouldProcess("clippy (rustup component remove clippy)", "rustup component remove")) {
       try { rustup component remove clippy 2>&1 | Out-Null; Ok "removed rustup component clippy" } catch { Warn "failed to remove clippy: $_" }
     } else { Skip "would rustup component remove clippy" }
-    if ($PSCmdlet.ShouldProcess("rustup (rustup self uninstall -y)", "rustup self uninstall")) {
-      try { rustup self uninstall -y 2>&1 | Out-Null; Ok "uninstalled rustup" } catch { Warn "rustup uninstall failed: $_" }
-    } else { Skip "would rustup self uninstall -y" }
+    Skip "keeping rustup toolchain (never uninstall rustup)"
   } else { Skip "rustup not installed" }
 }
 
