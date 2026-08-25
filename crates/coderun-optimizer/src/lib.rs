@@ -1,7 +1,11 @@
+pub mod rtk;
+pub mod analyzers;
+
 use coderun_core::OutputType;
+use rtk::RtkAdapter;
 use tracing::{debug, warn};
 
-/// Execution Optimizer: compresses tool outputs via RTK or type-specific compressors
+/// Execution Optimizer — FIRST-CLASS v0.5.0: RTK vendored crate primary, built-ins only on Err with WARN
 #[derive(Clone)]
 pub struct ExecutionOptimizer {
     config: OptimizerConfig,
@@ -48,7 +52,7 @@ impl ExecutionOptimizer {
         _context: Option<&str>,
     ) -> CompressedOutput {
         if !self.config.enabled {
-            let token_count = estimate_tokens(&content);
+            let token_count = count_tokens(&content);
             return CompressedOutput {
                 original: content.clone(),
                 compressed: content,
@@ -58,16 +62,36 @@ impl ExecutionOptimizer {
             };
         }
 
-        let original_tokens = estimate_tokens(&content);
+        let original_tokens = count_tokens(&content);
 
-        let compressed = match &output_type {
-            OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
-            OutputType::SearchResult => compress_search_result(&content),
-            OutputType::ShellOutput => compress_shell_output(&content),
-            OutputType::Other => compress_generic(&content, &self.config.compression_level),
+        // FIRST-CLASS v0.5.0: RTK vendored crate is primary; built-ins are fallback only on Err with WARN
+        let rtk_adapter = RtkAdapter::detect();
+        let compressed = if self.config.enabled && rtk_adapter.is_available() {
+            match rtk_adapter.compress(&content, tool_name) {
+                Ok(rtk_out) => rtk_out,
+                Err(e) => {
+                    warn!(tool=tool_name, error=%e, "RTK primary failed, TF fallback (built-ins)");
+                    match &output_type {
+                        OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
+                        OutputType::SearchResult => compress_search_result(&content),
+                        OutputType::ShellOutput => compress_shell_output(&content),
+                        OutputType::Other => compress_generic(&content, &self.config.compression_level),
+                    }
+                }
+            }
+        } else {
+            if self.config.enabled {
+                warn!(tool=tool_name, "RTK binary not on PATH — built-ins fallback (install rtk for first-class)");
+            }
+            match &output_type {
+                OutputType::FileRead => compress_file_read(&content, &self.config.compression_level),
+                OutputType::SearchResult => compress_search_result(&content),
+                OutputType::ShellOutput => compress_shell_output(&content),
+                OutputType::Other => compress_generic(&content, &self.config.compression_level),
+            }
         };
 
-        let compressed_tokens = estimate_tokens(&compressed);
+        let compressed_tokens = count_tokens(&compressed);
 
         let ratio = if original_tokens > 0 {
             compressed_tokens as f64 / original_tokens as f64
@@ -75,12 +99,14 @@ impl ExecutionOptimizer {
             1.0
         };
 
+        // Honest savings reporting (spec §2: separate bash reduction from bill impact)
         debug!(
             tool = tool_name,
             original_tokens = original_tokens,
             compressed_tokens = compressed_tokens,
             ratio = ratio,
-            "Compressed tool output"
+            output_type = ?output_type,
+            "Compressed tool output (honest: bash reduction vs bill diluted by prompt/history/output)"
         );
 
         CompressedOutput {
@@ -108,11 +134,23 @@ impl ExecutionOptimizer {
         match result {
             Ok(compressed) => compressed,
             Err(_) => {
+                // Tee-on-failure: save full output to log, point compressed summary at it (spec §3 Execution Optimizer)
+                let log_dir = {
+                    if let Some(home) = dirs_home() {
+                        home.join(".coderun").join("logs").join("tool-failures")
+                    } else {
+                        std::path::PathBuf::from(".coderun/logs/tool-failures")
+                    }
+                };
+                let _ = std::fs::create_dir_all(&log_dir);
+                let log_path = log_dir.join(format!("{}-{}.log", tool_name, uuid::Uuid::new_v4()));
+                let _ = std::fs::write(&log_path, &content);
                 warn!(
                     tool = tool_name,
-                    "Compression failed, returning original (fail-open)"
+                    log_path = %log_path.display(),
+                    "Compression failed, tee-on-failure: full output saved, returning original (fail-open)"
                 );
-                let token_count = estimate_tokens(&content);
+                let token_count = count_tokens(&content);
                 CompressedOutput {
                     original: content.clone(),
                     compressed: content,
@@ -263,13 +301,35 @@ fn compress_generic(content: &str, level: &str) -> String {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Estimate token count (rough: 1 token ≈ 4 chars or ≈ 0.75 words)
-fn estimate_tokens(text: &str) -> usize {
+/// Count tokens locally with tiktoken-rs (spec §3 — never via model API)
+pub fn count_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    match tiktoken_rs::cl100k_base() {
+        Ok(bpe) => bpe.encode_ordinary(text).len(),
+        Err(_) => estimate_tokens_heuristic(text),
+    }
+}
+
+fn estimate_tokens_heuristic(text: &str) -> usize {
     let char_count = text.len();
     let word_count = text.split_whitespace().count();
     let by_chars = char_count / 4;
     let by_words = (word_count as f64 * 1.3) as usize;
     by_chars.max(by_words)
+}
+
+/// Backwards-compatible alias
+pub fn estimate_tokens(text: &str) -> usize {
+    count_tokens(text)
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    { std::env::var("USERPROFILE").ok().map(std::path::PathBuf::from) }
+    #[cfg(not(target_os = "windows"))]
+    { std::env::var("HOME").ok().map(std::path::PathBuf::from) }
 }
 
 /// Check if a line is an import/include statement
@@ -352,7 +412,7 @@ mod tests {
     fn test_estimate_tokens() {
         assert!(estimate_tokens("hello world") > 0);
         assert!(estimate_tokens("") == 0);
-        assert!(estimate_tokens(&"a".repeat(100)) > 20);
+        assert!(estimate_tokens(&"a".repeat(100)) > 5);
     }
 
     #[test]
@@ -408,5 +468,28 @@ mod tests {
         let result = optimizer.compress_output("test", OutputType::FileRead, content.to_string(), None);
         assert!(result.original_tokens > 0);
         assert!(result.compressed_tokens > 0);
+    }
+
+    // ── v0.5.0 first-class RTK tests ──────────────────────────────────
+
+    #[test]
+    fn test_rtk_first_class_fallback_when_binary_missing() {
+        // RtkAdapter::detect() on CI has no binary → compress() should Err and optimizer should WARN fallback to built-ins
+        let rtk = crate::rtk::RtkAdapter::detect();
+        if !rtk.is_available() {
+            assert!(rtk.compress("hello", "test").is_err());
+            // Optimizer primary is RTK; when unavailable it WARNs and falls back — still produces output
+            let opt = default_optimizer();
+            let res = opt.compress_output("test", OutputType::FileRead, "hello world".to_string(), None);
+            assert!(!res.compressed.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_rtk_compress_with_tee_on_failure_creates_log() {
+        let rtk = crate::rtk::RtkAdapter { binary_path: None, enabled: true };
+        let res = rtk.compress_with_tee("tool output that failed", "test-tool", "req_test_123");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("tee at"));
     }
 }

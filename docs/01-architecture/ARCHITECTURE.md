@@ -8,7 +8,7 @@ Define the complete v1 architecture of the AI Runtime for Coding Agents. This do
 
 The runtime is a single-process local daemon written in Rust. It receives coding tasks from a coding agent via native hooks (pre-generation and pre-tool-call), processes them through a pipeline of modules, and returns optimized context and model routing information. All processing happens on the developer's machine. The only external communication is to an LLM provider through LiteLLM.
 
-The runtime exposes one clean API: `BuildContext(task)` plus a routing call. An external, optional orchestrator can be layered on top later as a separate product consuming this API.
+The runtime exposes one clean API: `BuildContext(task)` plus a routing call. Since v0.6.0 (`docs/V0_6_0_PLAN.md:1`) DBOS Transact over SQLite+Litestream is required durability (single-node, `async_trait IWorkflowEngine` native), not an optional external product. Temporal remains deleted (`V0_4_0_PLAN.md:1.1`).
 
 ## Architecture Diagram
 
@@ -228,16 +228,20 @@ trait IModelGateway {
 
 Reference implementation: LiteLLM HTTP client.
 
-### IWorkflowEngine
+### IWorkflowEngine (v0.6.0 — async native)
 
 ```rust
+#[async_trait]
 trait IWorkflowEngine {
-    fn start_workflow(&self, workflow: WorkflowRequest) -> Result<WorkflowId, WorkflowError>;
-    fn get_status(&self, id: WorkflowId) -> Result<WorkflowStatus, WorkflowError>;
+    async fn start_workflow(&self, task: &TaskRequest, config: &Config) -> Result<String>;
+    async fn get_status(&self, workflow_id: &str) -> Result<String>;
+    async fn is_available(&self) -> bool;
 }
+struct NoopWorkflowEngine; // #[cfg(test)] only since v0.6.0
+struct DBOSWorkflowEngine { endpoint: String, shared_secret: Option<String>, client: reqwest::Client } // v0.6.0: async reqwest + tokio::timeout(5s/3s/1s), Hmac<Sha256>
 ```
 
-Reference implementation: Not implemented in v1. Defined for future external orchestrator.
+Reference: `crates/coderun-core/src/traits.rs:33-58` + `crates/coderun-workflow/src/dbos.rs` (`docs/V0_6_0_PLAN.md:1.1-1.2`). `DBOSWorkflowEngine` implements `IWorkflowEngine` via `POST /workflow/start` (fail-closed when `workflow.enabled=true` + DBOS down since v0.6.0 required). `NoopWorkflowEngine` only for `#[cfg(test)]`. `HMAC` via `hmac` crate `coderun-core/src/secrets.rs:verify_hmac`. See `docs/02-workflows/DBOS.md` and `V0_4_0_PLAN.md:1.1` (DBOS over Temporal).
 
 ## Data Ownership
 
@@ -258,26 +262,34 @@ Reference implementation: Not implemented in v1. Defined for future external orc
 | Logs | Runtime | Log files | Persistent, rotated |
 | Events | Event Bus | In-memory channel | Ephemeral (consumed by CLI/metrics) |
 
-## Technology Stack
+## Technology Stack (v0.6.0 planned — see `docs/V0_6_0_PLAN.md:0`)
 
 | Layer | Technology | Role |
 |-------|------------|------|
-| Language | Rust (>= 1.75) | Context Engine, daemon, all modules |
-| Agent IPC | Unix Domain Socket + MessagePack | Daemon ↔ Agent communication |
-| AST Parsing | tree-sitter (embedded Rust crate) | Incremental AST parsing |
-| Structural Search | ast-grep (embedded Rust crate) | Code pattern matching |
-| Text Search | ripgrep (embedded Rust crate) | Fast text search |
-| Full-text Index | tantivy / BM25 crate | Lexical scoring for docs/code |
-| Reranking | FlashRank via `ort` (ONNX Runtime) | In-process reranking |
-| Memory | engram (Go binary, SQLite+FTS5) | Persistent memory, MCP-native |
-| Model Gateway | LiteLLM | Multi-provider routing, fallbacks |
-| Tool Compression | RTK (Rust binary) | Tool-output compression |
-| Token Counting | tiktoken-rs | Local token counting |
-| Database | SQLite via rusqlite | Index and metadata storage |
-| Serialization | serde + toml + serde_yaml | Configuration and Context Pack |
-| CLI | clap | Argument parsing |
-| Logging | tracing + tracing-subscriber | Structured logging |
-| Testing | cargo test + promptfoo | Unit tests + offline evaluation |
-| Error Handling | anyhow + thiserror | Error types |
-| Async Runtime | tokio | Async task management |
-| HTTP Client | reqwest | LiteLLM communication |
+| Language | Rust (>= 1.75) | Context Engine, daemon, all modules (`coderun-workflow` new) |
+| Agent IPC | UDS + MessagePack primary (`rmp-serde`+`tokio::net::UnixListener`) + HTTP/JSON fallback (`axum`) on `127.0.0.1:9527` | Daemon ↔ Agent; `POST /hook`, `GET /metrics`, `POST /workflow/*` |
+| AST Parsing | tree-sitter 4 default (`rust,ts,js,python`) + 4 behind `--features extended-languages` (`go,java,c,cpp`) | `repo-intel/src/parser.rs` (`V0_6_0_PLAN.md:2.2`) |
+| Structural Search | `sg-core` gated `search_structural()` first-class (`V0_5_0_PLAN.md:1.1`), `search_structural_fallback()` only on `Err` | `repo-intel/src/lib.rs:352` |
+| Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |
+| Full-text Index | tantivy `MmapDirectory` (in-process) | `storage/src/tantivy_index.rs` + `search_fulltext()` wiring |
+| Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (`codebase-memory-mcp` probe `CODERUN_MCP_ENABLED`) | `repo-intel/src/graph.rs` |
+| Watcher | `notify+git2` incremental `diff_tree_to_workdir` first-class (feature `git-watcher` default), polling 5s fallback only on `Err` | `repo-intel/src/watcher.rs` (`V0_6_0_PLAN.md:3`) |
+| LSP | Stub `LspClient` (`CODERUN_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
+| Reranking | FlashRank `RerankerConfig` adaptive K `5-20` (TF-IDF fallback, `ort` int8 ONNX deferred) | `knowledge/src/rerank.rs` |
+| Memory | engram HTTP `2s timeout` deterministic reads, fail-open local `LIKE` | `knowledge/src/engram.rs` + `try_engram_search` |
+| Model Gateway | LiteLLM HTTP + heuristic `capable→balanced→fast` `fallback_chain()` + `cost_usd` | `router/src/litellm.rs` + `src/lib.rs:223` |
+| Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.coderun/logs/tool-failures/` | `optimizer/src/rtk.rs` |
+| Token Counting | `tiktoken-rs` `cl100k_base` + `heuristic` fallback | `context/src/lib.rs:389`/`optimizer/src/lib.rs:303` |
+| Orchestration | DBOS Transact **required** sidecar `workflow/dbos` (Node/TS, SQLite WAL+Litestream, native `dbos-transact` `governedWorkflow` `DBOS.workflow`+`communicator`+`transaction`+`waitForSignal`+`sleep`) async `async_trait` (`V0_6_0_PLAN.md:1.3`) | `crates/coderun-workflow/src/dbos.rs` + `005_audits.sql` (`audits`+`workflows`) |
+| Metrics | Prometheus exposition (`GET /metrics` histogram `coderun_build_context_duration_seconds`) + Grafana `docs/dashboards/coderun.json` | `daemon/src/metrics.rs` + `deploy/prometheus/alerts.yml` |
+| Rate Limit | Token-bucket 10/s burst 20 per `session_id` + `HMAC-SHA256` `X-Coderun-Signature` via `hmac` crate `secrets::verify_hmac` (was `sha256(secret+body)` pre-v0.6.0) | `daemon/src/ratelimit.rs` + `core/src/secrets.rs` |
+| Concurrency | `RwLock<ContextEngine>` (was `Mutex`), `session_fingerprints` SHA-256 dedup, per-session memory namespace | `daemon/src/adapter.rs:44` + `context/src/lib.rs:142` |
+| Directory Walking | `ignore` crate | `.gitignore` |
+| Database | SQLite `rusqlite` bundled + WAL + `r2d2` pool, migrations `001-005` (`005` = `audits`+`workflows` DBOS required) | `storage/src/lib.rs:21` |
+| Serialization | `serde`+`toml`+`serde_json`+`serde_yaml`+`rmp-serde` | Config + IPC (MessagePack canonical) |
+| CLI | `clap` + `reqwest` blocking for `workflow approve` health probe | `coderun-cli` (8 probes v0.4.0) |
+| Logging | `tracing`+`tracing-subscriber` (json `fmt`) | `daemon` |
+| Testing/Bench | `cargo test` (165 tests) + `promptfoo` + `criterion` `benches/context_bench.rs` (p95 <50ms) | `benches/` |
+| Distribution | `Dockerfile` (distroless), `Formula/coderun.rb` (brew tap+launchd), `cargo-wix` MSI | `deploy/` |
+| Async Runtime | `tokio` full | `daemon`+`workflow` |
+| HTTP Client | `reqwest` (LiteLLM, engram, DBOS) | `router`+`knowledge`+`workflow` |

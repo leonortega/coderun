@@ -1,9 +1,91 @@
+# === Rust / Cargo ===
 /target
 Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# === Editor / IDE ===
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (IntelliJ, CLion, RustRover)
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Vim / Neovim
 *.swp
 *.swo
 *~
+Session.vim
+.netrwhist
+tags
+
+# Emacs
+*~
+\#*\#
+.#*
+*.elc
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# === OS ===
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# === Project-specific ===
+# Coderun runtime data
 .coderun/data.db
+.coderun/data.db-wal
+.coderun/data.db-shm
 .coderun/index/
 .coderun/logs/
+.coderun/cache/
+
+# Evaluation results (generated)
+eval/results/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Node.js (for eval tooling)
+node_modules/
+package-lock.json
+yarn.lock
+.pnpm-lock.yaml
+
+# === Build artifacts ===
+*.o
+*.so
+*.dylib
+*.dll
+*.rlib
+*.d
+*.dSYM/
+
+# === Misc ===
+*.log
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/

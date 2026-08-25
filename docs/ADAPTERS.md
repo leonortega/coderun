@@ -4,12 +4,15 @@ This document describes how to integrate Coderun with coding agents.
 
 ## Supported Agents
 
-| Agent | Status | Adapter Type |
-|-------|--------|--------------|
-| OpenCode | ✅ Supported | Plugin (TypeScript) |
-| Claude Code | ✅ Supported | Hooks (Shell scripts) |
-| Cursor | ⏳ Planned | Extension |
-| Continue | ⏳ Planned | Extension |
+| Agent | Tier | Status | Adapter Type | IPC |
+|-------|------|--------|--------------|-----|
+| OpenCode | 1 | ✅ Supported | Plugin (TypeScript) | UDS+MessagePack primary, HTTP fallback |
+| Claude Code | 1 | ✅ Supported | Hooks (Shell scripts) | UDS+MessagePack primary, HTTP fallback |
+| Cursor | 1 | ✅ Supported (v0.4.0) | Extension (`adapters/cursor/extension.ts`) + RwLock session isolation | UDS+MessagePack primary, HTTP fallback |
+| Gemini CLI | 1 | ✅ Supported (v0.4.0) | Hooks (`adapters/gemini/hooks.sh`) + RwLock | UDS+MessagePack primary, HTTP fallback |
+| Continue | 1 | ✅ Supported (v0.4.0) | Extension (`adapters/tier2/README.md` — promoted) | HTTP fallback |
+| Copilot / Factory Droid / OpenClaw / Pi | 1 | ⏳ Scaffold (v0.4.0 feature `tier2`) | Hooks (best-effort) | HTTP only |
+| Codex / Windsurf / Cline / Kilo / Antigravity / Kimi | 2 | ⚠️ Best-effort (`adapters/tier2/README.md`) | Convention file (no hook guarantee) | HTTP only |
 
 ## OpenCode Integration
 

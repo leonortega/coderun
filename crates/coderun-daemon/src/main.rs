@@ -1,7 +1,12 @@
-// coderun-daemon: daemon binary — UDS server, signal handling, process lifecycle
+#![allow(linker_messages)]
+// coderun-daemon: daemon binary — HTTP server, signal handling, process lifecycle
 
+#[allow(dead_code)]
 mod adapter;
+mod http_server;
 mod lifecycle;
+mod metrics;
+mod ratelimit;
 
 use std::path::PathBuf;
 
@@ -26,7 +31,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Initialize daemon state
+    // Initialize daemon state (creates context engine, optimizer, etc.)
     let state = match DaemonState::initialize(config) {
         Ok(state) => state,
         Err(e) => {
@@ -35,7 +40,7 @@ async fn main() {
         }
     };
 
-    // Start the daemon
+    // Start the daemon (HTTP server + background indexing + signal handling)
     if let Err(e) = state.serve().await {
         eprintln!("Daemon error: {}", e);
         std::process::exit(1);

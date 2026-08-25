@@ -1,0 +1,16 @@
+description: "Coderun AI Runtime Evaluation"
+
+providers:
+  - id: "file://providers/model-routing.js"
+    label: "Model Routing"
+  - id: "file://providers/context-quality.js"
+    label: "Context Quality"
+
+tests:
+  - ./datasets/model-routing.yaml
+  - ./datasets/context-quality.yaml
+
+outputPath: ./results/evaluation.json
+
+defaultTest:
+  threshold: 0.8

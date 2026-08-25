@@ -1,4 +1,4 @@
-# AI Runtime — Default Configuration
+﻿# AI Runtime â€” Default Configuration
 # See docs/01-architecture/RUNTIME.md for full schema reference
 
 [daemon]
@@ -54,6 +54,11 @@ max_retries = 3
 enabled = true
 max_output_tokens = 8000
 compression_level = "balanced"
+
+[workflow]
+enabled = true
+engine = "dbos"
+dbos_endpoint = "http://localhost:3001"
 
 [logging]
 level = "info"

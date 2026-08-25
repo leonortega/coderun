@@ -31,6 +31,11 @@ impl SkillEngine {
         }
     }
 
+    /// Create engine from pre-loaded skills (v0.6.0 collapse duplicate scorer)
+    pub fn from_skills(skills: Vec<Skill>) -> Self {
+        Self { skills, skills_dir: PathBuf::from(".") }
+    }
+
     /// Load all skills from the skills directory
     pub fn load_skills(&mut self) -> Result<usize, String> {
         self.skills.clear();

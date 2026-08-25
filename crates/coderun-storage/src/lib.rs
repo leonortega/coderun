@@ -1,3 +1,5 @@
+pub mod tantivy_index;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -48,6 +50,18 @@ impl Database {
         // Migration 002: Knowledge Hub
         let migration_002 = include_str!("migrations/002_knowledge.sql");
         self.apply_migration("002_knowledge", migration_002)?;
+
+        // Migration 003: Dependency graph + cost
+        let migration_003 = include_str!("migrations/003_graph.sql");
+        self.apply_migration("003_graph", migration_003)?;
+
+        // Migration 004: Event persistence
+        let migration_004 = include_str!("migrations/004_events.sql");
+        self.apply_migration("004_events", migration_004)?;
+
+        // Migration 005: Audits + workflows (DBOS)
+        let migration_005 = include_str!("migrations/005_audits.sql");
+        self.apply_migration("005_audits", migration_005)?;
 
         Ok(())
     }
@@ -578,6 +592,47 @@ impl Database {
         Ok(())
     }
 
+    // ── Audits & Workflows (DBOS, v0.4.0 §1.3) ─────────────────────
+
+    pub fn insert_audit(&self, workflow_id: Option<&str>, correlation_id: Option<&str>, actor: &str, task: &str, ctx_pack_hash: Option<&str>, payload: Option<&str>) -> Result<i64, String> {
+        self.conn.execute(
+            "INSERT INTO audits (workflow_id, correlation_id, actor, task, ctx_pack_hash, payload) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![workflow_id, correlation_id, actor, task, ctx_pack_hash, payload],
+        ).map_err(|e| format!("Failed to insert audit: {e}"))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_audits(&self, limit: usize) -> Result<Vec<AuditRecord>, String> {
+        let mut stmt = self.conn.prepare("SELECT id, workflow_id, correlation_id, actor, task, ctx_pack_hash, payload, created_at FROM audits ORDER BY id DESC LIMIT ?1").map_err(|e| format!("Failed to prepare: {e}"))?;
+        let rows = stmt.query_map(params![limit as i64], |row| Ok(AuditRecord {
+            id: row.get(0)?, workflow_id: row.get(1)?, correlation_id: row.get(2)?, actor: row.get(3)?, task: row.get(4)?, ctx_pack_hash: row.get(5)?, payload: row.get(6)?, created_at: row.get(7)?,
+        })).map_err(|e| format!("Failed to query audits: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("{e}"))
+    }
+
+    pub fn upsert_workflow(&self, workflow_id: &str, status: &str, task: &str) -> Result<(), String> {
+        self.conn.execute(
+            "INSERT INTO workflows (workflow_id, status, task, updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(workflow_id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at",
+            params![workflow_id, status, task, Utc::now().to_rfc3339()],
+        ).map_err(|e| format!("Failed to upsert workflow: {e}"))?;
+        Ok(())
+    }
+
+    pub fn get_workflow(&self, workflow_id: &str) -> Result<Option<WorkflowRecord>, String> {
+        let res = self.conn.query_row("SELECT workflow_id, status, task, created_at, updated_at FROM workflows WHERE workflow_id=?1", params![workflow_id], |row| Ok(WorkflowRecord {
+            workflow_id: row.get(0)?, status: row.get(1)?, task: row.get(2)?, created_at: row.get(3)?, updated_at: row.get(4)?,
+        }));
+        match res { Ok(r) => Ok(Some(r)), Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), Err(e) => Err(format!("{e}")) }
+    }
+
+    pub fn list_workflows(&self, limit: usize) -> Result<Vec<WorkflowRecord>, String> {
+        let mut stmt = self.conn.prepare("SELECT workflow_id, status, task, created_at, updated_at FROM workflows ORDER BY created_at DESC LIMIT ?1").map_err(|e| format!("{e}"))?;
+        let rows = stmt.query_map(params![limit as i64], |row| Ok(WorkflowRecord {
+            workflow_id: row.get(0)?, status: row.get(1)?, task: row.get(2)?, created_at: row.get(3)?, updated_at: row.get(4)?,
+        })).map_err(|e| format!("{e}"))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("{e}"))
+    }
+
     // ── Utility ─────────────────────────────────────────────────────
 
     /// Emit indexing progress event via the event bus
@@ -639,6 +694,27 @@ pub struct MemoryRecord {
     pub key: String,
     pub value: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditRecord {
+    pub id: i64,
+    pub workflow_id: Option<String>,
+    pub correlation_id: Option<String>,
+    pub actor: String,
+    pub task: String,
+    pub ctx_pack_hash: Option<String>,
+    pub payload: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowRecord {
+    pub workflow_id: String,
+    pub status: String,
+    pub task: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -824,5 +900,34 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── v0.5.0 first-class tool tests ──────────────────────────────────
+
+    #[test]
+    fn test_005_audits_migration_exists() {
+        let db = test_db();
+        // 005 adds audits + workflows tables
+        db.insert_audit(Some("wf_1"), Some("req_1"), "actor", "task", Some("hash"), Some("payload")).unwrap();
+        let audits = db.list_audits(10).unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].workflow_id.as_deref(), Some("wf_1"));
+        db.upsert_workflow("wf_1", "pending", "task1").unwrap();
+        let w = db.get_workflow("wf_1").unwrap().unwrap();
+        assert_eq!(w.status, "pending");
+        db.upsert_workflow("wf_1", "completed", "task1").unwrap();
+        let w2 = db.get_workflow("wf_1").unwrap().unwrap();
+        assert_eq!(w2.status, "completed");
+    }
+
+    #[test]
+    fn test_audit_list_and_workflow_list() {
+        let db = test_db();
+        for i in 0..3 {
+            db.insert_audit(Some(&format!("wf_{i}")), None, "actor", &format!("task {i}"), None, None).unwrap();
+            db.upsert_workflow(&format!("wf_{i}"), "pending", &format!("task {i}")).unwrap();
+        }
+        assert_eq!(db.list_audits(2).unwrap().len(), 2);
+        assert_eq!(db.list_workflows(10).unwrap().len(), 3);
     }
 }

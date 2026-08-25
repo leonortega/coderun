@@ -12,14 +12,21 @@ Define every v1 module in detail. Each module section specifies purpose, respons
 
 Bridge the coding agent and the daemon. One thin adapter per agent CLI, implementing two operations: intercept-before-generation (rewrite the message) and intercept-before-tool-call (allow/deny/modify).
 
+### v0.2.0 Implementation
+
+- **HTTP server** (axum) on port 9527 with JSON IPC
+- **Fail-open** on timeout or error: returns OriginalPassthrough
+- **OpenCode plugin** (TypeScript) for pre-generation and pre-tool hooks
+- **Claude Code hooks** (shell scripts) for UserPromptSubmit and PreToolUse
+
 ### Responsibilities
 
-- Accept connections over Unix domain socket
-- Parse MessagePack-encoded requests
+- Accept HTTP connections from agents
+- Parse JSON-encoded requests
 - Validate request format and content
 - Generate correlation IDs
 - Route requests to the appropriate handler (Context Engine or Execution Optimizer)
-- Format responses in agent-consumable MessagePack
+- Format responses in agent-consumable JSON
 - Implement fail-open on timeout or error
 - Handle agent-specific hook differences
 
@@ -268,19 +275,25 @@ code_context:
 
 ### Purpose
 
-Parse, index, and search the codebase incrementally. Uses tree-sitter for incremental AST parsing, ast-grep for structural search, ripgrep for text search. Updated on git changes, not per-request.
+Parse, index, and search the codebase incrementally. Uses tree-sitter for incremental AST parsing, ripgrep for text search. Updated on git changes, not per-request.
+
+### v0.2.0 Implementation
+
+- **tree-sitter** for AST parsing (Rust, Python, JavaScript, TypeScript)
+- **ripgrep** (grep-searcher) for fast text search with .gitignore support
+- **ignore crate** for respecting .gitignore patterns
+- **Regex fallback** for unsupported languages
+- **Incremental indexing** via SHA-256 content hashing
 
 ### Responsibilities
 
 - Walk repository directory tree
 - Parse source files with tree-sitter (incremental)
 - Extract symbols (functions, classes, structs, enums, imports)
-- Build and maintain BM25/tantivy full-text index
 - Store file metadata and symbol information in SQLite
-- Search code by text (ripgrep), structure (ast-grep), and full-text (BM25/tantivy)
+- Search code by text (ripgrep) with .gitignore support
 - Detect project type and language distribution
 - Track file changes for incremental updates
-- Optional: LSP enrichment via agent's own language server
 
 ### Inputs
 
@@ -403,14 +416,21 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 
 ### Purpose
 
-One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes three retrieval strategies: tag-based skill matching, BM25/tantivy lexical search with FlashRank reranking for docs/code, and engram for memory.
+One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes three retrieval strategies: tag-based skill matching, lexical search with reranking for docs/code, and engram for memory.
+
+### v0.2.0 Implementation
+
+- **SQLite** for knowledge storage with LIKE-based search
+- **engram** HTTP client for cross-session memory
+- **FlashRank** reranker with TF-IDF fallback
+- **Pattern detection** for knowledge extraction (naming, architectural, domain)
 
 ### Responsibilities
 
 - Store and retrieve knowledge entries across all categories
 - Manage skill registry and tag-based matching
-- Perform BM25/tantivy lexical search for docs and code
-- Rerank results with FlashRank (in-process via `ort`)
+- Perform lexical search for docs and code
+- Rerank results with FlashRank
 - Store and retrieve memory via engram
 - Detect and extract knowledge from indexed code
 - Decay confidence of unused knowledge
@@ -670,6 +690,13 @@ rate limit, throttle, request limit, API limit, middleware, security
 ### Purpose
 
 Select the appropriate LLM model for a given task based on heuristic complexity scoring. No LLM call decides the tier.
+
+### v0.2.0 Implementation
+
+- **Heuristic scoring** with structural, semantic, and scope factors
+- **Tier selection** (fast, balanced, capable) based on score thresholds
+- **LiteLLM client** for multi-provider model routing
+- **Model override** support from request parameters
 
 ### Responsibilities
 

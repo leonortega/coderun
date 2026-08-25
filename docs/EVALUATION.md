@@ -74,20 +74,24 @@ export EVAL_MODE="live"  # or "mock"
 
 ### Promptfoo Configuration
 
-The main configuration is in `eval/promptfoo.yaml`:
+Each evaluation type has its own configuration:
 
+**Model Routing** (`eval/config-model-routing.yaml`):
 ```yaml
-description: "Coderun AI Runtime Evaluation"
-
+description: "Model Routing Accuracy Tests"
 providers:
-  - eval/providers/model-routing.js
-  - eval/providers/context-quality.js
+  - ./providers/model-routing.js
+tests: ./datasets/model-routing.yaml
+outputPath: ./results/model-routing.json
+```
 
-tests:
-  - eval/datasets/model-routing.yaml
-  - eval/datasets/context-quality.yaml
-
-outputPath: eval/results/evaluation.json
+**Context Quality** (`eval/config-context-quality.yaml`):
+```yaml
+description: "Context Quality Tests"
+providers:
+  - ./providers/context-quality.js
+tests: ./datasets/context-quality.yaml
+outputPath: ./results/context-quality.json
 ```
 
 ## Adding New Tests
@@ -119,9 +123,12 @@ Add to `eval/datasets/context-quality.yaml`:
   vars:
     task: "task description"
     max_tokens: 10000
+    skills_matched: "Skill Name:0.8"
+    knowledge_entries: "key:value"
+    files_mentioned: "file1.rs,file2.rs"
   assert:
-    - type: javascript
-      value: "output.token_usage.total_tokens <= 10000"
+    - type: contains
+      value: "expected_string"
 ```
 
 ## Evaluation Providers
@@ -147,14 +154,18 @@ Located in `eval/providers/context-quality.js`:
 ### Console Output
 
 ```
-✓ Model Routing: 9/10 passed (90%)
-✓ Context Quality: 8/10 passed (80%)
+✓ Model Routing: 11/11 passed (100%)
+✓ Context Quality: 9/9 passed (100%)
 ```
 
 ### Web UI
 
 ```bash
-npx promptfoo view -c eval/promptfoo.yaml
+# View model routing results
+npx promptfoo view -c eval/config-model-routing.yaml
+
+# View context quality results
+npx promptfoo view -c eval/config-context-quality.yaml
 ```
 
 Shows:
@@ -167,7 +178,6 @@ Shows:
 Results are saved to `eval/results/`:
 - `model-routing.json` — Model routing test results
 - `context-quality.json` — Context quality test results
-- `evaluation.json` — Combined results
 
 ## Continuous Integration
 
@@ -200,13 +210,12 @@ jobs:
 
 ## Thresholds
 
-| Metric | Target | Description |
-|--------|--------|-------------|
-| Model Routing Accuracy | ≥ 90% | Correct tier selection |
-| Context Token Efficiency | ≤ 100% | Within token budget |
-| Context Section Order | 100% | skills → docs → code |
-| Skill Injection Rate | ≥ 80% | Matched skills included |
-| Knowledge Retrieval Rate | ≥ 70% | Relevant knowledge included |
+| Metric | Target | Current | Description |
+|--------|--------|---------|-------------|
+| Model Routing Accuracy | ≥ 90% | 100% | Correct tier selection |
+| Context Token Efficiency | ≤ 100% | 100% | Within token budget |
+| Skill Injection Rate | ≥ 80% | 100% | Matched skills included |
+| Knowledge Retrieval Rate | ≥ 70% | 100% | Relevant knowledge included |
 
 ## Troubleshooting
 

@@ -35,8 +35,8 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | **User interaction** | The coding agent owns the user interface |
 | **Multi-tenancy** | Single user, single repository per daemon |
 | **Plugin marketplace** | Skills are community-format files, not a marketplace |
-| **Workflow orchestration** | No Temporal, LangGraph, or workflow engine in the runtime |
-| **Distributed infrastructure** | Single local daemon process |
+| **Workflow orchestration** | DBOS Transact native async over SQLite+Litestream **required** since v0.6.0 (`docs/V0_6_0_PLAN.md:1`); No Temporal (deleted) |
+| **Distributed infrastructure** | Single local daemon process (+ DBOS sidecar `workflow/dbos` on same host) |
 | **Web dashboard** | CLI-only interface |
 | **Authentication** | Local daemon, no auth needed |
 | **Rate limiting** | LiteLLM handles provider rate limiting |
@@ -93,7 +93,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | LiteLLM gateway | Model routing, fallbacks, load balancing (if deployed externally) |
 | Language servers | Optional LSP enrichment (agent's own processes) |
 | Static analysis | Native per-language analyzers |
-| External orchestration | Temporal/DBOS (only if governance needed, separate product) |
+| External orchestration | DBOS Transact native async over SQLite+Litestream (required since v0.6.0, `docs/V0_6_0_PLAN.md:1`); Temporal deleted |
 
 ## v1 Boundaries
 
@@ -194,8 +194,8 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | Collaborative editing | v3 | None. v1 is single-developer |
 | Model fine-tuning | v3 | None. v1 routes to existing models |
 | CI/CD integration | v2 | None. v1 is request-response |
-| Workflow engine | v2 | None. v1 has no workflow abstraction |
-| Enterprise governance | v3 | None. v1 has no auth or audit |
+| Workflow engine | v0.6.0 required | v1 had Noop; v0.6.0 `async_trait IWorkflowEngine` over SQLite+Litestream (`DBOS_REQUIRED`) |
+| Enterprise governance | v3 | None. v1 has no auth or audit (HMAC required since v0.6.0 for DBOS→daemon) |
 | Vector/semantic recall | Deferred | None. v1 uses FTS5 lexical recall only |
 | Graph-based retrieval | Deferred | None. v1 uses BM25 + reranking only |
-| External orchestration | Separate product | None. Runtime is consumed via API |
+| External orchestration | v0.6.0 required (SQLite) | v1 separate product; v0.6.0 promoted to required runtime (single-node SQLite+Litestream) |
