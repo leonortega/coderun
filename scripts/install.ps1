@@ -324,14 +324,51 @@ Info "Initializing repo..."
 & ".\target\release\coderun.exe" index 2>&1 | Out-Null
 & ".\target\release\coderun.exe" doctor
 
-# 3. opencode plugin - REMOVED per user request
-Info "Skipping opencode plugin (removed - cleaning stale installs)..."
-foreach ($p in @("$Root\.opencode\plugins\coderun.ts", "$env:USERPROFILE\.config\opencode\plugins\coderun.ts")) {
-  if (Test-Path $p) { try { Remove-Item -LiteralPath $p -Force; Ok "Removed stale plugin at $p" } catch { Warn "Failed to remove $p" } }
+# 3. opencode MCPs + plugin
+Info "Configuring opencode MCPs and plugin..."
+$opencodeDir = "$Root\.opencode"
+$opencodeCfg = Join-Path $opencodeDir "opencode.jsonc"
+New-Item -ItemType Directory -Force -Path $opencodeDir | Out-Null
+# Resolve engram binary for MCP (use installed bin if available, else repo fallback)
+$engramMcpBin = $engramBinPath
+if (-not (Test-Path $engramMcpBin)) {
+  $engramMcpBin = (Get-Command engram -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+  if (-not $engramMcpBin) { $engramMcpBin = "$env:USERPROFILE\bin\engram.exe" }
 }
-foreach ($d in @("$Root\.opencode\plugins", "$env:USERPROFILE\.config\opencode\plugins")) { if (Test-Path $d) { try { if ((Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0) { Remove-Item -LiteralPath $d -Force; Ok "Removed empty $d" } } catch {} } }
-foreach ($f in @("$Root\.opencode\package.json", "$Root\.opencode\package-lock.json")) { if (Test-Path $f) { try { Remove-Item -LiteralPath $f -Force; Ok "Removed $f" } catch {} } }
-if (Test-Path "$Root\.opencode\node_modules") { try { Remove-Item -LiteralPath "$Root\.opencode\node_modules" -Recurse -Force; Ok "Removed .opencode/node_modules" } catch {} }
+$engramEscaped = $engramMcpBin -replace '\\', '\\'
+$opencodeJsonc = @"
+{
+    "`$schema": "https://opencode.ai/config.json",
+    "mcp": {
+        "codebase-memory": {
+            "command": ["npx", "-y", "codebase-memory-mcp"],
+            "type": "local",
+            "enabled": true
+        },
+        "engram": {
+            "command": ["$engramEscaped", "mcp", "--tools=agent"],
+            "type": "local",
+            "enabled": true
+        }
+    }
+}
+"@
+try { Set-Content -LiteralPath $opencodeCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode MCPs at $opencodeCfg (codebase-memory + engram -> $engramMcpBin)" } catch { Warn "failed to write $opencodeCfg : $_" }
+
+$srcPlugin = Join-Path $opencodeDir "plugins\coderun.ts"
+$pluginsDir = Join-Path $opencodeDir "plugins"
+New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
+if (Test-Path $srcPlugin) {
+  Ok "opencode plugin at $srcPlugin"
+  # Global fallback for opencode installed via user config
+  $globalPluginDir = "$env:USERPROFILE\.config\opencode\plugins"
+  try {
+    New-Item -ItemType Directory -Force -Path $globalPluginDir | Out-Null
+    Copy-Item -LiteralPath $srcPlugin -Destination $globalPluginDir -Force
+    Ok "opencode plugin copied to $globalPluginDir (global)"
+  } catch { Info "  global plugin copy skipped: $_" }
+  Info "Restart opencode to load plugin (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open)"
+} else { Warn "opencode plugin source not found at $srcPlugin" }
 
 Info "Done - next: coderun serve  |  coderun preview 'add auth'  |  coderun workflow start 'refactor' --require-approval  |  curl http://127.0.0.1:9527/metrics"
 Info "Docs: mkdocs serve  |  promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"

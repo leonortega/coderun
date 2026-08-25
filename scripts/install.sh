@@ -112,9 +112,13 @@ if [ "$REACHABLE" = true ]; then
 else
   info "  DBOS not reachable - attempting to start sidecar..."
   STARTED=false
-  if [ -f "$ROOT/workflow/dbos/package.json" ] && command -v npm >/dev/null 2>&1; then
-    (cd "$ROOT/workflow/dbos" && CODERUN_DBOS_SECRET="$SECRET_TO_SET" DBOS_PORT=$(echo "$DBOS_ENDPOINT" | sed -E 's/.*:([0-9]+).*/\1/' | head -1) nohup npm start >/tmp/coderun-dbos.log 2>&1 & echo $! > /tmp/coderun-dbos.pid) 2>/dev/null || true
-    sleep 2
+  if [ -f "$ROOT/workflow/dbos/dist/main.js" ] && command -v node >/dev/null 2>&1; then
+    (cd "$ROOT/workflow/dbos" && DBOS_PORT=$(echo "$DBOS_ENDPOINT" | sed -E 's/.*:([0-9]+).*/\1/' | head -1) nohup node dist/main.js >/tmp/coderun-dbos.log 2>&1 & echo $! > /tmp/coderun-dbos.pid) 2>/dev/null || true
+    sleep 3
+    STARTED=true
+  elif [ -f "$ROOT/workflow/dbos/package.json" ] && command -v npm >/dev/null 2>&1; then
+    (cd "$ROOT/workflow/dbos" && DBOS_PORT=$(echo "$DBOS_ENDPOINT" | sed -E 's/.*:([0-9]+).*/\1/' | head -1) nohup npm start >/tmp/coderun-dbos.log 2>&1 & echo $! > /tmp/coderun-dbos.pid) 2>/dev/null || true
+    sleep 3
     STARTED=true
   fi
   for i in $(seq 1 12 2>/dev/null || echo "1 2 3 4 5 6 7 8 9 10 11 12"); do
@@ -128,8 +132,7 @@ else
   if [ "$REACHABLE" = true ]; then
     ok "DBOS sidecar started at $DBOS_ENDPOINT"
   else
-    if [ "$STARTED" = true ]; then warn "DBOS started but not reachable - retry: cd workflow/dbos; npm start"; else warn "DBOS not reachable at $DBOS_ENDPOINT - hint: cd workflow/dbos; npm start"; fi
-    info "  Doctor will show Workflow/DBOS not started until sidecar running"
+    if [ "$STARTED" = true ]; then warn "DBOS started but not reachable at $DBOS_ENDPOINT - check: cd workflow/dbos; node dist/main.js"; else warn "DBOS not reachable at $DBOS_ENDPOINT - hint: cd workflow/dbos; npm run build; node dist/main.js"; fi
   fi
 fi
 
@@ -146,17 +149,39 @@ CODERUN_BIN="$ROOT/target/release/coderun"
 "$CODERUN_BIN" index 2>/dev/null || true
 "$CODERUN_BIN" doctor
 
-info "Skipping opencode plugin (removed - cleaning stale installs)..."
-for p in "$ROOT/.opencode/plugins/coderun.ts" "$HOME/.config/opencode/plugins/coderun.ts"; do
-  if [ -f "$p" ]; then rm -f "$p" 2>/dev/null && ok "Removed stale plugin at $p" || warn "Failed to remove $p"; fi
-done
-for d in "$ROOT/.opencode/plugins" "$HOME/.config/opencode/plugins"; do
-  if [ -d "$d" ] && [ -z "$(ls -A "$d" 2>/dev/null)" ]; then rmdir "$d" 2>/dev/null && ok "Removed empty $d" || true; fi
-done
-for f in "$ROOT/.opencode/package.json" "$ROOT/.opencode/package-lock.json"; do
-  if [ -f "$f" ]; then rm -f "$f" 2>/dev/null && ok "Removed $f (plugin scaffolding)" || true; fi
-done
-if [ -d "$ROOT/.opencode/node_modules" ]; then rm -rf "$ROOT/.opencode/node_modules" 2>/dev/null && ok "Removed .opencode/node_modules" || true; fi
+info "Configuring opencode MCPs and plugin..."
+mkdir -p "$ROOT/.opencode" "$ROOT/.opencode/plugins"
+ENGRAM_MCP_BIN="$HOME/bin/engram"
+if [ -f "$ENGRAM_MCP_BIN" ]; then ENGRAM_MCP="$ENGRAM_MCP_BIN"
+elif command -v engram >/dev/null 2>&1; then ENGRAM_MCP=$(command -v engram)
+else ENGRAM_MCP="$HOME/bin/engram"
+fi
+cat > "$ROOT/.opencode/opencode.jsonc" <<EOF
+{
+    "\$schema": "https://opencode.ai/config.json",
+    "mcp": {
+        "codebase-memory": {
+            "command": ["npx", "-y", "codebase-memory-mcp"],
+            "type": "local",
+            "enabled": true
+        },
+        "engram": {
+            "command": ["$ENGRAM_MCP", "mcp", "--tools=agent"],
+            "type": "local",
+            "enabled": true
+        }
+    }
+}
+EOF
+ok "opencode MCPs at $ROOT/.opencode/opencode.jsonc (codebase-memory + engram -> $ENGRAM_MCP)"
+SRC_PLUGIN="$ROOT/.opencode/plugins/coderun.ts"
+if [ -f "$SRC_PLUGIN" ]; then
+  ok "opencode plugin at $SRC_PLUGIN"
+  GLOBAL_PLUGIN_DIR="$HOME/.config/opencode/plugins"
+  mkdir -p "$GLOBAL_PLUGIN_DIR" 2>/dev/null
+  cp -f "$SRC_PLUGIN" "$GLOBAL_PLUGIN_DIR/" 2>/dev/null && ok "opencode plugin copied to $GLOBAL_PLUGIN_DIR (global)" || info "  global plugin copy skipped"
+  info "Restart opencode to load plugin (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527)"
+else warn "opencode plugin source not found at $SRC_PLUGIN"; fi
 
 info "Done - next: coderun serve | coderun preview 'add auth' | coderun workflow start 'refactor' --require-approval | curl http://127.0.0.1:9527/metrics"
-info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor (CODERUN_DBOS_SECRET already set)"
+info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
