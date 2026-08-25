@@ -489,8 +489,14 @@ fn dirs() -> Option<PathBuf> {
 }
 
 fn print_banner(config: &Config) {
+    // Version single source of truth: root Cargo.toml [workspace.package].version
+    let label = format!("Coderun AI Runtime v{}", env!("CARGO_PKG_VERSION"));
+    let inner = 42usize;
+    let pad_total = inner.saturating_sub(label.len());
+    let pad_left = pad_total / 2;
+    let pad_right = pad_total - pad_left;
     println!("╔══════════════════════════════════════════╗");
-    println!("║         Coderun AI Runtime v0.1.0        ║");
+    println!("║{}{}{}║", " ".repeat(pad_left), label, " ".repeat(pad_right));
     println!("╚══════════════════════════════════════════╝");
     println!();
     println!("  Socket:  {}", config.daemon.socket_path);

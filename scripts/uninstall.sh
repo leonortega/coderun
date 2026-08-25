@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Coderun v1.0.0 (0.6.0) uninstaller (Unix: Linux/macOS, bash)
+# Coderun uninstaller (Unix: Linux/macOS, bash)
 # V1 scope: local runtime only — reverses scripts/install.sh — removes everything by default (strict) but preserves future/workflow source unless --remove-repo.
 # Idempotent. Usage: bash scripts/uninstall.sh [--keep-external] [--keep-data] [--keep-build] [--force] [--dry-run]
 # Default: remove binaries, plugins, ALL external tools and ALL data (prompts unless --force).
@@ -33,7 +33,7 @@ warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 skip(){ echo -e "  \033[90m[SKIP]\033[0m $*"; }
 run(){ if $DRY_RUN; then skip "would $*"; else eval "$*"; fi; }
 
-info "Coderun v1.0.0 uninstaller (0.6.0, DBOS/workflow future-only)"
+info "Coderun uninstaller (DBOS/workflow future-only)"
 $DRY_RUN && warn "DryRun active - no changes will be made"
 info "Options: RemoveExternal(effective=$DO_REMOVE_EXTERNAL KeepExternal=$KEEP_EXTERNAL) RemoveData(effective=$DO_REMOVE_DATA KeepData=$KEEP_DATA) KeepBuild=$KEEP_BUILD Force=$FORCE"
 

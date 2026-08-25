@@ -53,6 +53,15 @@ Ok "rustc $(rustc --version)"
 Ok "cargo $(cargo --version)"
 
 # Build
+# Stop a running daemon/cli first - a locked target/*/coderun-daemon.exe makes cargo's
+# relink fail with "Access denied" (os error 5). Restart is up to the caller (install.ps1).
+$running = Get-Process -Name coderun-daemon, coderun -ErrorAction SilentlyContinue
+if ($running) {
+  Warn "stopping running coderun processes (lock target binaries): $($running.Id -join ', ')"
+  $running | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 800
+}
+
 Info "cargo build $($buildArgs -join ' ') ..."
 & cargo build @buildArgs
 if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }

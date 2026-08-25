@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Coderun v1.0.0 (0.6.0) first-class installer (Unix: Linux/macOS, bash)
+# Coderun first-class installer (Unix: Linux/macOS, bash)
 # V1 scope: local AI runtime only (DBOS/workflows in future/workflow, opt-in CODERUN_WORKFLOW_ENABLED=true)
 # Tools are FIRST-CLASS (no optional except LSP, no Temporal) + uses prebuilt coderun (no compile/test).
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external]
@@ -10,7 +10,7 @@ SKIP_BUILD=false; SKIP_EXTERNAL=false
 for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; esac; done
 info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
-info "Coderun v1.0.0 installer (0.6.0, DBOS/workflow future-only)"
+info "Coderun installer (DBOS/workflow future-only)"
 # Rust 1.85+ required for RTK (edition2024)
 NEED_RUST=false
 if ! command -v rustc >/dev/null 2>&1; then NEED_RUST=true

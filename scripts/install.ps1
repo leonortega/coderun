@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Coderun v1.0.0 (0.6.0) first-class installer (Windows PowerShell 5.1)
+  Coderun first-class installer (Windows PowerShell 5.1)
   V1 scope: local AI runtime only (DBOS/workflows in future/workflow, opt-in CODERUN_WORKFLOW_ENABLED=true)
   Installs ALL stack tools as first-class (no optional except LSP, no Temporal) + uses prebuilt coderun (no compile/test).
   Idempotent - re-run to update.
@@ -35,7 +35,7 @@ function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
-Info "Coderun v1.0.0 installer (0.6.0, DBOS/workflow future-only)"
+Info "Coderun installer (DBOS/workflow future-only)"
 
 # 0. Prereqs - Rust 1.85+ required for RTK (edition2024)
 $needRustInstall = $false

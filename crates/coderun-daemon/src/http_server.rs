@@ -144,9 +144,10 @@ pub async fn start_http_server(
 // ── Handlers ─────────────────────────────────────────────────────────────
 
 async fn handle_health() -> Json<serde_json::Value> {
+    // Version single source of truth: root Cargo.toml [workspace.package].version
     Json(serde_json::json!({
         "status": "ok",
-        "version": "0.4.0"
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 
@@ -514,5 +515,14 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("OriginalPassthrough"));
+    }
+
+    #[tokio::test]
+    async fn test_health_reports_workspace_version() {
+        // Version SoT: /health must report the workspace version from Cargo.toml,
+        // never a hardcoded string (F-5-style honesty for versioning)
+        let resp = handle_health().await;
+        assert_eq!(resp.0["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(resp.0["status"], "ok");
     }
 }

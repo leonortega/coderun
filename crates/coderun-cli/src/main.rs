@@ -467,7 +467,7 @@ fn stack_terms(discovery: &Discovery) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     let lang_names: std::collections::HashSet<String> =
         discovery.languages.iter().map(|(l, _)| l.clone()).collect();
-    let mut push = |t: &str, terms: &mut Vec<String>| {
+    let push = |t: &str, terms: &mut Vec<String>| {
         let t = t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("").to_lowercase();
         if t.len() >= 2 && !GENERIC.contains(&t.as_str()) && !terms.contains(&t) {
             terms.push(t);

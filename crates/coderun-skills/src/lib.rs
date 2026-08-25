@@ -330,7 +330,7 @@ fn parse_markdown_skill(path: &Path) -> Result<Skill, String> {
 
 /// Parse a Claude-style skill bundle: YAML front matter (`name`, `description`, optional
 /// `tags`) followed by a markdown body (TASK-037b — the shipped skills library format).
-fn parse_front_matter_skill(path: &Path, content: &str) -> Result<Skill, String> {
+fn parse_front_matter_skill(_path: &Path, content: &str) -> Result<Skill, String> {
     let mut name = String::new();
     let mut description = String::new();
     let mut tags: Vec<String> = Vec::new();

@@ -17,7 +17,12 @@ members = [
 exclude = ["crates/coderun-workflow", "future/workflow", "workflow/dbos"]
 
 [workspace.package]
-version = "0.7.0"
+# ── VERSION SINGLE SOURCE OF TRUTH ─────────────────────────────────────
+# This is THE version of coderun. All crates inherit it (version.workspace = true);
+# /health + daemon banner derive it at compile time (CARGO_PKG_VERSION); the npm
+# plugin consumes it via packages/opencode-coderun/scripts/sync-version.mjs on build.
+# To release: change this line, run scripts/compile.ps1, then tag vX.Y.Z and push.
+version = "0.7.5"
 edition = "2021"
 license = "MIT"
 

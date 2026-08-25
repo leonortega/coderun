@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Coderun v1.0.0 (0.6.0) uninstaller (Windows PowerShell 5.1)
+  Coderun uninstaller (Windows PowerShell 5.1)
   V1 scope: local runtime only -- reverses scripts/install.ps1 - removes everything by default, preserves future/workflow source unless -RemoveRepo.
 
 .DESCRIPTION
@@ -87,7 +87,7 @@ $doRemoveRepo = $RemoveRepo  # only if explicitly requested
 
 if ($DryRun) { $PSBoundParameters["WhatIf"] = $true; $WhatIfPreference = $true }
 
-Info "Coderun v1.0.0 uninstaller (0.6.0, DBOS/workflow future-only)"
+Info "Coderun uninstaller (DBOS/workflow future-only)"
 if ($WhatIfPreference) { Warn "DryRun/WhatIf active - no changes will be made" }
 Info "Options: RemoveExternal( effective=$doRemoveExternal KeepExternal=$KeepExternal ) RemoveData( effective=$doRemoveData KeepData=$KeepData ) KeepBuild=$KeepBuild Force=$Force"
 
