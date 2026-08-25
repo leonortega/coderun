@@ -10,7 +10,7 @@ use coderun_core::Config;
 #[derive(Parser)]
 #[command(name = "coderun")]
 #[command(about = "AI Runtime for coding agents")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

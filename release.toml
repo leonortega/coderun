@@ -36,6 +36,6 @@ changelog-path = "CHANGELOG.md"
 # Workspace settings
 [workspace]
 # Version to release
-version = "0.6.0"
+version = "0.7.0"
 # Release profile
 profile = "release"

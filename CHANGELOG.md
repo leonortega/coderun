@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-25 — Single-Command Bootstrap
+
+### Added — One-Command Repository Bootstrap
+- **`coderun init` full bootstrap** `crates/coderun-cli/src/main.rs:cmd_init` 6 phases in one command (was scaffold-only + manual `index`): `[1/6]` scaffold `.coderun/`, config, skills, database → `[2/6]` repository discovery → `[3/6]` indexing (tree-sitter symbols + tantivy BM25 + dependency graph) → `[4/6]` knowledge initialization → `[5/6]` engram memory initialization → `[6/6]` repository profile; incremental and safe to re-run
+- **Repository discovery** `discover_repository()`/`walk_ext_counts()`/`ext_language()` language census by extension (16 mappings, skip-list for `.git/node_modules/target/dist/build/vendor/...`), `detect_stack()` frameworks + build/test commands from manifests (`Cargo.toml` + workspace detection, `package.json` scripts + deps react/vue/svelte/next/express/nest, `go.mod`, `pyproject.toml` poetry/uv, `requirements.txt`, `pom.xml`, `build.gradle(.kts)`, `Makefile`), git branch from `.git/HEAD`
+- **Knowledge seeding at init** `ingest_seed_documents()` README (+`docs/adr|decisions/*.md`) → `store_knowledge(category="docs"/"adr")` so retrieval works before first task
+- **Engram bootstrap seed** `init_engram()` health-checks `knowledge.memory_endpoint`, seeds `repository-profile` + `readme` entries in project namespace via real `EngramClient` HTTP (fail-open with status message when endpoint unreachable/disabled)
+- **Repository Profile artifact** `build_profile_json()` → `.coderun/profile.json` (languages+counts, frameworks, commands, important dirs, git branch, index stats) + stored as knowledge entry `category="profile"`, committable per repo
+- **Doctor probe** `Repo profile:` check added to `cmd_doctor`
+
+### Changed — Installers
+- **ast-grep via npm** prebuilt `@ast-grep/cli` (was cargo compile), PATH fixup + graceful WARN fallback
+- **RTK prebuilt binary** installers copy `.coderun/rtk/rtk.exe` → `~/bin/rtk.exe` (no compile), live-streamed cargo build output as last resort (PS5.1 EAP fixes)
+
+### Changed
+- Version `0.6.0 → 0.7.0` `Cargo.toml` + `release.toml`
+
 ## [0.6.0] - 2026-08-24 — DBOS Required + Spec Compliance
 
 ### Changed — DBOS Promoted to Required (SQLite + Litestream native async)
