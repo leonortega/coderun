@@ -140,6 +140,17 @@ for rc in "$HOME/.profile" "$HOME/.bashrc"; do
 done
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) export PATH="$BIN_DIR:$PATH" ;; esac
 
+# 1c. Ship the bundled skills library to ~/.coderun/skills (installation destination),
+# mirroring the ~/.coderun/models layout - works from any directory, repo-independent.
+SRC_SKILLS="$ROOT/.coderun/skills"
+DST_SKILLS="$HOME/.coderun/skills"
+if [ -d "$SRC_SKILLS" ]; then
+  mkdir -p "$DST_SKILLS"
+  if cp -rf "$SRC_SKILLS"/. "$DST_SKILLS"/ 2>/dev/null; then
+    ok "skills library copied to $DST_SKILLS ($(ls -1 "$DST_SKILLS" | wc -l) entries)"
+  else warn "skills copy to $DST_SKILLS failed"; fi
+else warn "no skills folder found at $SRC_SKILLS - skipped"; fi
+
 info "Initializing repo..."
 "$INSTALLED_CLI" init 2>/dev/null || true
 "$INSTALLED_CLI" index 2>/dev/null || true

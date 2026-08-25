@@ -1,6 +1,7 @@
 #![allow(linker_messages)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use coderun_core::Config;
@@ -33,6 +34,9 @@ enum Commands {
         /// Run interactive setup wizard
         #[arg(long)]
         wizard: bool,
+        /// Skip community skill installation from skills.sh (offline / air-gapped / privacy)
+        #[arg(long)]
+        no_community_skills: bool,
     },
     
     /// Trigger repository re-indexing
@@ -134,7 +138,7 @@ fn main() {
     
     let result = match cli.command {
         Commands::Serve { port, socket } => cmd_serve(port, socket),
-        Commands::Init { wizard } => cmd_init(wizard),
+        Commands::Init { wizard, no_community_skills } => cmd_init(wizard, no_community_skills),
         Commands::Index { watch } => cmd_index(watch),
         Commands::Preview { prompt, session, no_cache } => cmd_preview(&prompt, &session, no_cache),
         Commands::Status => cmd_status(),
@@ -163,7 +167,7 @@ fn cmd_serve(_port: u16, _socket: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_init(wizard: bool) -> Result<(), String> {
+fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     if wizard {
         println!("(wizard mode is non-interactive — defaults applied, edit .coderun/config.toml afterwards)");
         println!();
@@ -212,6 +216,25 @@ fn cmd_init(wizard: bool) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+
+    // [2b] Community skills — stack-matched via skills.sh (`npx skills`), installed into
+    // .coderun/skills so CODERUN stays the curator (opencode never loads them natively).
+    // Best-effort + fail-open: offline/missing npx never fails init.
+    if no_community_skills || std::env::var("CODERUN_NO_COMMUNITY_SKILLS").map(|v| v == "1" || v == "true").unwrap_or(false) {
+        println!("[2b] Community skills — skipped (--no-community-skills)");
+    } else {
+        println!("[2b] Community skills (stack-matched via skills.sh)");
+        match install_community_skills(&project_root, &discovery) {
+            Ok(added) => {
+                if added > 0 {
+                    println!("      ✓ {} skill(s) installed into .coderun/skills", added);
+                } else {
+                    println!("      (no new stack-relevant skills found)");
+                }
+            }
+            Err(e) => println!("      (skipped: {})", e),
+        }
+    }
 
     println!("[3/6] Indexing (tree-sitter symbols + tantivy BM25 + dependency graph)");
     let event_bus = coderun_events::EventBus::new();
@@ -337,6 +360,7 @@ const SKIP_DIRS: &[&str] = &[
     ".next",
     "coverage",
     ".coderun",
+    ".agents",
 ];
 
 fn discover_repository(root: &Path) -> Discovery {
@@ -433,8 +457,233 @@ fn ext_language(ext: &str) -> Option<&'static str> {
     })
 }
 
-fn detect_stack(root: &Path, d: &mut Discovery) {
-    if root.join("Cargo.toml").exists() {
+// ── Community skills via `npx skills` (skills.sh) — TASK-038c ────────────
+
+/// Map discovery results to skills.sh search terms: frameworks first (more specific),
+/// then languages by file count. Normalized, de-duplicated, capped.
+fn stack_terms(discovery: &Discovery) -> Vec<String> {
+    // Checked AFTER normalization ("rust-workspace" already becomes "rust")
+    const GENERIC: &[&str] = &["node", "npm", "make", "cargo"];
+    let mut terms: Vec<String> = Vec::new();
+    let lang_names: std::collections::HashSet<String> =
+        discovery.languages.iter().map(|(l, _)| l.clone()).collect();
+    let mut push = |t: &str, terms: &mut Vec<String>| {
+        let t = t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("").to_lowercase();
+        if t.len() >= 2 && !GENERIC.contains(&t.as_str()) && !terms.contains(&t) {
+            terms.push(t);
+        }
+    };
+    for f in &discovery.frameworks {
+        // Composite framework aliases ("rust-workspace") resolve to a language name —
+        // let the languages pass place them by usage count instead of framework priority.
+        let norm = f.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("").to_lowercase();
+        if lang_names.contains(&norm) {
+            continue;
+        }
+        push(f, &mut terms);
+    }
+    for (l, _) in &discovery.languages {
+        push(l, &mut terms);
+    }
+    terms.truncate(5);
+    terms
+}
+
+/// Strip ANSI escape sequences (`\x1b[...m`) from CLI output
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Parse `npx skills find` output into ranked candidate tokens (`owner/repo@skill`).
+/// The CLI ranks by installs; we keep that order. Best-effort — unparseable output yields
+/// zero candidates and the term is skipped (we never guess sources).
+fn parse_find_candidates(find_output: &str, max_per_term: usize) -> Vec<String> {
+    let clean = strip_ansi(find_output);
+    let mut candidates = Vec::new();
+    for line in clean.lines() {
+        if !line.contains("installs") {
+            continue;
+        }
+        let token = line.trim().split_whitespace().next().unwrap_or("");
+        let Some((repo, skill)) = token.split_once('@') else { continue };
+        let valid =
+            repo.matches('/').count() == 1
+            && !repo.starts_with('/') && !repo.ends_with('/')
+            && !skill.is_empty()
+            && skill.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'));
+        if valid && !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(token)) {
+            candidates.push(token.to_string());
+            if candidates.len() >= max_per_term {
+                break;
+            }
+        }
+    }
+    candidates
+}
+
+/// Filesystem-safe directory name for a skill (`:` etc. are invalid on Windows)
+fn sanitize_dir_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
+        .collect()
+}
+
+/// Run a command capturing stdout with a hard timeout (drains stdout on a thread to
+/// avoid pipe-full deadlock; stderr is discarded). Returns stdout on any exit status.
+fn run_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn {} failed: {}", program, e))?;
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                let out = reader.join().unwrap_or_default();
+                return Ok(out);
+            }
+            Ok(None) => {
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Err("timeout".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+/// Recursively copy a directory tree (std has no stable copy_dir_all)
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Search skills.sh for the repo's stack and install top-ranked skills into
+/// `.coderun/skills/`. Stages via `npx skills add … -a universal --copy` (the only
+/// writable target the CLI offers), then RELOCATES each skill so the analyzed repo's
+/// `.coderun/skills/` stays the single source of truth — nothing is left behind for
+/// opencode or other agents to load natively. Fail-open; overall time-budgeted.
+fn install_community_skills(project_root: &Path, discovery: &Discovery) -> Result<usize, String> {
+    #[cfg(windows)]
+    let npx = "npx.cmd";
+    #[cfg(not(windows))]
+    let npx = "npx";
+
+    // Probe availability cheaply before committing to the flow
+    run_command_with_timeout(npx, &["--version"], project_root, std::time::Duration::from_secs(20))
+        .map_err(|_| "npx not available".to_string())?;
+
+    let skills_dir = project_root.join(".coderun").join("skills");
+    std::fs::create_dir_all(&skills_dir).map_err(|e| format!("create skills dir: {}", e))?;
+
+    let mut existing: std::collections::HashSet<String> = std::fs::read_dir(&skills_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).collect())
+        .unwrap_or_default();
+
+    let stage_root = project_root.join(".agents");
+    let total_budget = Instant::now() + std::time::Duration::from_secs(90);
+    let mut added = 0usize;
+
+    'terms: for term in stack_terms(discovery) {
+        if Instant::now() >= total_budget {
+            println!("      (time budget reached — remaining terms skipped)");
+            break;
+        }
+        let search_timeout = std::time::Duration::from_secs(25).min(total_budget.saturating_duration_since(Instant::now()));
+        let out = match run_command_with_timeout(npx, &["-y", "skills", "find", &term], project_root, search_timeout) {
+            Ok(out) => out,
+            Err(_) => continue,
+        };
+        for cand in parse_find_candidates(&out, 2) {
+            if Instant::now() >= total_budget {
+                break 'terms;
+            }
+            let skill_name = cand.rsplit('@').next().unwrap_or("").to_string();
+            let dir_name = sanitize_dir_name(&skill_name);
+            if skill_name.is_empty() || existing.contains(&skill_name) || existing.contains(&dir_name) {
+                continue;
+            }
+            let install_timeout = std::time::Duration::from_secs(45).min(total_budget.saturating_duration_since(Instant::now()));
+            if run_command_with_timeout(npx, &["-y", "skills", "add", &cand, "--copy", "-y", "-a", "universal"], project_root, install_timeout).is_err() {
+                continue;
+            }
+            // Relocate staged <root>/.agents/skills/<name> → <root>/.coderun/skills/<name>
+            let staged = stage_root.join("skills").join(&skill_name);
+            let dest = skills_dir.join(&dir_name);
+            if staged.exists() && !dest.exists() {
+                let moved = std::fs::rename(&staged, &dest).or_else(|_| copy_dir_recursive(&staged, &dest));
+                match moved {
+                    Ok(()) => {
+                        let _ = std::fs::remove_dir_all(&staged);
+                        println!("      + {} → {}", cand, dest.display());
+                        existing.insert(skill_name.clone());
+                        existing.insert(dir_name.clone());
+                        added += 1;
+                    }
+                    Err(e) => warn_line(&format!("relocate {} failed: {}", cand, e)),
+                }
+            }
+        }
+    }
+
+    // Clean the transient staging tree when empty (never leave agent-visible dirs behind)
+    let _ = std::fs::remove_dir(stage_root.join("skills"));
+    let _ = std::fs::remove_dir(&stage_root);
+
+    Ok(added)
+}
+
+fn warn_line(msg: &str) {
+    println!("      (warn: {})", msg);
+}
+
+fn detect_stack(root: &Path, d: &mut Discovery) {    if root.join("Cargo.toml").exists() {
         d.frameworks.push("cargo".to_string());
         if let Ok(s) = std::fs::read_to_string(root.join("Cargo.toml")) {
             if s.contains("[workspace]") {
@@ -720,7 +969,10 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
         let kh = {
             let kdb = coderun_storage::Database::open(&db_path).map_err(|e| e.to_string())?;
             let mut hub = coderun_knowledge::KnowledgeHub::new(kdb, event_bus.clone(), coderun_knowledge::KnowledgeConfig::default());
-            let skills_dir = PathBuf::from(".coderun/skills");
+            // TASK-037b: prefer repo-local skills, fall back to the global install (~/.coderun/skills)
+            let local_skills = PathBuf::from(".coderun/skills");
+            let global_skills = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("skills");
+            let skills_dir = if local_skills.is_dir() { local_skills } else { global_skills };
             if skills_dir.exists() { let _ = hub.load_skills(&skills_dir); }
             hub
         };
@@ -1250,6 +1502,44 @@ mod tests {
     fn test_dirs_exists() {
         let dirs = dirs();
         assert!(dirs.is_some());
+    }
+
+    #[test]
+    fn test_stack_terms_normalized_and_capped() {
+        let d = Discovery {
+            frameworks: vec!["cargo".into(), "rust-workspace".into(), "react".into(), "node".into()],
+            languages: vec![("rust".to_string(), 40), ("typescript".to_string(), 12), ("javascript".to_string(), 3)],
+            ..Default::default()
+        };
+        let terms = stack_terms(&d);
+        assert_eq!(terms[0], "react", "frameworks come first");
+        assert!(!terms.contains(&"node".to_string()), "generic terms dropped");
+        assert!(!terms.contains(&"rust-workspace".to_string()), "aliases normalized");
+        assert!(terms.contains(&"rust".to_string()));
+        assert!(terms.len() <= 5);
+    }
+
+    #[test]
+    fn test_parse_find_candidates_real_output() {
+        // Mirrors actual `npx skills find react` output incl. ANSI color wrapping
+        let sample = "\n\u{1b}[38;5;102mInstall with\u{1b}[0m npx skills add <owner/repo@skill>\n\n\u{1b}[38;5;145mvercel-labs/agent-skills@vercel-react-best-practices\u{1b}[0m \u{1b}[36m662.8K installs\u{1b}[0m\n\u{1b}[38;5;102m└ https://skills.sh/vercel-labs/agent-skills\u{1b}[0m\n\u{1b}[38;5;145mgoogle-labs-code/stitch-skills@react:components\u{1b}[0m \u{1b}[36m50.6K installs\u{1b}[0m\n";
+        let cands = parse_find_candidates(sample, 2);
+        assert_eq!(cands[0], "vercel-labs/agent-skills@vercel-react-best-practices", "rank order preserved");
+        assert_eq!(cands[1], "google-labs-code/stitch-skills@react:components");
+    }
+
+    #[test]
+    fn test_parse_find_candidates_rejects_garbage() {
+        assert!(parse_find_candidates("", 2).is_empty());
+        let junk = "https://skills.sh/foo/bar 12 installs\nnot-a-skill 3 installs\na/b@c 5 installs";
+        let cands = parse_find_candidates(junk, 5);
+        assert_eq!(cands, vec!["a/b@c".to_string()]);
+    }
+
+    #[test]
+    fn test_sanitize_dir_name() {
+        assert_eq!(sanitize_dir_name("react:components"), "react-components");
+        assert_eq!(sanitize_dir_name("plain-skill_1.0"), "plain-skill_1.0");
     }
 
     #[test]

@@ -77,11 +77,25 @@ impl DaemonState {
             memory_endpoint: config.knowledge.memory_endpoint.clone(),
             max_knowledge_entries: config.knowledge.max_knowledge_entries,
         };
-        let knowledge_hub = KnowledgeHub::new(
+        let mut knowledge_hub = KnowledgeHub::new(
             knowledge_db,
             event_bus.clone(),
             knowledge_config,
         );
+
+        // TASK-037b: prefer repo-local skills (.coderun/skills), fall back to the bundled
+        // global library installed at ~/.coderun/skills — best-effort, never fatal.
+        {
+            let local_skills = std::path::PathBuf::from(".coderun/skills");
+            let global_skills = expand_path("~/.coderun/skills");
+            let skills_dir = if local_skills.is_dir() { local_skills } else { global_skills };
+            if skills_dir.is_dir() {
+                match knowledge_hub.load_skills(&skills_dir) {
+                    Ok(count) => info!(path = %skills_dir.display(), skills = count, "loaded skills library"),
+                    Err(e) => warn!(path = %skills_dir.display(), error = %e, "failed to load skills (continuing without)"),
+                }
+            }
+        }
 
         // Initialize context engine
         let context_config = coderun_context::ContextConfig {

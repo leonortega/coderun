@@ -341,6 +341,20 @@ try {
 # Current session PATH so subsequent steps resolve coderun without the repo checkout
 if (($env:Path -split ';') -notcontains $binDir) { $env:Path = "$binDir;$env:Path" }
 
+# 1c. Ship the bundled skills library to ~\.coderun\skills (installation destination),
+# mirroring the ~\.coderun\models layout - so behavioral skills work from ANY directory,
+# independent of this repo checkout. Idempotent re-run refreshes the copy.
+$srcSkills = Join-Path $Root ".coderun\skills"
+$dstSkills = Join-Path $env:USERPROFILE ".coderun\skills"
+if (Test-Path $srcSkills) {
+  try {
+    New-Item -ItemType Directory -Force -Path $dstSkills | Out-Null
+    Copy-Item -Path (Join-Path $srcSkills "*") -Destination $dstSkills -Recurse -Force -ErrorAction Stop
+    $skillCount = @(Get-ChildItem -LiteralPath $dstSkills -Directory -ErrorAction SilentlyContinue).Count
+    Ok "skills library copied to $dstSkills ($skillCount skills)"
+  } catch { Warn "failed to copy skills folder to ${dstSkills}: $_" }
+} else { Warn "no skills folder found at $srcSkills - skipped" }
+
 # 2. init + index + doctor
 Info "Initializing repo..."
 $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"

@@ -44,47 +44,25 @@ impl SkillEngine {
     /// Load all skills from the skills directory
     pub fn load_skills(&mut self) -> Result<usize, String> {
         self.skills.clear();
+        let mut seen = std::collections::HashSet::new();
+        let count = load_skills_in_dir(&self.skills_dir, &mut self.skills, &mut seen)?;
+        info!(count = count, "Loaded skills");
+        Ok(count)
+    }
 
-        if !self.skills_dir.exists() {
-            info!(path = %self.skills_dir.display(), "Skills directory not found, creating");
-            std::fs::create_dir_all(&self.skills_dir)
-                .map_err(|e| format!("Failed to create skills directory: {}", e))?;
-            return Ok(0);
-        }
-
+    /// Load skills from multiple directories in priority order — first occurrence of a
+    /// skill name wins. Lets callers merge e.g. repo-local `.coderun/skills` with the
+    /// bundled global `~/.coderun/skills` library without duplicates.
+    pub fn load_skills_from_dirs(&mut self, dirs: &[PathBuf]) -> Result<usize, String> {
+        self.skills.clear();
+        let mut seen = std::collections::HashSet::new();
         let mut count = 0;
-        let entries: Vec<_> = std::fs::read_dir(&self.skills_dir)
-            .map_err(|e| format!("Failed to read skills directory: {}", e))?
-            .filter_map(|e| e.ok())
-            .collect();
-
-        for entry in entries {
-            let path = entry.path();
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-
-            let result = match ext {
-                "md" => parse_markdown_skill(&path),
-                "toml" => parse_toml_skill(&path),
-                "yaml" | "yml" => parse_yaml_skill(&path),
-                _ => continue,
-            };
-
-            match result {
-                Ok(skill) => {
-                    debug!(skill = %skill.name, path = %path.display(), "Loaded skill");
-                    self.skills.push(skill);
-                    count += 1;
-                }
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "Failed to load skill");
-                }
+        for dir in dirs {
+            if dir.is_dir() {
+                count += load_skills_in_dir(dir, &mut self.skills, &mut seen)?;
             }
         }
-
-        info!(count = count, "Loaded skills");
+        info!(count = count, dirs = dirs.len(), "Loaded skills (multi-dir)");
         Ok(count)
     }
 
@@ -164,6 +142,81 @@ impl SkillEngine {
 
 // ── Parsers ─────────────────────────────────────────────────────────────
 
+/// Load every skill bundle/file in `dir` into `skills`, skipping names already present in
+/// `seen` (first directory in priority order wins). Supports flat `.md`/`.toml`/`.yaml`
+/// files and `<name>/SKILL.md` bundles (TASK-037b).
+fn load_skills_in_dir(
+    dir: &Path,
+    skills: &mut Vec<Skill>,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<usize, String> {
+    if !dir.exists() {
+        debug!(path = %dir.display(), "Skills directory not found");
+        return Ok(0);
+    }
+
+    let mut count = 0;
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read skills directory: {}", e))?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    for entry in entries {
+        let path = entry.path();
+
+        // Skill bundles live at <skills>/<name>/SKILL.md (Claude-style folders)
+        if path.is_dir() {
+            let skill_file_md = path.join("SKILL.md");
+            let skill_file = if skill_file_md.exists() {
+                skill_file_md
+            } else {
+                let lower = path.join("skill.md");
+                if lower.exists() { lower } else { continue }
+            };
+            match parse_markdown_skill(&skill_file) {
+                Ok(skill) => {
+                    if seen.insert(skill.name.to_lowercase()) {
+                        debug!(skill = %skill.name, path = %skill_file.display(), "Loaded skill bundle");
+                        skills.push(skill);
+                        count += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!(path = %skill_file.display(), error = %e, "Failed to load skill bundle");
+                }
+            }
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        let result = match ext {
+            "md" => parse_markdown_skill(&path),
+            "toml" => parse_toml_skill(&path),
+            "yaml" | "yml" => parse_yaml_skill(&path),
+            _ => continue,
+        };
+
+        match result {
+            Ok(skill) => {
+                if seen.insert(skill.name.to_lowercase()) {
+                    debug!(skill = %skill.name, path = %path.display(), "Loaded skill");
+                    skills.push(skill);
+                    count += 1;
+                }
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Failed to load skill");
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 /// Parse a Markdown skill file
 ///
 /// Expected format:
@@ -187,6 +240,12 @@ impl SkillEngine {
 fn parse_markdown_skill(path: &Path) -> Result<Skill, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    // TASK-037b: support the Claude-style bundle format — YAML front matter with
+    // `name:` / `description:` (+ optional `tags:`) followed by a markdown body.
+    if content.trim_start().starts_with("---") {
+        return parse_front_matter_skill(path, &content);
+    }
 
     let mut name = String::new();
     let mut tags = Vec::new();
@@ -267,6 +326,111 @@ fn parse_markdown_skill(path: &Path) -> Result<Skill, String> {
         priority,
         specificity,
     })
+}
+
+/// Parse a Claude-style skill bundle: YAML front matter (`name`, `description`, optional
+/// `tags`) followed by a markdown body (TASK-037b — the shipped skills library format).
+fn parse_front_matter_skill(path: &Path, content: &str) -> Result<Skill, String> {
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut tags: Vec<String> = Vec::new();
+
+    // Split front matter from body on the second `---` line
+    let after_leading = content.trim_start().trim_start_matches("---\n").trim_start_matches("---\r\n");
+    let (fm_block, body) = match after_leading.find("\n---") {
+        Some(idx) => {
+            let fm = &after_leading[..idx];
+            let rest = &after_leading[idx..];
+            // skip the closing delimiter line itself
+            let body_start = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
+            (fm, rest[body_start..].to_string())
+        }
+        None => (after_leading, String::new()),
+    };
+
+    let mut in_block_scalar = false;
+    for line in fm_block.lines() {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        let trimmed = line.trim();
+        if !indented {
+            in_block_scalar = false;
+            if let Some(v) = trimmed.strip_prefix("name:") {
+                name = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            } else if let Some(v) = trimmed.strip_prefix("tags:") {
+                tags = v
+                    .split(|c| c == ',' || c == ';')
+                    .map(|t| t.trim().to_lowercase())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+            } else if trimmed.starts_with("description:") {
+                let v = trimmed["description:".len()..].trim().trim_matches('"').trim_matches('\'');
+                if matches!(v, ">-" | ">" | "|-" | "|" | "") {
+                    // YAML block scalar — value continues on following indented lines
+                    in_block_scalar = true;
+                } else {
+                    description = v.to_string();
+                }
+            }
+        } else if in_block_scalar && !trimmed.is_empty() && !looks_like_key(trimmed) {
+            // Strip stray block-scalar indicators inside continued lines
+            let cleaned = trimmed
+                .strip_prefix(">-\n")
+                .or_else(|| trimmed.strip_prefix(">"))
+                .unwrap_or(trimmed)
+                .trim_start_matches(['>', '-', '|'])
+                .trim();
+            if !cleaned.is_empty() {
+                if !description.is_empty() {
+                    description.push(' ');
+                }
+                description.push_str(cleaned);
+            }
+        }
+    }
+
+    if name.is_empty() {
+        return Err("Missing skill name in front matter".to_string());
+    }
+    // Derive tags from the skill name when the bundle has no explicit tags so tag-overlap
+    // matching still works ("kubernetes-manifest-authoring" → kubernetes, manifest, authoring)
+    if tags.is_empty() {
+        tags = tokenize(&name.replace(['-', '_'], " "));
+    }
+    if tags.is_empty() {
+        return Err("No tags derivable for skill".to_string());
+    }
+    // Instructions: the markdown body; fall back to the description when the body is empty
+    let instructions_body = body.trim();
+    let instructions = if instructions_body.is_empty() { description.clone() } else { format!("{description}\n\n{instructions_body}") };
+    if instructions.trim().is_empty() {
+        return Err("Empty skill body".to_string());
+    }
+
+    let priority = tags.len() as u8;
+    let specificity = tags.len() as f64 / 5.0;
+    Ok(Skill {
+        name,
+        tags,
+        instructions,
+        examples: Vec::new(),
+        constraints: Vec::new(),
+        description,
+        priority,
+        specificity,
+    })
+}
+
+/// Heuristic: an indented front-matter line that itself looks like a new top-level key
+/// (`foo: bar` with no space before the colon) ends the current block scalar.
+fn looks_like_key(trimmed: &str) -> bool {
+    match trimmed.find(':') {
+        Some(idx) => {
+            let head = &trimmed[..idx];
+            !head.is_empty()
+                && head.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        }
+        None => false,
+    }
 }
 
 /// Parse a TOML skill file
@@ -443,6 +607,35 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// TASK-037b: <name>/SKILL.md bundles with YAML front matter must load and match
+    #[test]
+    fn test_loads_front_matter_skill_bundles_from_subdirs() {
+        let dir = create_test_dir();
+        let bundle = dir.join("kubernetes-manifest-authoring");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(
+            bundle.join("SKILL.md"),
+            "---\nname: kubernetes-manifest-authoring\ndescription: >-\n  Write and maintain Kubernetes manifests\n  following best practices.\n---\n\n# Body\n\nDeployment yaml guidance.",
+        )
+        .unwrap();
+        let flat = dir.join("legacy-style.md");
+        fs::write(
+            &flat,
+            "# Legacy Skill\n\n## Tags\nrust, cargo\n\n## Instructions\nDo rust things.\n",
+        )
+        .unwrap();
+
+        let mut engine = SkillEngine::new(dir.clone());
+        let count = engine.load_skills().unwrap();
+        assert_eq!(count, 2, "both bundle and flat skills should load");
+
+        // Tag-overlap matching works via name-derived tags
+        let matches = engine.match_skills("help me write kubernetes manifests", 5);
+        assert!(!matches.is_empty(), "front-matter bundle should match by derived tags");
+        assert!(matches[0].skill_name.contains("kubernetes"));
+        cleanup(&dir);
     }
 
     fn cleanup(dir: &Path) {
