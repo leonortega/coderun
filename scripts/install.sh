@@ -196,7 +196,7 @@ if [ -f "$SRC_PLUGIN" ]; then
   mkdir -p "$GLOBAL_PLUGIN_DIR" 2>/dev/null
   cp -f "$SRC_PLUGIN" "$GLOBAL_PLUGIN_DIR/" 2>/dev/null && ok "opencode plugin copied to $GLOBAL_PLUGIN_DIR (global)" || info "  global plugin copy skipped"
   info "Restart opencode to load plugin (hooks: message.updated + tool.execute.before, daemon http://127.0.0.1:9527)"
-else warn "opencode plugin source not found at .opencode/plugins/coderun.ts"; fi
+else info "  opencode plugin not in repository (removed) - skipping"; fi
 
 info "Done - next: coderun serve | coderun preview 'add auth' | coderun workflow start 'refactor' --require-approval | curl http://127.0.0.1:9527/metrics"
 info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
