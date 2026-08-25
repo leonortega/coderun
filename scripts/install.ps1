@@ -23,6 +23,8 @@
 param([switch]$SkipBuild, [switch]$SkipExternal)
 
 $ErrorActionPreference = "Stop"
+# Always English in scripts (avoid localized ShouldProcess/WhatIf)
+try { [System.Threading.Thread]::CurrentThread.CurrentUICulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US'); [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US') } catch {}
 $Root = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $Root
 

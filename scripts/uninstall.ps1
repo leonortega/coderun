@@ -67,6 +67,8 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+# Always English in scripts
+try { [System.Threading.Thread]::CurrentThread.CurrentUICulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US'); [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US') } catch {}
 $Root = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $Root
 
