@@ -16,6 +16,7 @@ pub trait IContextBuilder: Send + Sync {
 /// Unifies 100+ providers behind one shape; routing/fallback built in.
 /// Heuristic tiering stays deterministic; no LLM call decides tier.
 pub trait IModelGateway: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     fn select_model(
         &self,
         message: &str,
@@ -30,27 +31,29 @@ pub trait IModelGateway: Send + Sync {
     fn tier_to_model(&self, tier: &str) -> String;
 }
 
-/// IWorkflowEngine — external, optional (spec §5)
-/// Not a runtime dependency. Separate product consuming `IContextBuilder` API.
-/// Two viable choices when needed: Temporal (single-node SQLite+Litestream) or DBOS Transact.
+/// IWorkflowEngine — required since v0.6.0 (SQLite+Litestream, native async)
+/// Single-node durability; Temporal deleted. No `block_on_in_thread` — async directly on Tokio.
+/// `NoopWorkflowEngine` kept only for #[cfg(test)].
+#[async_trait::async_trait]
 pub trait IWorkflowEngine: Send + Sync {
-    fn start_workflow(&self, task: &TaskRequest, config: &Config) -> Result<String>;
-    fn get_status(&self, workflow_id: &str) -> Result<String>;
-    fn is_available(&self) -> bool {
+    async fn start_workflow(&self, task: &TaskRequest, config: &Config) -> Result<String>;
+    async fn get_status(&self, workflow_id: &str) -> Result<String>;
+    async fn is_available(&self) -> bool {
         false
     }
 }
 
-/// No-op workflow engine — v1 returns unavailable
+/// No-op workflow engine — kept for tests only since v0.6.0
 pub struct NoopWorkflowEngine;
 
+#[async_trait::async_trait]
 impl IWorkflowEngine for NoopWorkflowEngine {
-    fn start_workflow(&self, _task: &TaskRequest, _config: &Config) -> Result<String> {
+    async fn start_workflow(&self, _task: &TaskRequest, _config: &Config) -> Result<String> {
         Err(crate::error::CoderunError::InvalidRequest(
-            "Workflow engine not configured — external orchestrator is a separate product (spec §5)".to_string(),
+            "Workflow engine not configured — enable DBOS (workflow.enabled=true) since v0.6.0".to_string(),
         ))
     }
-    fn get_status(&self, _workflow_id: &str) -> Result<String> {
+    async fn get_status(&self, _workflow_id: &str) -> Result<String> {
         Err(crate::error::CoderunError::InvalidRequest(
             "Workflow engine not configured".to_string(),
         ))
@@ -63,17 +66,21 @@ mod tests {
 
     #[test]
     fn test_noop_workflow_unavailable() {
-        let engine = NoopWorkflowEngine;
-        assert!(!engine.is_available());
-        assert!(engine
-            .start_workflow(
-                &crate::ipc::TaskRequest {
-                    message: "test".to_string(),
-                    session_id: "s".to_string(),
-                    context_hints: None,
-                },
-                &crate::config::Config::default()
-            )
-            .is_err());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let engine = NoopWorkflowEngine;
+            assert!(!engine.is_available().await);
+            assert!(engine
+                .start_workflow(
+                    &crate::ipc::TaskRequest {
+                        message: "test".to_string(),
+                        session_id: "s".to_string(),
+                        context_hints: None,
+                    },
+                    &crate::config::Config::default()
+                )
+                .await
+                .is_err());
+        });
     }
 }

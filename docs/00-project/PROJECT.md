@@ -137,5 +137,5 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 | No distributed deployment | Single local daemon process | Distributed runtime in v2 |
 | No vector/semantic recall | Uses FTS5 lexical recall only (engram) | Semantic recall only if lexical proves insufficient |
 | No relationship-aware retrieval | Uses BM25 + reranking only | Graph-based retrieval only if concrete query pattern requires it |
-| No external orchestration | Runtime works standalone | Temporal/DBOS as separate product if governance needed |
-| Tier 2 agents | Best-effort only, no guarantee of hook compliance | N/A — by design |
+| No external orchestration | Runtime works standalone | DBOS required since v0.6.0 (SQLite+Litestream native); Temporal deleted |
+| Tier 2 agents | Best-effort only, no guarantee of hook compliance | N/A — by design (v0.6.0 keeps README-only) |

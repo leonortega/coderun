@@ -1,3 +1,4 @@
+#![allow(linker_messages)]
 // coderun-daemon: daemon binary — HTTP server, signal handling, process lifecycle
 
 #[allow(dead_code)]

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Token-bucket per session_id — in-memory, lite, at adapter layer.
 /// LiteLLM still handles provider-side quota. This protects the daemon.
@@ -10,6 +10,7 @@ struct Bucket {
     last_refill: Instant,
 }
 
+#[derive(Debug, Clone)]
 pub struct RateLimiter {
     capacity: f64,
     refill_per_sec: f64,
@@ -53,23 +54,15 @@ impl Default for RateLimiter {
     }
 }
 
-/// HMAC-SHA256 verification for DBOS→daemon (shared secret)
+/// HMAC-SHA256 verification — delegates to canonical coderun-core::secrets (v0.6.0 single impl)
 pub fn verify_hmac(secret: &str, body: &str, signature: &str) -> bool {
-    use sha2::{Sha256, Digest};
-    use std::fmt::Write;
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    hasher.update(body.as_bytes());
-    let hash = hasher.finalize();
-    let mut hex = String::new();
-    for b in hash { let _ = write!(&mut hex, "{:02x}", b); }
-    // constant-time-ish compare
-    hex.len() == signature.len() && hex.bytes().zip(signature.bytes()).all(|(a,b)| a==b)
+    coderun_core::secrets::verify_hmac(secret, body, signature)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     #[test]
     fn test_rate_limit_allows_burst() {
         let rl = RateLimiter::new(10.0, 5);
@@ -99,17 +92,7 @@ mod tests {
     fn test_hmac_verify() {
         let secret = "test-secret";
         let body = r#"{"workflow_id":"wf_1"}"#;
-        let sig = {
-            use sha2::{Sha256, Digest};
-            use std::fmt::Write;
-            let mut hasher = Sha256::new();
-            hasher.update(secret.as_bytes());
-            hasher.update(body.as_bytes());
-            let hash = hasher.finalize();
-            let mut hex = String::new();
-            for b in hash { let _ = write!(&mut hex, "{:02x}", b); }
-            hex
-        };
+        let sig = coderun_core::secrets::hmac_hex(secret, body);
         assert!(verify_hmac(secret, body, &sig));
         assert!(!verify_hmac(secret, body, "bad"));
         assert!(!verify_hmac("other", body, &sig));

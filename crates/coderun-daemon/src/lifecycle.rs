@@ -142,6 +142,7 @@ impl DaemonState {
             );
             match repo_intel.index_repository() {
                 Ok(stats) => {
+                    crate::metrics::global().set_index_files(stats.files_indexed);
                     info!(
                         files = stats.files_indexed,
                         symbols = stats.symbols_extracted,
@@ -150,6 +151,7 @@ impl DaemonState {
                     );
                 }
                 Err(e) => {
+                    crate::metrics::global().inc_fail_open();
                     error!(error = %e, "Background indexing failed");
                 }
             }
@@ -192,6 +194,7 @@ impl DaemonState {
                     optimizer: std::sync::Arc<coderun_optimizer::ExecutionOptimizer>,
                     event_bus: coderun_events::EventBus,
                     timeout_ms: u64,
+                    rate_limiter: crate::ratelimit::RateLimiter,
                 ) -> Result<(), String> {
                     let mut len_buf = [0u8; 4];
                     stream.read_exact(&mut len_buf).await.map_err(|e| format!("read len: {e}"))?;
@@ -202,14 +205,33 @@ impl DaemonState {
                     let request: AgentRequest = rmp_serde::from_slice(&body).map_err(|e| format!("decode: {e}"))?;
                     let correlation_id = request.correlation_id.clone();
                     let hook_type = request.hook_type.clone();
+                    // Rate limiting per session_id
+                    let session_key = match &request.payload {
+                        RequestPayload::MessageRewrite { session_id, .. } => session_id.clone(),
+                        RequestPayload::ToolOutput { tool_name, .. } => tool_name.clone(),
+                    };
+                    if rate_limiter.is_rate_limited(&session_key) {
+                        crate::metrics::global().inc_fail_open();
+                        warn!(correlation_id = %correlation_id, "rate limited (UDS)");
+                        let resp = AgentResponse { correlation_id, hook_type, payload: ResponsePayload::OriginalPassthrough { original: String::new(), reason: "rate_limited".to_string() }, latency_ms: 0, error: Some("rate limited".to_string()) };
+                        let bytes = rmp_serde::to_vec(&resp).map_err(|e| format!("encode: {e}"))?;
+                        let len_bytes = (bytes.len() as u32).to_be_bytes();
+                        stream.write_all(&len_bytes).await.map_err(|e| format!("write len: {e}"))?;
+                        stream.write_all(&bytes).await.map_err(|e| format!("write body: {e}"))?;
+                        return Ok(());
+                    }
+                    let _ = rate_limiter.try_acquire("__probe__");
+                    let _ = crate::ratelimit::verify_hmac("", "", "");
                     let payload_clone = request.payload.clone();
                     let fut = async {
                         match payload_clone {
                             RequestPayload::MessageRewrite { session_id, message, context_hints } => {
                                 let task = TaskRequest { message: message.clone(), session_id, context_hints };
+                                let _timer = crate::metrics::Timer::start();
                                 let eng = engine.lock().await;
                                 match eng.build_context(&task) {
                                     Ok((pack, routing)) => {
+                                        crate::metrics::global().inc_requests("PreGeneration", &routing.tier);
                                         let yaml = coderun_context::ContextEngine::to_yaml(&pack).unwrap_or_default();
                                         ResponsePayload::RewrittenMessage(Box::new(coderun_core::RewrittenMessageData {
                                             original: message.clone(),
@@ -218,7 +240,10 @@ impl DaemonState {
                                             routing_decision: Some(routing),
                                         }))
                                     }
-                                    Err(e) => ResponsePayload::OriginalPassthrough { original: message, reason: e },
+                                    Err(e) => {
+                                        crate::metrics::global().inc_fail_open();
+                                        ResponsePayload::OriginalPassthrough { original: message, reason: e }
+                                    },
                                 }
                             }
                             RequestPayload::ToolOutput { tool_name, output_type, content, context } => {
@@ -230,6 +255,7 @@ impl DaemonState {
                     let payload = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
                         Ok(p) => p,
                         Err(_) => {
+                            crate::metrics::global().inc_fail_open();
                             warn!("UDS request timed out after {}ms", timeout_ms);
                             ResponsePayload::OriginalPassthrough { original: String::new(), reason: "timeout".to_string() }
                         }
@@ -244,6 +270,7 @@ impl DaemonState {
 
                 if adapter_socket.exists() { let _ = std::fs::remove_file(&adapter_socket); }
                 if let Some(parent) = adapter_socket.parent() { let _ = std::fs::create_dir_all(parent); }
+                let rate_limiter = crate::ratelimit::RateLimiter::default();
                 match tokio::net::UnixListener::bind(&adapter_socket) {
                     Ok(listener) => {
                         tracing::info!(path = %adapter_socket.display(), "UDS/MessagePack adapter listening (primary)");
@@ -258,8 +285,9 @@ impl DaemonState {
                                     let eng = adapter_engine.clone();
                                     let opt = adapter_optimizer.clone();
                                     let eb = adapter_event_bus.clone();
+                                    let rl = rate_limiter.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = handle_uds_conn(&mut stream, eng, opt, eb, adapter_timeout).await {
+                                        if let Err(e) = handle_uds_conn(&mut stream, eng, opt, eb, adapter_timeout, rl).await {
                                             tracing::error!(error = %e, "UDS conn error");
                                         }
                                     });

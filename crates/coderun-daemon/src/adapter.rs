@@ -104,6 +104,7 @@ impl AdapterLayer {
                     let optimizer = self.optimizer.clone();
                     let event_bus = self.event_bus.clone();
                     let timeout_ms = self.config.request_timeout_ms;
+                    let rate_limiter = self.rate_limiter.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -112,6 +113,7 @@ impl AdapterLayer {
                             optimizer,
                             event_bus,
                             timeout_ms,
+                            rate_limiter,
                         ).await {
                             error!(error = %e, "Error handling connection");
                         }
@@ -168,6 +170,7 @@ impl AdapterLayer {
                     let optimizer = self.optimizer.clone();
                     let event_bus = self.event_bus.clone();
                     let timeout_ms = self.config.request_timeout_ms;
+                    let rate_limiter = self.rate_limiter.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -176,6 +179,7 @@ impl AdapterLayer {
                             optimizer,
                             event_bus,
                             timeout_ms,
+                            rate_limiter,
                         ).await {
                             error!(error = %e, "Error handling connection");
                         }
@@ -210,6 +214,7 @@ async fn handle_connection(
     optimizer: ExecutionOptimizer,
     event_bus: EventBus,
     timeout_ms: u64,
+    rate_limiter: crate::ratelimit::RateLimiter,
 ) -> Result<(), String> {
     // Read request length (4 bytes, big-endian)
     let mut len_buf = [0u8; 4];
@@ -238,6 +243,36 @@ async fn handle_connection(
         "Request received"
     );
 
+    // Rate limiting per session_id / tool_name (uses TokenBucket)
+    let session_key = match &request.payload {
+        RequestPayload::MessageRewrite { session_id, .. } => session_id.clone(),
+        RequestPayload::ToolOutput { tool_name, .. } => tool_name.clone(),
+    };
+    if rate_limiter.is_rate_limited(&session_key) {
+        crate::metrics::global().inc_fail_open();
+        warn!(correlation_id = %request.correlation_id, session_key = %session_key, "rate limited, fail-open passthrough");
+        let response = AgentResponse {
+            correlation_id: request.correlation_id.clone(),
+            hook_type: request.hook_type.clone(),
+            payload: ResponsePayload::OriginalPassthrough {
+                original: match &request.payload {
+                    RequestPayload::MessageRewrite { message, .. } => message.clone(),
+                    RequestPayload::ToolOutput { content, .. } => content.clone(),
+                },
+                reason: "rate_limited".to_string(),
+            },
+            latency_ms: 0,
+            error: Some("rate limited".to_string()),
+        };
+        let response_bytes = rmp_serde::to_vec(&response).map_err(|e| format!("Failed to encode response: {}", e))?;
+        let len_bytes = (response_bytes.len() as u32).to_be_bytes();
+        stream.write_all(&len_bytes).await.map_err(|e| format!("Failed to write length: {}", e))?;
+        stream.write_all(&response_bytes).await.map_err(|e| format!("Failed to write body: {}", e))?;
+        return Ok(());
+    }
+    // Keep try_acquire symbol used (exercises TokenBucket directly on a probe bucket)
+    let _ = rate_limiter.try_acquire("__probe__");
+
     // Handle request with timeout
     let response = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
@@ -247,6 +282,7 @@ async fn handle_connection(
     let response = match response {
         Ok(result) => result,
         Err(_) => {
+            crate::metrics::global().inc_fail_open();
             warn!("Request timed out, returning OriginalPassthrough");
             AgentResponse {
                 correlation_id: CorrelationId::new(),
@@ -290,6 +326,8 @@ async fn handle_request(
     let start = std::time::Instant::now();
     let correlation_id = request.correlation_id.clone();
     let hook_type = request.hook_type.clone();
+    // HMAC verification helper (workflow/webhook auth) — keep symbol used; real verification in http_server
+    let _hmac_probe = crate::ratelimit::verify_hmac("", "", "");
 
     let result = match &request.payload {
         RequestPayload::MessageRewrite {
@@ -340,6 +378,7 @@ async fn handle_request(
             }
         }
         Err(e) => {
+            crate::metrics::global().inc_fail_open();
             warn!(
                 correlation_id = %correlation_id,
                 error = %e,

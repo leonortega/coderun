@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-24 — DBOS Required + Spec Compliance
+
+### Changed — DBOS Promoted to Required (SQLite + Litestream native async)
+- **DBOS required** `crates/coderun-core/src/config.rs:WorkflowConfig` `enabled:true` `engine:dbos` default (was `false/noop`), single-node SQLite `sqlite://~/.coderun/dbos.db` + `sqlite://~/.coderun/dbos_system.db` + Litestream replica `DBOS_LITESTREAM_REPLICA_URL`
+- **Native async** `crates/coderun-core/src/traits.rs:IWorkflowEngine` → `#[async_trait]` `async fn start_workflow/get_status/is_available`, `crates/coderun-workflow/src/dbos.rs` deleted `block_on_in_thread` hack, direct `tokio::time::timeout(5s/3s/1s)` via shared `reqwest::Client`; `NoopWorkflowEngine` kept only `#[cfg(test)]`; CLI `crates/coderun-cli/src/main.rs:cmd_workflow` now `rt.block_on`; fail-closed when DBOS down (was fail-open)
+- **HMAC canonical** `crates/coderun-core/src/secrets.rs:verify_hmac/hmac_hex` single impl via `hmac = "0.12"` `Hmac<Sha256>` `LazyLock<Regex>` for `redact_secrets` (was `sha256(secret+body)` ×2 in `workflow/dbos.rs` + `daemon/ratelimit.rs`); `daemon/ratelimit.rs:verify_hmac` delegates to core
+- **Sidecar native** `workflow/dbos/src/main.ts` + `workflow/dbos/src/workflows/governed.ts` now import `dbos-transact` `DBOS.workflow/communicator/transaction/sleep/signal`, `workflow/dbos/package.json` `0.4.0→0.6.0` + `dbos-transact = "^1.2.0"`
+
+### Added — Duplicate Collapse + Extended Languages
+- **Skill scorer single** `crates/coderun-skills/src/lib.rs:SkillEngine::from_skills` + `crates/coderun-knowledge/src/lib.rs:match_skills` delegates to canonical `SkillEngine::match_skills` (deleted `simple_tag_match` divergent `0.3` scorer)
+- **Extended languages feature B** `crates/coderun-repo-intel/Cargo.toml` `extended-languages = [tree-sitter-go/java/c/cpp]` optional, `crates/coderun-repo-intel/src/parser.rs:get_language` `#[cfg(feature)]` arms for `go,java,c,cpp` (`cpp` also `c++` alias), `crates/coderun-core/src/config.rs:IndexConfig` default `4` langs (was `8`), `validate()` warns if `go/java/c/cpp` without feature
+- **Hook compat (OpenSpec)** `.opencode/plugins/coderun.ts` dual registration `chat.message` primary + `message.updated` compat shim `WARN` + metric placeholder (see `docs/V0_6_0_PLAN.md:2.1`)
+- **Workspace deps** `async-trait = "0.1"` `hmac = "0.12"` `sha2` deduplicated in `Cargo.toml:18`; `crates/coderun-core:Cargo.toml` + `coderun-workflow` add `hmac,async-trait`
+
+### Changed
+- Version `0.5.0 → 0.6.0` `Cargo.toml:18` + `release.toml:39`, 193 tests (was 166; +27 via extended-languages + async DBOS + HMAC core)
+
 ## [0.5.0] - 2026-08-24 — First-Class Tools
 
 ### Added — First-Class Fixes (fallbacks kept only inside Err/warn)

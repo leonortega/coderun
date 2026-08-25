@@ -16,13 +16,20 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
+
+[workspace.lints.rust]
+linker_messages = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(windows_raw_dylib)'] }
 
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -40,7 +47,6 @@ thiserror = "1"
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
-sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 glob = "0.3"

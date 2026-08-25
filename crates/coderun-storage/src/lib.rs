@@ -607,7 +607,7 @@ impl Database {
         let rows = stmt.query_map(params![limit as i64], |row| Ok(AuditRecord {
             id: row.get(0)?, workflow_id: row.get(1)?, correlation_id: row.get(2)?, actor: row.get(3)?, task: row.get(4)?, ctx_pack_hash: row.get(5)?, payload: row.get(6)?, created_at: row.get(7)?,
         })).map_err(|e| format!("Failed to query audits: {e}"))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("{e}"))?)
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("{e}"))
     }
 
     pub fn upsert_workflow(&self, workflow_id: &str, status: &str, task: &str) -> Result<(), String> {
@@ -630,7 +630,7 @@ impl Database {
         let rows = stmt.query_map(params![limit as i64], |row| Ok(WorkflowRecord {
             workflow_id: row.get(0)?, status: row.get(1)?, task: row.get(2)?, created_at: row.get(3)?, updated_at: row.get(4)?,
         })).map_err(|e| format!("{e}"))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("{e}"))?)
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("{e}"))
     }
 
     // ── Utility ─────────────────────────────────────────────────────

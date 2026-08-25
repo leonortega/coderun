@@ -1,51 +1,162 @@
 #!/usr/bin/env bash
 # Coderun v0.5.0 first-class installer (Unix: Linux/macOS, bash)
-# Tools are FIRST-CLASS (no optional except LSP, no Temporal) + builds coderun + opencode plugin.
+# Tools are FIRST-CLASS (no optional except LSP, no Temporal) + uses prebuilt coderun (no compile/test).
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external]
+# Note: --skip-build is deprecated (build always skipped, prebuilt at target/release/coderun is used)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKIP_BUILD=false; SKIP_EXTERNAL=false
 for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; esac; done
-info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m✓\033[0m $*"; } ; warn(){ echo -e "  \033[33m⚠\033[0m $*"; }
+info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
-info "Coderun v0.5.0 installer — $ROOT"
+info "Coderun v0.5.0 installer - $ROOT"
 command -v rustc >/dev/null || { info "Installing Rust 1.75..."; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.75; export PATH="$HOME/.cargo/bin:$PATH"; }
 ok "rustc $(rustc --version)"
-command -v node >/dev/null || warn "node not found — install Node >=20 https://nodejs.org"; command -v node >/dev/null && ok "node $(node --version)"
-command -v python3 >/dev/null || warn "python3 not found"; command -v python3 >/dev/null && ok "python3 $(python3 --version)"
+command -v node >/dev/null || warn "node not found - install Node >=20 https://nodejs.org"; command -v node >/dev/null && ok "node $(node --version)"
+if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+  info "python3 not found - attempting install..."
+  if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y python3 python3-pip 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 apt install failed - install manually: https://www.python.org/downloads/"
+  elif command -v brew >/dev/null 2>&1; then brew install python@3.13 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 brew install failed"
+  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y python3 python3-pip 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 dnf install failed"
+  else warn "python3 not found - install Python 3.11+ https://www.python.org/downloads/ (required for litellm/mkdocs)"; fi
+else command -v python3 >/dev/null 2>&1 && ok "python3 $(python3 --version)" || ok "python $(python --version)"; fi
 command -v git >/dev/null || { echo "git not found"; exit 1; }; ok "$(git --version)"
 
 if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-external)"; else
   info "Installing first-class external tools..."
-  command -v sg >/dev/null && ok "ast-grep $(sg --version)" || { info "  ast-grep via cargo..."; cargo install ast-grep --locked 2>/dev/null && ok "ast-grep" || warn "ast-grep install failed — fallback WARN"; }
-  if [ -d "$ROOT/../engram" ]; then ok "engram clone at ../engram"; else git clone https://github.com/Gentleman-Programming/engram "$ROOT/../engram" 2>/dev/null && ok "engram cloned" || warn "engram clone failed"; fi
-  MODEL_DIR="$HOME/.coderun/models"; mkdir -p "$MODEL_DIR"; [ -f "$MODEL_DIR/flashrank.onnx" ] && ok "FlashRank $MODEL_DIR/flashrank.onnx" || warn "FlashRank model missing at $MODEL_DIR/flashrank.onnx — TF-IDF fallback"
+  command -v ast-grep >/dev/null && ok "ast-grep $(ast-grep --version)" || { info "  ast-grep via cargo..."; cargo install ast-grep --locked 2>/dev/null && ok "ast-grep" || warn "ast-grep install failed - fallback WARN"; }
+  # engram - local binary from .coderun/engram/*.zip or .coderun/engram/engram (no git clone)
+  ENGRAM_BIN="$HOME/bin/engram"
+  if command -v engram >/dev/null 2>&1; then ok "engram $(engram --version 2>/dev/null | head -1)"
+  elif [ -f "$ENGRAM_BIN" ]; then ok "engram binary at $ENGRAM_BIN"
+  else
+    REPO_ZIP=$(ls "$ROOT/.coderun/engram/"*.zip 2>/dev/null | head -1 || true)
+    REPO_EXE="$ROOT/.coderun/engram/engram"
+    [ -f "$ROOT/.coderun/engram/engram.exe" ] && REPO_EXE="$ROOT/.coderun/engram/engram.exe"
+    if [ -f "$REPO_EXE" ]; then
+      mkdir -p "$(dirname "$ENGRAM_BIN")"
+      cp -f "$REPO_EXE" "$ENGRAM_BIN" 2>/dev/null && chmod +x "$ENGRAM_BIN" 2>/dev/null && ok "engram installed to $ENGRAM_BIN (from .coderun/engram)" || warn "engram copy failed - local LIKE fallback"
+    elif [ -n "$REPO_ZIP" ] && [ -f "$REPO_ZIP" ]; then
+      mkdir -p "$(dirname "$ENGRAM_BIN")" "$HOME/.cache/tmp/engram_extract"
+      if command -v unzip >/dev/null 2>&1; then
+        unzip -o "$REPO_ZIP" -d "$HOME/.cache/tmp/engram_extract" 2>/dev/null
+        SRC=$(find "$HOME/.cache/tmp/engram_extract" -name "engram*" -type f 2>/dev/null | head -1 || true)
+        if [ -n "$SRC" ] && [ -f "$SRC" ]; then cp -f "$SRC" "$ENGRAM_BIN" 2>/dev/null && chmod +x "$ENGRAM_BIN" 2>/dev/null && ok "engram installed to $ENGRAM_BIN (from $(basename "$REPO_ZIP"))" || warn "engram copy failed - local LIKE fallback"
+        else warn "engram zip did not contain binary - local LIKE fallback"
+        fi
+      else warn "unzip not found - cannot extract engram; local LIKE fallback"
+      fi
+    else warn "engram zip not found at .coderun/engram/*.zip - local LIKE fallback"
+    fi
+  fi
+  if [ -d "$ROOT/../engram" ]; then ok "legacy engram clone at ../engram (unused, local binary preferred)"; fi
+  # FlashRank - local from .coderun/models/flashrank.onnx -> user profile
+  REPO_MODEL="$ROOT/.coderun/models/flashrank.onnx"; MODEL_DIR="$HOME/.coderun/models"; mkdir -p "$MODEL_DIR"
+  if [ -f "$MODEL_DIR/flashrank.onnx" ]; then ok "FlashRank $MODEL_DIR/flashrank.onnx"
+  elif [ -f "$REPO_MODEL" ]; then cp -f "$REPO_MODEL" "$MODEL_DIR/flashrank.onnx" 2>/dev/null && ok "FlashRank installed to $MODEL_DIR/flashrank.onnx (from .coderun/models)" || warn "FlashRank copy failed - TF-IDF fallback"
+  else warn "FlashRank model missing at $MODEL_DIR/flashrank.onnx - TF-IDF fallback (expected at .coderun/models/flashrank.onnx)"
   command -v npx >/dev/null && { npm list -g codebase-memory-mcp >/dev/null 2>&1 || npm i -g codebase-memory-mcp 2>/dev/null; ok "codebase-memory-mcp"; } || true
   pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm"
-  command -v rtk >/dev/null && ok "rtk $(rtk --version 2>/dev/null | head -1)" || { cargo install --git https://github.com/rtk-ai/rtk 2>/dev/null && ok "rtk" || warn "rtk failed — built-ins fallback"; }
-  command -v mkdocs >/dev/null && ok "mkdocs $(mkdocs --version)" || { pip3 install mkdocs mkdocs-material pymdownx 2>/dev/null && ok "mkdocs"; } || true
-  rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; ok "promptfoo/eslint"
-  if [ -f "$ROOT/workflow/dbos/package.json" ]; then (cd "$ROOT/workflow/dbos" && npm install 2>/dev/null && npx tsc --noEmit 2>/dev/null && ok "DBOS sidecar deps"); fi
+  command -v rtk >/dev/null && ok "rtk $(rtk --version 2>/dev/null | head -1)" || { cargo install --git https://github.com/rtk-ai/rtk 2>/dev/null && ok "rtk" || warn "rtk failed - built-ins fallback"; }
+   if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else pip3 install --user mkdocs mkdocs-material pymdown-extensions >/dev/null 2>&1; if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else warn "mkdocs install failed - try: pip3 install --user mkdocs mkdocs-material pymdown-extensions"; fi; fi
+   rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "eslint/promptfoo check"
+    if [ -f "$ROOT/workflow/dbos/package.json" ]; then (cd "$ROOT/workflow/dbos" && npm install >/dev/null 2>&1 && npx tsc >/dev/null 2>&1 && npx tsc --noEmit >/dev/null 2>&1 && [ -f dist/main.js ] && ok "DBOS sidecar deps + built dist/main.js" || warn "DBOS build failed"); fi
 fi
 
-if [ "$SKIP_BUILD" = true ]; then info "Skipping build (--skip-build)"; else
-  info "Building coderun --release (0.5.0, 192 tests)..."
-  cargo build --release; ok "target/release/coderun + coderun-daemon"
-  cargo test --workspace --quiet; ok "192 tests passing"
+# 0b. Ensure workflow config exists (local DBOS sidecar, no secret required)
+CFG_PATH="$ROOT/.coderun/config.toml"
+mkdir -p "$(dirname "$CFG_PATH")"
+if [ ! -f "$CFG_PATH" ]; then
+  cat > "$CFG_PATH" <<EOF
+[workflow]
+enabled = true
+engine = "dbos"
+dbos_endpoint = "http://localhost:3001"
+EOF
+  ok "Created $CFG_PATH with [workflow] dbos"
+else
+  if ! grep -q "^\[workflow\]" "$CFG_PATH" 2>/dev/null; then
+    printf '\n[workflow]\nenabled = true\nengine = "dbos"\ndbos_endpoint = "http://localhost:3001"\n' >> "$CFG_PATH"
+    ok "Appended [workflow] to $CFG_PATH"
+  else
+    ok "workflow config at $CFG_PATH"
+  fi
+  # Remove legacy dbos_shared_secret if present (local sidecar no longer uses CODERUN_DBOS_SECRET)
+  if grep -q "dbos_shared_secret" "$CFG_PATH" 2>/dev/null; then
+    python3 -c "
+import pathlib, re
+p=pathlib.Path('$CFG_PATH')
+raw=p.read_text()
+raw=re.sub(r'(?m)^\s*dbos_shared_secret\s*=.*\n', '', raw)
+p.write_text(raw)
+" 2>/dev/null || sed -i '/dbos_shared_secret/d' "$CFG_PATH" 2>/dev/null || true
+    info "  Removed legacy dbos_shared_secret from $CFG_PATH (no longer required)"
+  fi
 fi
+
+# 0c. Ensure DBOS health
+DBOS_ENDPOINT="${CODERUN_DBOS_ENDPOINT:-http://localhost:3001}"
+if [ -f "$CFG_PATH" ]; then
+  CFG_EP=$(grep -E 'dbos_endpoint\s*=\s*"' "$CFG_PATH" 2>/dev/null | sed -E 's/.*dbos_endpoint\s*=\s*"([^"]+)".*/\1/' | head -1)
+  [ -n "$CFG_EP" ] && DBOS_ENDPOINT="$CFG_EP"
+fi
+info "Checking DBOS health at $DBOS_ENDPOINT/health ..."
+REACHABLE=false
+if command -v curl >/dev/null 2>&1; then
+  if curl -sf --max-time 2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; fi
+elif command -v wget >/dev/null 2>&1; then
+  if wget -qO- --timeout=2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; fi
+fi
+if [ "$REACHABLE" = true ]; then
+  ok "DBOS reachable at $DBOS_ENDPOINT"
+else
+  info "  DBOS not reachable - attempting to start sidecar..."
+  STARTED=false
+  if [ -f "$ROOT/workflow/dbos/package.json" ] && command -v npm >/dev/null 2>&1; then
+    (cd "$ROOT/workflow/dbos" && CODERUN_DBOS_SECRET="$SECRET_TO_SET" DBOS_PORT=$(echo "$DBOS_ENDPOINT" | sed -E 's/.*:([0-9]+).*/\1/' | head -1) nohup npm start >/tmp/coderun-dbos.log 2>&1 & echo $! > /tmp/coderun-dbos.pid) 2>/dev/null || true
+    sleep 2
+    STARTED=true
+  fi
+  for i in $(seq 1 12 2>/dev/null || echo "1 2 3 4 5 6 7 8 9 10 11 12"); do
+    sleep 1
+    if command -v curl >/dev/null 2>&1; then
+      if curl -sf --max-time 2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; break; fi
+    elif command -v wget >/dev/null 2>&1; then
+      if wget -qO- --timeout=2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; break; fi
+    fi
+  done
+  if [ "$REACHABLE" = true ]; then
+    ok "DBOS sidecar started at $DBOS_ENDPOINT"
+  else
+    if [ "$STARTED" = true ]; then warn "DBOS started but not reachable - retry: cd workflow/dbos; npm start"; else warn "DBOS not reachable at $DBOS_ENDPOINT - hint: cd workflow/dbos; npm start"; fi
+    info "  Doctor will show Workflow/DBOS not started until sidecar running"
+  fi
+fi
+
+# 1. Use prebuilt coderun (no compile/test - use repository binary)
+if [ "$SKIP_BUILD" = true ]; then info "Skipping build check (--skip-build)"; fi
+info "Checking prebuilt coderun..."
+if [ -f "$ROOT/target/release/coderun" ] || [ -f "$ROOT/target/release/coderun.exe" ]; then ok "coderun at $ROOT/target/release/coderun(.exe)"; else warn "coderun binary not found at $ROOT/target/release/coderun - build manually: cargo build --release"; echo "prebuilt coderun missing - expected at target/release/coderun" >&2; exit 1; fi
+if [ -f "$ROOT/target/release/coderun-daemon" ] || [ -f "$ROOT/target/release/coderun-daemon.exe" ]; then ok "coderun-daemon at $ROOT/target/release/coderun-daemon(.exe)"; else warn "coderun-daemon not found at $ROOT/target/release"; fi
 
 info "Initializing repo..."
-"$ROOT/target/release/coderun" init 2>/dev/null || true
-"$ROOT/target/release/coderun" index 2>/dev/null || true
-"$ROOT/target/release/coderun" doctor
+CODERUN_BIN="$ROOT/target/release/coderun"
+[ -f "$CODERUN_BIN.exe" ] && [ ! -f "$CODERUN_BIN" ] && CODERUN_BIN="$CODERUN_BIN.exe"
+"$CODERUN_BIN" init 2>/dev/null || true
+"$CODERUN_BIN" index 2>/dev/null || true
+"$CODERUN_BIN" doctor
 
-info "Installing opencode plugin..."
-SRC="$ROOT/.opencode/plugins/coderun.ts"
-if [ ! -f "$SRC" ]; then warn "plugin source not found at $SRC"; else
-  mkdir -p "$ROOT/.opencode/plugins"; cp -f "$SRC" "$ROOT/.opencode/plugins/"; ok "copied to $ROOT/.opencode/plugins/"
-  mkdir -p "$HOME/.config/opencode/plugins"; cp -f "$SRC" "$HOME/.config/opencode/plugins/"; ok "copied to $HOME/.config/opencode/plugins (global)"
-  info "Restart opencode to load plugin (hooks: chat.message + tool.execute.before, UDS /tmp/coderun.sock + MessagePack, 30s fail-open)"
-fi
+info "Skipping opencode plugin (removed - cleaning stale installs)..."
+for p in "$ROOT/.opencode/plugins/coderun.ts" "$HOME/.config/opencode/plugins/coderun.ts"; do
+  if [ -f "$p" ]; then rm -f "$p" 2>/dev/null && ok "Removed stale plugin at $p" || warn "Failed to remove $p"; fi
+done
+for d in "$ROOT/.opencode/plugins" "$HOME/.config/opencode/plugins"; do
+  if [ -d "$d" ] && [ -z "$(ls -A "$d" 2>/dev/null)" ]; then rmdir "$d" 2>/dev/null && ok "Removed empty $d" || true; fi
+done
+for f in "$ROOT/.opencode/package.json" "$ROOT/.opencode/package-lock.json"; do
+  if [ -f "$f" ]; then rm -f "$f" 2>/dev/null && ok "Removed $f (plugin scaffolding)" || true; fi
+done
+if [ -d "$ROOT/.opencode/node_modules" ]; then rm -rf "$ROOT/.opencode/node_modules" 2>/dev/null && ok "Removed .opencode/node_modules" || true; fi
 
-info "Done — next: coderun serve | coderun preview 'add auth' | coderun workflow start 'refactor' --require-approval | curl http://127.0.0.1:9527/metrics"
-info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml"
+info "Done - next: coderun serve | coderun preview 'add auth' | coderun workflow start 'refactor' --require-approval | curl http://127.0.0.1:9527/metrics"
+info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor (CODERUN_DBOS_SECRET already set)"

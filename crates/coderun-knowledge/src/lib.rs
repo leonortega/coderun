@@ -57,48 +57,10 @@ impl KnowledgeHub {
         Ok(count)
     }
 
-    /// Match skills against a task description
+    /// Match skills — delegates to canonical SkillEngine scorer (v0.6.0 single impl)
     pub fn match_skills(&self, task_description: &str, max_skills: usize) -> Vec<SkillMatch> {
-        self.simple_tag_match(task_description, max_skills)
-    }
-
-    /// Simple tag-based skill matching (used when engine isn't available)
-    fn simple_tag_match(&self, task_description: &str, max_skills: usize) -> Vec<SkillMatch> {
-        let task_lower = task_description.to_lowercase();
-        let task_tokens: Vec<&str> = task_lower.split_whitespace().collect();
-
-        let mut scored: Vec<(f64, &coderun_skills::Skill)> = self
-            .skills
-            .iter()
-            .map(|skill| {
-                let tag_matches = skill.tags.iter().filter(|tag| {
-                    task_tokens.iter().any(|token| token.contains(tag.as_str()))
-                }).count();
-                
-                let score = if skill.tags.is_empty() {
-                    0.0
-                } else {
-                    tag_matches as f64 / skill.tags.len() as f64
-                };
-                
-                (score, skill)
-            })
-            .filter(|(score, _)| *score > 0.3)
-            .collect();
-
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        scored
-            .into_iter()
-            .take(max_skills)
-            .map(|(score, skill)| SkillMatch {
-                skill_name: skill.name.clone(),
-                match_score: score,
-                instructions: skill.instructions.clone(),
-                examples: skill.examples.clone(),
-                constraints: skill.constraints.clone(),
-            })
-            .collect()
+        let engine = coderun_skills::SkillEngine::from_skills(self.skills.clone());
+        engine.match_skills(task_description, max_skills)
     }
 
     // ── Knowledge Storage ──────────────────────────────────────────
@@ -737,5 +699,41 @@ mod tests {
         let hits = hub.try_engram_search("timeout_test", None, 5).unwrap();
         // Should fallback to local memory even when endpoint is bogus (2s timeout handled)
         assert!(hits.iter().any(|(k,_)| k=="timeout_test") || hits.is_empty());
+    }
+
+    #[test]
+    fn test_v060_match_skills_delegates_to_skill_engine() {
+        use std::fs;
+        use std::path::PathBuf;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("coderun_knowledge_v060_{}", nanos));
+        fs::create_dir_all(&dir).unwrap();
+        // Seed skills directly via KnowledgeHub internal vec
+        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let cfg = KnowledgeConfig::default();
+        let mut hub = KnowledgeHub::new(db, crate::EventBus::new(), cfg);
+        // Inject two skills
+        hub.skills = vec![
+            coderun_skills::Skill { name: "Rust Expert".to_string(), tags: vec!["rust".into(), "cargo".into()], instructions: "rust".into(), examples: vec![], constraints: vec![], description: "".into() },
+            coderun_skills::Skill { name: "Python Expert".to_string(), tags: vec!["python".into()], instructions: "py".into(), examples: vec![], constraints: vec![], description: "".into() },
+        ];
+        // Same input to both engines should yield identical top match
+        let hub_matches = hub.match_skills("help with rust cargo", 5);
+        let engine = coderun_skills::SkillEngine::from_skills(hub.skills.clone());
+        let eng_matches = engine.match_skills("help with rust cargo", 5);
+        assert_eq!(hub_matches.len(), eng_matches.len());
+        if !hub_matches.is_empty() {
+            assert_eq!(hub_matches[0].skill_name, eng_matches[0].skill_name);
+            assert!((hub_matches[0].match_score - eng_matches[0].match_score).abs() < 1e-9);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_v060_match_skills_threshold() {
+        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let hub = KnowledgeHub::new(db, crate::EventBus::new(), KnowledgeConfig::default());
+        // No skills loaded → no matches
+        assert!(hub.match_skills("rust", 5).is_empty());
     }
 }

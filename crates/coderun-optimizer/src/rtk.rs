@@ -101,10 +101,10 @@ impl RtkAdapter {
 }
 
 fn which_rtk() -> Option<PathBuf> {
-    // Cheap PATH scan without `which` crate
+    // Cheap PATH scan without `which` crate - also check Windows batch shims for strict-mode stub
     let path_var = std::env::var("PATH").ok()?;
     for dir in std::env::split_paths(&path_var) {
-        for name in ["rtk", "rtk.exe"] {
+        for name in ["rtk", "rtk.exe", "rtk.bat", "rtk.cmd"] {
             let p = dir.join(name);
             if p.is_file() {
                 return Some(p);

@@ -1,8 +1,8 @@
 pub mod dbos;
 pub mod types;
 
-use coderun_core::{traits::IWorkflowEngine, Config, TaskRequest};
-use coderun_core::error::{CoderunError, Result};
+use coderun_core::traits::IWorkflowEngine;
+use coderun_core::Config;
 
 pub use dbos::DBOSWorkflowEngine;
 pub use types::{WorkflowRequest, WorkflowStatus, WorkflowState};
@@ -19,19 +19,22 @@ pub fn create_engine(config: &Config) -> Box<dyn IWorkflowEngine> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn test_factory_noop_by_default() {
+    #[tokio::test]
+    async fn test_factory_noop_by_default() {
         let config = Config::default();
-        let engine = create_engine(&config);
-        assert!(!engine.is_available());
+        // v0.6.0 default enabled=true so factory returns DBOS, not Noop — but Noop still used when disabled
+        let mut disabled = config.clone();
+        disabled.workflow.enabled = false;
+        let engine = create_engine(&disabled);
+        assert!(!engine.is_available().await);
     }
-    #[test]
-    fn test_factory_dbos_when_enabled() {
+    #[tokio::test]
+    async fn test_factory_dbos_when_enabled() {
         let mut config = Config::default();
         config.workflow.enabled = true;
         config.workflow.engine = "dbos".to_string();
         let engine = create_engine(&config);
-        // DBOS engine is created, is_available probes HTTP so may be false until sidecar up
-        assert!(engine.is_available() == false || engine.is_available() == true);
+        // DBOS engine probes HTTP so may be false until sidecar up
+        let _ = engine.is_available().await;
     }
 }

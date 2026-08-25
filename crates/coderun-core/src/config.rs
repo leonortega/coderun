@@ -159,6 +159,7 @@ impl Default for DatabaseConfig {
 
 impl Default for IndexConfig {
     fn default() -> Self {
+        // v0.6.0: default = 4 langs; go/java/c/cpp behind --features extended-languages (V0_6_0_PLAN.md:2.2)
         Self {
             path: "~/.coderun/index/".to_string(),
             languages: vec![
@@ -166,10 +167,6 @@ impl Default for IndexConfig {
                 "typescript".to_string(),
                 "javascript".to_string(),
                 "python".to_string(),
-                "go".to_string(),
-                "java".to_string(),
-                "c".to_string(),
-                "cpp".to_string(),
             ],
         }
     }
@@ -257,9 +254,10 @@ impl Default for RtkConfig {
 
 impl Default for WorkflowConfig {
     fn default() -> Self {
+        // v0.6.0: DBOS required, enabled true default (SQLite + Litestream)
         Self {
-            enabled: false,
-            engine: "noop".to_string(),
+            enabled: true,
+            engine: "dbos".to_string(),
             dbos_endpoint: "http://localhost:3001".to_string(),
             dbos_shared_secret: None,
             auto_governance: false,
@@ -500,7 +498,7 @@ impl Config {
             .into());
         }
 
-        // Workflow
+        // Workflow — v0.6.0 required
         let valid_engines = ["noop", "dbos"];
         if !valid_engines.contains(&self.workflow.engine.as_str()) {
             return Err(ConfigError::InvalidValue {
@@ -508,6 +506,17 @@ impl Config {
                 message: format!("must be one of: {}", valid_engines.join(", ")),
             }
             .into());
+        }
+        // Warn if enabled but secret missing (HMAC required) — not fatal for dev; token only needed for cloud
+        if self.workflow.enabled && self.workflow.engine == "dbos" && self.workflow.dbos_shared_secret.is_none() {
+            tracing::warn!("workflow.enabled=true but dbos_shared_secret missing — local default 'your-secret' is fine; set CODERUN_DBOS_SECRET / DBOS_CONDUCTOR_KEY only when connecting to DBOS Cloud/Conductor");
+        }
+        // Extended languages warning
+        let extended = ["go", "java", "c", "cpp"];
+        for lang in &self.index.languages {
+            if extended.contains(&lang.as_str()) {
+                tracing::warn!(language = %lang, "language requires --features extended-languages; fallback regex will be used");
+            }
         }
 
         Ok(())
@@ -729,5 +738,92 @@ socket_path = "/test/sock"
             Some(v) => std::env::set_var("CODERUN_LOG_LEVEL", v),
             None => std::env::remove_var("CODERUN_LOG_LEVEL"),
         }
+    }
+
+    #[test]
+    fn test_v060_defaults_workflow_required() {
+        let config = Config::default();
+        // DBOS required since v0.6.0
+        assert!(config.workflow.enabled, "workflow.enabled should be true since v0.6.0");
+        assert_eq!(config.workflow.engine, "dbos");
+        assert_eq!(config.workflow.dbos_endpoint, "http://localhost:3001");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_v060_defaults_index_four_languages() {
+        let config = Config::default();
+        assert_eq!(config.index.languages.len(), 4);
+        assert_eq!(config.index.languages, vec!["rust", "typescript", "javascript", "python"]);
+        // Extended languages trigger warning but not error
+        let mut with_extended = Config::default();
+        with_extended.index.languages.push("go".to_string());
+        with_extended.index.languages.push("java".to_string());
+        assert!(with_extended.validate().is_ok(), "extended languages should warn, not fail");
+    }
+
+    #[test]
+    fn test_v060_toml_roundtrip_workflow() {
+        let toml = r#"
+[workflow]
+enabled = true
+engine = "dbos"
+dbos_endpoint = "http://localhost:3001"
+auto_governance = true
+require_approval_tiers = ["capable", "balanced"]
+
+[index]
+path = "/tmp/index"
+languages = ["rust", "python", "go"]
+"#;
+        let config = Config::from_toml(toml).unwrap();
+        assert!(config.workflow.enabled);
+        assert_eq!(config.workflow.engine, "dbos");
+        assert!(config.workflow.auto_governance);
+        assert_eq!(config.index.languages.len(), 3);
+        assert!(config.validate().is_ok());
+        // Round-trip preserves
+        let serialized = config.to_toml().unwrap();
+        let reloaded = Config::from_toml(&serialized).unwrap();
+        assert_eq!(reloaded.workflow.engine, "dbos");
+        assert_eq!(reloaded.index.languages, config.index.languages);
+    }
+
+    #[test]
+    fn test_v060_validation_invalid_workflow_engine() {
+        let mut config = Config::default();
+        config.workflow.engine = "temporal".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("workflow.engine"));
+    }
+
+    #[test]
+    fn test_v060_env_overrides_dbos() {
+        let orig_endpoint = std::env::var("CODERUN_DBOS_ENDPOINT").ok();
+        let orig_secret = std::env::var("CODERUN_DBOS_SECRET").ok();
+        let orig_enabled = std::env::var("CODERUN_WORKFLOW_ENABLED").ok();
+
+        std::env::set_var("CODERUN_DBOS_ENDPOINT", "http://example:9999");
+        std::env::set_var("CODERUN_DBOS_SECRET", "test-secret-xyz");
+        std::env::set_var("CODERUN_WORKFLOW_ENABLED", "false");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.workflow.dbos_endpoint, "http://example:9999");
+        assert_eq!(config.workflow.dbos_shared_secret, Some("test-secret-xyz".to_string()));
+        assert!(!config.workflow.enabled);
+
+        // Restore
+        match orig_endpoint { Some(v) => std::env::set_var("CODERUN_DBOS_ENDPOINT", v), None => std::env::remove_var("CODERUN_DBOS_ENDPOINT") }
+        match orig_secret { Some(v) => std::env::set_var("CODERUN_DBOS_SECRET", v), None => std::env::remove_var("CODERUN_DBOS_SECRET") }
+        match orig_enabled { Some(v) => std::env::set_var("CODERUN_WORKFLOW_ENABLED", v), None => std::env::remove_var("CODERUN_WORKFLOW_ENABLED") }
+    }
+
+    #[test]
+    fn test_v060_languages_default_docs_sync() {
+        // Ensures docs still claim 4 default; config must match docs/01-architecture/RUNTIME.md
+        let cfg = Config::default();
+        assert!(!cfg.index.languages.contains(&"cpp".to_string()));
+        assert!(!cfg.index.languages.contains(&"go".to_string()));
     }
 }

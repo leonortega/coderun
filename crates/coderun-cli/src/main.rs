@@ -1,3 +1,4 @@
+#![allow(linker_messages)]
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -548,6 +549,8 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
 fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = Config::load(&project_root).unwrap_or_default();
+    // v0.6.0: IWorkflowEngine is async — create single-thread runtime for CLI sync context
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     let engine: Box<dyn coderun_core::traits::IWorkflowEngine> = if config.workflow.enabled && config.workflow.engine == "dbos" {
         Box::new(coderun_workflow::dbos::DBOSWorkflowEngine::new(config.workflow.dbos_endpoint.clone(), config.workflow.dbos_shared_secret.clone()))
     } else {
@@ -557,8 +560,8 @@ fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
         WorkflowAction::Start { prompt, require_approval } => {
             let task = coderun_core::TaskRequest { message: prompt.clone(), session_id: format!("cli-{}", uuid::Uuid::new_v4()), context_hints: None };
             if require_approval { println!("Starting workflow with approval gate..."); }
-            // Pass config even though DBOS engine ignores it beyond construction
-            match engine.start_workflow(&task, &config) {
+            let res = rt.block_on(engine.start_workflow(&task, &config));
+            match res {
                 Ok(id) => {
                     println!("Workflow started: {}", id);
                     // Persist locally as well for list/status offline
@@ -573,8 +576,8 @@ fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
             }
         }
         WorkflowAction::Status { workflow_id } => {
-            // Try engine first, fallback to local DB
-            match engine.get_status(&workflow_id) {
+            let res = rt.block_on(engine.get_status(&workflow_id));
+            match res {
                 Ok(s) => println!("{}", s),
                 Err(_) => {
                     if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {

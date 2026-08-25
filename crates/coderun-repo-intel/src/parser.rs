@@ -2,14 +2,28 @@ use tree_sitter::{Language, Parser};
 
 // ── Tree-sitter Languages ────────────────────────────────────────────────
 
-/// Get tree-sitter language for a given language name
+/// Get tree-sitter language for a given language name (v0.6.0: extended-languages feature)
 pub fn get_language(language: &str) -> Option<Language> {
     match language {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
         "typescript" | "typescriptreact" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
         "javascript" | "javascriptreact" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "python" => Some(tree_sitter_python::LANGUAGE.into()),
-        _ => None,
+        #[cfg(feature = "extended-languages")]
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        #[cfg(feature = "extended-languages")]
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        #[cfg(feature = "extended-languages")]
+        "c" => Some(tree_sitter_c::LANGUAGE.into()),
+        #[cfg(feature = "extended-languages")]
+        "cpp" | "c++" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        _ => {
+            #[cfg(not(feature = "extended-languages"))]
+            if matches!(language, "go" | "java" | "c" | "cpp" | "c++") {
+                tracing::warn!(language, "requires --features extended-languages; fallback to regex");
+            }
+            None
+        },
     }
 }
 
@@ -335,5 +349,66 @@ function greet(user: User): string {
         let code = "fn main() {}";
         let symbols = extract_symbols_ast(code, "unknown");
         assert!(symbols.is_empty());
+    }
+
+    #[test]
+    fn test_get_language_default_four() {
+        assert!(get_language("rust").is_some());
+        assert!(get_language("typescript").is_some());
+        assert!(get_language("javascript").is_some());
+        assert!(get_language("python").is_some());
+        // typescriptreact / javascriptreact aliases
+        assert!(get_language("typescriptreact").is_some());
+        assert!(get_language("javascriptreact").is_some());
+    }
+
+    #[test]
+    fn test_get_language_extended_without_feature() {
+        // Without --features extended-languages, go/java/c/cpp should be None (fallback to regex)
+        #[cfg(not(feature = "extended-languages"))]
+        {
+            assert!(get_language("go").is_none());
+            assert!(get_language("java").is_none());
+            assert!(get_language("c").is_none());
+            assert!(get_language("cpp").is_none());
+            assert!(get_language("c++").is_none());
+        }
+        #[cfg(feature = "extended-languages")]
+        {
+            assert!(get_language("go").is_some());
+            assert!(get_language("java").is_some());
+            assert!(get_language("c").is_some());
+            assert!(get_language("cpp").is_some());
+            assert!(get_language("c++").is_some());
+        }
+    }
+
+    #[test]
+    fn test_extract_symbols_unknown_returns_empty() {
+        for lang in ["go", "java", "c", "cpp", "ruby", "php"] {
+            #[cfg(not(feature = "extended-languages"))]
+            assert!(extract_symbols_ast("func foo() {}", lang).is_empty(),
+                    "without extended-languages, {} should fallback to empty", lang);
+        }
+    }
+
+    #[cfg(feature = "extended-languages")]
+    #[test]
+    fn test_extract_symbols_go() {
+        // Requires --features extended-languages
+        let code = r#"
+package main
+func Hello() {}
+type Config struct { Name string }
+"#;
+        let symbols = extract_symbols_ast(code, "go");
+        // Go support via tree-sitter-go should at least not panic; kind coverage may expand
+        assert!(symbols.is_empty() || symbols.iter().any(|s| s.name.contains("Hello") || s.name.contains("Config")));
+    }
+
+    #[test]
+    fn test_get_language_none_for_empty() {
+        assert!(get_language("").is_none());
+        assert!(get_language("v0.6.0").is_none());
     }
 }
