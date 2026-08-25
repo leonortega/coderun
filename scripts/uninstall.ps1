@@ -1,8 +1,8 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Coderun v0.6.0 uninstaller (Windows PowerShell 5.1)
-  Reverses scripts/install.ps1 - removes everything by default.
+  Coderun v1.0.0 (0.6.0) uninstaller (Windows PowerShell 5.1)
+  V1 scope: local runtime only — reverses scripts/install.ps1 - removes everything by default, preserves future/workflow source unless -RemoveRepo.
 
 .DESCRIPTION
   Default (no flags): stops daemon, removes project build artifacts (target/release/coderun*.exe),
@@ -87,7 +87,7 @@ $doRemoveRepo = $RemoveRepo  # only if explicitly requested
 
 if ($DryRun) { $PSBoundParameters["WhatIf"] = $true; $WhatIfPreference = $true }
 
-Info "Coderun v0.6.0 uninstaller"
+Info "Coderun v1.0.0 uninstaller (0.6.0, DBOS/workflow future-only)"
 if ($WhatIfPreference) { Warn "DryRun/WhatIf active - no changes will be made" }
 Info "Options: RemoveExternal( effective=$doRemoveExternal KeepExternal=$KeepExternal ) RemoveData( effective=$doRemoveData KeepData=$KeepData ) KeepBuild=$KeepBuild Force=$Force"
 
@@ -139,7 +139,7 @@ foreach ($sp in $socketPaths | Select-Object -Unique) {
 if ($KeepBuild -or -not $doRemoveRepo) {
   Info "Skipping build artifact removal (repository folders preserved - use -RemoveRepo to delete target/)"
   Skip "keeping target/ (repository - not deleted)"
-  Skip "keeping workflow/dbos/node_modules (repository - not deleted)"
+  Skip "keeping workflow/dbos/node_modules + future/workflow/dbos/node_modules (repository - not deleted, v1 future-only)"
 } else {
   Info "Removing build artifacts (--RemoveRepo)..."
   $binaries = @(
@@ -161,16 +161,23 @@ if ($KeepBuild -or -not $doRemoveRepo) {
       try { Remove-Item -LiteralPath "$Root\target" -Recurse -Force -ErrorAction Stop; Ok "removed target/ (cargo clean)" } catch { Warn "failed to remove target/: $_" }
     } else { Skip "would remove target/ (cargo clean)" }
   }
-  $dbosNodeModules = "$Root\workflow\dbos\node_modules"
-  $dbosLock = "$Root\workflow\dbos\package-lock.json"
-  foreach ($p in @($dbosNodeModules, $dbosLock)) {
+  # v1: workflow DBOS is future/workflow only — clean both legacy and future (legacy warned in install)
+  $dbosPaths = @(
+    "$Root\workflow\dbos\node_modules",
+    "$Root\workflow\dbos\package-lock.json",
+    "$Root\future\workflow\dbos\node_modules",
+    "$Root\future\workflow\dbos\package-lock.json",
+    "$Root\future\workflow\dbos\dist"
+  )
+  foreach ($p in $dbosPaths) {
     $display = $p -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
     if (Test-Path $p) {
       if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
-        try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; Ok "removed $display" } catch { Warn "failed to remove $display : $_" }
+        try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; Ok "removed $display (v1 workflow future-only)" } catch { Warn "failed to remove $display : $_" }
       } else { Skip "would remove $display" }
     } else { Skip "not found $display" }
   }
+  if (Test-Path "$Root\future\workflow") { Skip "preserving future/workflow source (use --RemoveRepo + manual rm -rf future/workflow if needed)" }
 }
 
 # 3. Remove opencode plugins - repository plugin is NEVER deleted by default (use -RemoveRepo) - use .opencode folder
@@ -206,13 +213,13 @@ if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins") -and -not (Get-Chil
   }
 }
 
-# 3b. Remove MCP from opencode (after plugin) - global always, repository only with -RemoveRepo - use .opencode relative
-Info "Removing opencode MCP (codebase-memory + engram)..."
+# 3b. Remove MCP + plugin from opencode (always for coderun entries — so plugin not showing after uninstall, file kept if has other config)
+Info "Removing opencode MCP (codebase-memory + engram) + plugin (opencode-coderun)..."
 function Remove-OpencodeMcp($configPath, $isRepo) {
   $displayPath = $configPath
   if ($isRepo) { $displayPath = $configPath -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""; if ($displayPath -eq $configPath) { $displayPath = Split-Path $configPath -Leaf } ; if ($configPath -match "\.opencode") { $displayPath = ".opencode/" + (Split-Path $configPath -Leaf) } else { $displayPath = $displayPath } }
   if (-not (Test-Path $configPath)) { Skip "MCP config not found at $displayPath"; return }
-  if ($isRepo -and -not $doRemoveRepo) { Skip "keeping repository MCP at $displayPath (use -RemoveRepo to delete)"; return }
+  # v1: always clean coderun plugin/mcp from .opencode, even without -RemoveRepo — otherwise plugin/MCP still shows after uninstall+restart
   try {
     $raw = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { Skip "MCP config empty at $displayPath"; return }
@@ -231,24 +238,48 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
         }
       }
     } catch {}
-    if ($null -eq $json -or -not $json.ContainsKey('mcp')) { Skip "no MCP to remove at $displayPath"; return }
-    $mcp = $json['mcp']
-    if ($mcp -is [PSCustomObject]) {
-      $tmp = @{}
-      foreach ($p in $mcp.PSObject.Properties) { $tmp[$p.Name] = $p.Value }
-      $mcp = $tmp; $json['mcp'] = $mcp
+    if ($null -eq $json) { Skip "invalid JSON at $displayPath"; return }
+    $removed = @(); $pluginRemoved = @()
+    # handle plugin opencode-coderun / coderun
+    if ($json.ContainsKey('plugin')) {
+      $plugins = $json['plugin']
+      $origCount = 0; $newPlugins = @()
+      if ($plugins -is [System.Array]) { $origCount = $plugins.Count; $newPlugins = @($plugins | Where-Object { $_ -ne "opencode-coderun" -and $_ -ne "coderun" }) }
+      elseif ($plugins -is [PSCustomObject]) { $origCount = 1; $newPlugins = @() }
+      else { $origCount = 0; $newPlugins = @() }
+      if ($origCount -ne $newPlugins.Count) {
+        $pluginRemoved += "opencode-coderun"
+        if ($newPlugins.Count -eq 0) { $json.Remove('plugin') } else { $json['plugin'] = $newPlugins }
+        $removed += "plugin:opencode-coderun"
+      }
     }
-    $removed = @()
-    foreach ($k in @('codebase-memory','engram','codebase-memory-mcp')) {
-      if ($mcp.ContainsKey($k)) { $mcp.Remove($k); $removed += $k }
+    # handle mcp codebase-memory + engram
+    if ($json.ContainsKey('mcp')) {
+      $mcp = $json['mcp']
+      if ($mcp -is [PSCustomObject]) {
+        $tmp = @{}
+        foreach ($p in $mcp.PSObject.Properties) { $tmp[$p.Name] = $p.Value }
+        $mcp = $tmp; $json['mcp'] = $mcp
+      }
+      foreach ($k in @('codebase-memory','engram','codebase-memory-mcp')) {
+        if ($mcp.ContainsKey($k)) { $mcp.Remove($k); $removed += $k; $pluginRemoved += $k }
+      }
+      if ($mcp.Count -eq 0) { $json.Remove('mcp') }
     }
-    if ($removed.Count -eq 0) { Skip "no coderun MCP entries at $displayPath"; return }
-    if ($mcp.Count -eq 0) { $json.Remove('mcp') }
-    if ($PSCmdlet.ShouldProcess($configPath, "Remove MCP $removed")) {
+    if ($removed.Count -eq 0) { Skip "no coderun plugin/MCP entries at $displayPath"; return }
+    # if file now only has $schema, remove it unless -RemoveRepo? keep file if has other keys, else clean
+    $remainingKeys = @($json.Keys | Where-Object { $_ -ne '$schema' })
+    if ($remainingKeys.Count -eq 0) {
+      if ($PSCmdlet.ShouldProcess($configPath, "Remove empty config")) {
+        try { Remove-Item -LiteralPath $configPath -Force -ErrorAction Stop; Ok "removed empty $displayPath (only coderun plugin/MCP)" } catch { Warn "failed to remove $displayPath : $_" }
+      } else { Skip "would remove empty $displayPath" }
+      return
+    }
+    if ($PSCmdlet.ShouldProcess($configPath, "Remove $removed")) {
       $out = $json | ConvertTo-Json -Depth 10
       [System.IO.File]::WriteAllText($configPath, $out, [System.Text.UTF8Encoding]::new($false))
-      Ok "removed MCP [$($removed -join ', ')] from $displayPath"
-    } else { Skip "would remove MCP [$($removed -join ', ')] from $displayPath" }
+      Ok "removed [$($removed -join ', ')] from $displayPath"
+    } else { Skip "would remove [$($removed -join ', ')] from $displayPath" }
   } catch { Warn "MCP remove failed for $displayPath : $_" }
 }
 Remove-OpencodeMcp "$env:USERPROFILE\.config\opencode\opencode.jsonc" $false
@@ -329,6 +360,56 @@ if (-not $doRemoveExternal) {
         try { Remove-Item -LiteralPath $opencodeEngramDir -Force -ErrorAction SilentlyContinue; Ok "removed empty .opencode/engram/" } catch {}
       }
     } else { Skip "keeping .opencode/engram/ (contains other files)" }
+  }
+  # 3c. Opencode npm plugin (file:../packages/opencode-coderun) — installed into .opencode/node_modules
+  Info "Removing opencode npm plugin (opencode-coderun)..."
+  $opencodeNodeModules = @(
+    (Join-Path $Root ".opencode\node_modules\opencode-coderun"),
+    (Join-Path $Root ".opencode\node_modules\@opencode-ai"),
+    (Join-Path $Root ".opencode\package-lock.json")
+  )
+  foreach ($p in $opencodeNodeModules) {
+    $display = $p -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
+    if (Test-Path $p) {
+      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
+        try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; Ok "removed $display (opencode npm plugin)" } catch { Warn "failed to remove $display : $_" }
+      } else { Skip "would remove $display" }
+    } else { Skip "not found $display" }
+  }
+  $opencodePkgJson = Join-Path $Root ".opencode\package.json"
+  if (Test-Path $opencodePkgJson) {
+    if ($PSCmdlet.ShouldProcess(".opencode/package.json", "clean opencode-coderun dep")) {
+      try {
+        $raw = Get-Content -LiteralPath $opencodePkgJson -Raw -ErrorAction Stop
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        $changed = $false
+        if ($obj.PSObject.Properties["dependencies"] -and $obj.dependencies.PSObject.Properties["opencode-coderun"]) {
+          $obj.dependencies.PSObject.Properties.Remove("opencode-coderun"); $changed = $true
+        }
+        # If dependencies empty, remove file; else write back
+        $depCount = 0; if ($obj.PSObject.Properties["dependencies"]) { $depCount = @($obj.dependencies.PSObject.Properties).Count }
+        if ($depCount -eq 0) {
+          Remove-Item -LiteralPath $opencodePkgJson -Force -ErrorAction Stop; Ok "removed empty .opencode/package.json"
+        } elseif ($changed) {
+          $obj | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $opencodePkgJson -Encoding UTF8; Ok "cleaned opencode-coderun from .opencode/package.json"
+        } else { Skip "no opencode-coderun in .opencode/package.json" }
+      } catch { Warn "failed to clean .opencode/package.json : $_" }
+    } else { Skip "would clean .opencode/package.json" }
+  } else { Skip "not found .opencode/package.json" }
+  # Remove empty .opencode dir if only empty after plugin removal (keep if has opencode.jsonc)
+  if ((Test-Path "$Root\.opencode") -and -not (Get-ChildItem -LiteralPath "$Root\.opencode" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @(".gitkeep") })) {
+    if ($PSCmdlet.ShouldProcess(".opencode", "Remove-Item")) {
+      try { Remove-Item -LiteralPath "$Root\.opencode" -Recurse -Force -ErrorAction SilentlyContinue; Ok "removed empty .opencode/" } catch {}
+    }
+  } else { Skip "keeping .opencode/ (has opencode.jsonc or other config)" }
+  # Global npm plugin (if ever published)
+  if (Test-Cmd npm) {
+    $hasGlobal = $false; try { npm list -g opencode-coderun 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasGlobal = $true } } catch {}
+    if ($hasGlobal) {
+      if ($PSCmdlet.ShouldProcess("opencode-coderun (npm -g)", "npm uninstall -g")) {
+        try { npm uninstall -g opencode-coderun 2>&1 | Out-Null; Ok "uninstalled opencode-coderun (npm -g)" } catch { Warn "npm uninstall opencode-coderun failed: $_" }
+      } else { Skip "would npm uninstall -g opencode-coderun" }
+    } else { Skip "opencode-coderun not installed globally (npm -g)" }
   }
   if (Test-Path $engramLegacyClone) {
     Skip "keeping legacy engram clone at ../engram (repository folder - not deleted per policy)"

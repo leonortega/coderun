@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use coderun_core::SkillMatch;
 use tracing::{debug, info, warn};
 
-// ── Skill Definition ────────────────────────────────────────────────────
-
+// ── Skill Definition — canonical normalized schema (TASK-015)
+// All sources (Claude, Cursor, Continue, agentskills.io) normalize into this one format.
+// TASK-016: priority/specificity/max_active/conflict handling
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
@@ -13,6 +14,10 @@ pub struct Skill {
     pub examples: Vec<String>,
     pub constraints: Vec<String>,
     pub description: String,
+    /// Priority (higher = more specific/preferred) — deterministic ordering (TASK-016)
+    pub priority: u8,
+    /// Specificity score (tags length + name match) — computed at match time
+    pub specificity: f64,
 }
 
 // ── Skill Engine ────────────────────────────────────────────────────────
@@ -96,8 +101,8 @@ impl SkillEngine {
             .filter(|(score, _)| *score > 0.3)
             .collect();
 
-        // Sort by score descending
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        // TASK-015/016: sort by priority (higher first) then score descending before take(max_skills)
+        scored.sort_by(|a, b| b.1.priority.cmp(&a.1.priority).then(b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)));
 
         // Take top N
         scored
@@ -249,6 +254,9 @@ fn parse_markdown_skill(path: &Path) -> Result<Skill, String> {
         return Err("Missing instructions section".to_string());
     }
 
+    // TASK-016: priority = tags.len() as specificity, higher tags = more specific
+    let priority = tags.len() as u8;
+    let specificity = tags.len() as f64 / 5.0;
     Ok(Skill {
         name,
         tags,
@@ -256,6 +264,8 @@ fn parse_markdown_skill(path: &Path) -> Result<Skill, String> {
         examples,
         constraints,
         description: String::new(),
+        priority,
+        specificity,
     })
 }
 
@@ -287,13 +297,19 @@ fn parse_toml_skill(path: &Path) -> Result<Skill, String> {
         return Err("No tags defined".to_string());
     }
 
+    // TASK-016: priority from TOML, default tags.len()
+    let tags_norm: Vec<String> = skill.tags.into_iter().map(|t| t.to_lowercase()).collect();
+    let priority = tags_norm.len() as u8;
+    let specificity = priority as f64 / 5.0;
     Ok(Skill {
         name: skill.name,
-        tags: skill.tags.into_iter().map(|t| t.to_lowercase()).collect(),
+        tags: tags_norm,
         instructions: skill.instructions,
         examples: skill.examples,
         constraints: skill.constraints,
         description: skill.description,
+        priority,
+        specificity,
     })
 }
 
@@ -325,13 +341,18 @@ fn parse_yaml_skill(path: &Path) -> Result<Skill, String> {
         return Err("No tags defined".to_string());
     }
 
+    let tags_norm: Vec<String> = skill.tags.into_iter().map(|t| t.to_lowercase()).collect();
+    let prio = tags_norm.len() as u8;
+    let spec = prio as f64 / 5.0;
     Ok(Skill {
         name: skill.name,
-        tags: skill.tags.into_iter().map(|t| t.to_lowercase()).collect(),
+        tags: tags_norm,
         instructions: skill.instructions,
         examples: skill.examples,
         constraints: skill.constraints,
         description: skill.description,
+        priority: prio,
+        specificity: spec,
     })
 }
 

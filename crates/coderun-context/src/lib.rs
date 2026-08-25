@@ -86,26 +86,83 @@ impl ContextEngine {
         let mut token_budget = self.config.max_tokens;
         let mut token_usage_by_source: HashMap<String, usize> = HashMap::new();
 
-        // Step 1: Search code via Repository Intelligence (dedup-eligible)
-        let raw_code = self.search_code(&request.message, &request.context_hints)?;
+        // Step 1: Search code via Repository Intelligence (dedup-eligible) — capture SearchResult.score for provenance (TASK-007)
+        let (raw_code, code_scored) = self.search_code_scored(&request.message, &request.context_hints)?;
         let code_context = self.dedup_content(&request.session_id, &raw_code);
 
-        // Step 2: Retrieve knowledge via Knowledge Hub
-        let raw_knowledge = self.retrieve_knowledge(&request.message)?;
+        // Step 2: Retrieve knowledge via Knowledge Hub — capture BM25 vs engram provenance
+        let (raw_knowledge, knowledge_scored) = self.retrieve_knowledge_scored(&request.message)?;
         let knowledge_context = self.dedup_content(&request.session_id, &raw_knowledge);
 
-        // Step 3: Match skills via Knowledge Hub → Skill Engine (most cache-stable, dedup last)
-        let raw_skills = self.match_skills(&request.message)?;
+        // Step 3: Match skills via Knowledge Hub → Skill Engine — capture tag overlap score
+        let (raw_skills, skills_scored) = self.match_skills_scored(&request.message)?;
         let skills_context = self.dedup_content(&request.session_id, &raw_skills);
 
         // Step 4: Assemble context pack with cache-aware ordering + frozen-prefix + reversible compression
-        let (context_pack, total_tokens) = self.assemble_context_pack(
+        let (mut context_pack, total_tokens) = self.assemble_context_pack(
             &skills_context,
             &knowledge_context,
             &code_context,
             &mut token_budget,
             &mut token_usage_by_source,
         );
+        // TASK-007/008/009: stable artifact + provenance (deterministic) — real scores
+        {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(request.message.as_bytes());
+            hasher.update(self.config.max_tokens.to_be_bytes());
+            hasher.update(self.config.cache_order.join(",").as_bytes());
+            hasher.update(self.repository_state().as_bytes());
+            let task_hash = format!("{:x}", hasher.finalize())[..16].to_string();
+            context_pack.metadata.task_hash = task_hash;
+            context_pack.metadata.correlation_id = correlation_id.to_string();
+            let repo_state = self.repository_state();
+            context_pack.metadata.repository_state = repo_state.clone();
+            context_pack.repository_state = repo_state.clone();
+            // Provenance: real scores (TASK-007) — BM25 vs symbol match vs skill_engine:tag overlap
+            for (skill_name, score, specificity) in &skills_scored {
+                // Only include skills that actually contributed to context (dedup may have emptied but scored still valid)
+                if !skills_context.is_empty() || !skill_name.is_empty() {
+                    context_pack.provenance.push(coderun_core::ipc::ContextProvenance {
+                        path: skill_name.clone(),
+                        source: "skills".to_string(),
+                        retriever: "skill_engine".to_string(),
+                        score: *score,
+                        reason: format!("tag overlap specificity={:.2}", specificity),
+                    });
+                }
+            }
+            for entry in &knowledge_scored {
+                let retriever = if entry.source == "engram" { "engram" } else { "tantivy" };
+                let reason = if entry.source == "engram" { "memory".to_string() } else { "bm25".to_string() };
+                context_pack.provenance.push(coderun_core::ipc::ContextProvenance {
+                    path: entry.key.clone(),
+                    source: "docs".to_string(),
+                    retriever: retriever.to_string(),
+                    score: entry.relevance_score.unwrap_or(entry.confidence),
+                    reason,
+                });
+            }
+            for result in &code_scored {
+                // Distinguish BM25 (tantivy score > 1.0) vs symbol/ripgrep (1.0) vs structural (0.9)
+                let (retriever, reason) = if result.score > 2.0 {
+                    ("tantivy", "bm25")
+                } else if (result.score - 0.9).abs() < 0.01 {
+                    ("ast-grep", "symbol match")
+                } else {
+                    ("tantivy", "symbol match")
+                };
+                context_pack.provenance.push(coderun_core::ipc::ContextProvenance {
+                    path: result.path.clone(),
+                    source: "code".to_string(),
+                    retriever: retriever.to_string(),
+                    score: result.score,
+                    reason: reason.to_string(),
+                });
+            }
+            // Keep deduplicated behavior: if dedup emptied context, provenance reflects original scoring but content empty; for honest determinism, provenance always matches scored retrieval
+        }
 
         // Step 5: Select model via Model Router (heuristic, no LLM call)
         let routing_decision = self.select_model(
@@ -160,77 +217,101 @@ impl ContextEngine {
         content.to_string()
     }
 
-    /// Search code via Repository Intelligence
-    fn search_code(
+    /// Repository state (git HEAD) for deterministic ContextPack (TASK-008)
+    fn repository_state(&self) -> String {
+        // Try env override first (for tests)
+        if let Ok(v) = std::env::var("CODERUN_REPO_STATE") { return v; }
+        // Try git rev-parse HEAD in repo_path (best-effort, fail-open to empty)
+        let repo_path = self.repo_intel.lock().ok().map(|ri| ri.repo_path().to_path_buf()).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+        if let Ok(out) = std::process::Command::new("git").arg("-C").arg(&repo_path).arg("rev-parse").arg("HEAD").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if s.len() >= 7 { return s; }
+            }
+        }
+        // Fallback: hash of repo_path for determinism
+        {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(repo_path.to_string_lossy().as_bytes());
+            format!("{:x}", h.finalize())[..12].to_string()
+        }
+    }
+
+    /// Search code via Repository Intelligence (scored variant for provenance TASK-007)
+    fn search_code_scored(
         &self,
         query: &str,
         context_hints: &Option<ContextHints>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Vec<coderun_core::SearchResult>), String> {
         let repo_intel = self.repo_intel.lock().map_err(|e| format!("Lock error: {}", e))?;
-
         let mut results = Vec::new();
-
-        // Search by query
-        if let Ok(search_results) = repo_intel.search_text(query, None, 10) {
-            for result in &search_results.results {
-                // Get file content with limited lines
-                if let Ok(content) = repo_intel.get_file_content(
-                    &result.path,
-                    Some((result.line.saturating_sub(5), result.line + 10)),
-                ) {
-                    results.push(format!("// {}:{}\n{}", result.path, result.line, content));
-                }
+        let mut scored = Vec::new();
+        // scored search — try tantivy BM25 first for real scores, fallback to ripgrep
+        let search_results = repo_intel.search_fulltext(query, None, 10).or_else(|_| repo_intel.search_text(query, None, 10)).unwrap_or(coderun_core::SearchResults { results: vec![], total_count: 0 });
+        for result in &search_results.results {
+            scored.push(result.clone());
+            if let Ok(content) = repo_intel.get_file_content(
+                &result.path,
+                Some((result.line.saturating_sub(5), result.line + 10)),
+            ) {
+                results.push(format!("// {}:{}\n{}", result.path, result.line, content));
             }
         }
-
-        // Also search for files mentioned in context hints
+        // Also search for files mentioned in context hints (score 1.0, symbol match)
         if let Some(hints) = context_hints {
             if let Some(files) = &hints.files_mentioned {
                 for file in files {
                     if let Ok(content) = repo_intel.get_file_content(file, Some((1, self.config.max_lines_per_file))) {
                         results.push(format!("// {}\n{}", file, content));
+                        scored.push(coderun_core::SearchResult { path: file.clone(), line: 1, content: file.clone(), score: 1.0 });
                     }
                 }
             }
         }
-
-        Ok(results.join("\n\n"))
+        Ok((results.join("\n\n"), scored))
     }
 
-    /// Retrieve knowledge via Knowledge Hub
-    fn retrieve_knowledge(&self, query: &str) -> Result<String, String> {
-        let knowledge_hub = self.knowledge_hub.lock().map_err(|e| format!("Lock error: {}", e))?;
+    /// Search code via Repository Intelligence (legacy wrapper)
+    fn search_code(
+        &self,
+        query: &str,
+        context_hints: &Option<ContextHints>,
+    ) -> Result<String, String> {
+        Ok(self.search_code_scored(query, context_hints)?.0)
+    }
 
+    /// Retrieve knowledge via Knowledge Hub (scored variant)
+    fn retrieve_knowledge_scored(&self, query: &str) -> Result<(String, Vec<coderun_core::KnowledgeEntry>), String> {
+        let knowledge_hub = self.knowledge_hub.lock().map_err(|e| format!("Lock error: {}", e))?;
         let entries = knowledge_hub.retrieve_knowledge(query, None, 10)?;
-
-        let formatted: Vec<String> = entries
-            .iter()
-            .map(|e| format!("// [{}] {}: {}", e.category, e.key, e.value))
-            .collect();
-
-        Ok(formatted.join("\n"))
+        let formatted: Vec<String> = entries.iter().map(|e| format!("// [{}] {}: {}", e.category, e.key, e.value)).collect();
+        Ok((formatted.join("\n"), entries))
     }
 
-    /// Match skills via Knowledge Hub
-    fn match_skills(&self, query: &str) -> Result<String, String> {
+    /// Retrieve knowledge via Knowledge Hub (legacy)
+    fn retrieve_knowledge(&self, query: &str) -> Result<String, String> {
+        Ok(self.retrieve_knowledge_scored(query)?.0)
+    }
+
+    /// Match skills via Knowledge Hub (scored variant — tag overlap)
+    fn match_skills_scored(&self, query: &str) -> Result<(String, Vec<(String, f64, f64)>), String> {
         let knowledge_hub = self.knowledge_hub.lock().map_err(|e| format!("Lock error: {}", e))?;
-
         let matches = knowledge_hub.match_skills(query, 5);
+        let formatted: Vec<String> = matches.iter().map(|m| {
+            format!("# {}\n{}\n\nExamples:\n{}\n\nConstraints:\n{}", m.skill_name, m.instructions, m.examples.join("\n"), m.constraints.join("\n"))
+        }).collect();
+        // Capture (skill_name, score, specificity proxy = score)
+        let scored = matches.into_iter().map(|m| {
+            let specificity = m.match_score;
+            (m.skill_name, m.match_score, specificity)
+        }).collect();
+        Ok((formatted.join("\n\n---\n\n"), scored))
+    }
 
-        let formatted: Vec<String> = matches
-            .iter()
-            .map(|m| {
-                format!(
-                    "# {}\n{}\n\nExamples:\n{}\n\nConstraints:\n{}",
-                    m.skill_name,
-                    m.instructions,
-                    m.examples.join("\n"),
-                    m.constraints.join("\n")
-                )
-            })
-            .collect();
-
-        Ok(formatted.join("\n\n---\n\n"))
+    /// Match skills via Knowledge Hub (legacy)
+    fn match_skills(&self, query: &str) -> Result<String, String> {
+        Ok(self.match_skills_scored(query)?.0)
     }
 
     /// Assemble the context pack with cache-aware ordering + frozen-prefix + reversible compression
@@ -297,6 +378,14 @@ impl ContextEngine {
                 budget_remaining: remaining,
                 by_source: token_usage_by_source.clone(),
             },
+            provenance: vec![],
+            metadata: coderun_core::ipc::ContextMetadata {
+                task_hash: String::new(),
+                correlation_id: String::new(),
+                cache_order: self.config.cache_order.clone(),
+                repository_state: String::new(),
+            },
+            repository_state: String::new(),
         };
 
         (context_pack, total_tokens)
@@ -536,6 +625,9 @@ mod tests {
                 budget_remaining: 50,
                 by_source: HashMap::new(),
             },
+            provenance: vec![],
+            metadata: coderun_core::ipc::ContextMetadata::default(),
+            repository_state: String::new(),
         };
 
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
@@ -614,5 +706,51 @@ mod tests {
         };
         let original = ContextEngine::get_original(&hash).unwrap();
         assert_eq!(original, long);
+    }
+
+    #[test]
+    fn test_build_context_deterministic() {
+        use coderun_core::TaskRequest;
+        use coderun_events::EventBus;
+        use coderun_knowledge::{KnowledgeConfig, KnowledgeHub};
+        use coderun_repo_intel::RepositoryIntelligence;
+        use coderun_storage::Database;
+        use std::path::PathBuf;
+
+        // Deterministic: same repo+task+config → same pack content even with different session_id, not deduped
+        std::env::set_var("CODERUN_REPO_STATE", "deterministic-test-head-abc123");
+        let dir = std::env::temp_dir().join(format!("coderun_det_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn hello() { println!(\"hi\"); }").unwrap();
+        let db_path = dir.join("det.db");
+        let db = Database::open(&db_path).unwrap();
+        let event_bus = EventBus::new();
+        // Index repo so code retrieval has something
+        let mut ri = RepositoryIntelligence::new(dir.clone(), Database::open(&db_path).unwrap(), event_bus.clone());
+        let _ = ri.index_repository();
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let engine = ContextEngine::new(ri, kh, event_bus, ContextConfig::default());
+        let task1 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None };
+        let task2 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessB".to_string(), context_hints: None };
+        let (pack1, routing1) = engine.build_context(&task1).unwrap();
+        let (pack2, routing2) = engine.build_context(&task2).unwrap();
+        // Deterministic: same repo state hash, same task hash, same content (correlation_id intentionally differs, not compared)
+        assert_eq!(pack1.repository_state, pack2.repository_state, "repo_state must be deterministic");
+        assert_eq!(pack1.metadata.repository_state, pack2.metadata.repository_state);
+        assert_eq!(pack1.metadata.task_hash, pack2.metadata.task_hash, "task_hash deterministic");
+        assert_eq!(pack1.metadata.cache_order, pack2.metadata.cache_order);
+        // Code/docs/skills content should be equal (different session => not deduped)
+        assert_eq!(pack1.code_context, pack2.code_context);
+        assert_eq!(pack1.docs_context, pack2.docs_context);
+        assert_eq!(pack1.behavioral_skills, pack2.behavioral_skills);
+        assert_eq!(pack1.token_usage.total_tokens, pack2.token_usage.total_tokens);
+        assert_eq!(routing1.tier, routing2.tier);
+        // Same session should dedup second call (different from first, empty on second)
+        let task3 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None };
+        let (pack3, _) = engine.build_context(&task3).unwrap();
+        // dedup_content may empty repeated content for same session; pack3 may have empty sections but task_hash still same
+        assert_eq!(pack3.metadata.task_hash, pack1.metadata.task_hash);
+        std::env::remove_var("CODERUN_REPO_STATE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

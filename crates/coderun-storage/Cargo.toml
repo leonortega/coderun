@@ -17,6 +17,10 @@ anyhow.workspace = true
 tantivy = "0.22"
 tantivy-tokenizer-api = "0.2"
 
+[features]
+default = []
+workflow = []
+
 [dev-dependencies]
 uuid.workspace = true
 tempfile = "3"

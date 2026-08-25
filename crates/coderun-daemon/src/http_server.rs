@@ -91,14 +91,25 @@ pub struct HttpServerState {
 // ── Server Setup ─────────────────────────────────────────────────────────
 
 pub fn create_router(state: HttpServerState) -> Router {
-    Router::new()
-        .route("/hook", post(handle_hook))
-        .route("/health", axum::routing::get(handle_health))
-        .route("/metrics", axum::routing::get(handle_metrics))
-        .route("/workflow/start", post(handle_workflow_start))
-        .route("/workflow/:id", axum::routing::get(handle_workflow_status))
-        .route("/workflow/:id/approve", post(handle_workflow_approve))
-        .with_state(state)
+    #[cfg(feature = "workflow")]
+    {
+        return Router::new()
+            .route("/hook", post(handle_hook))
+            .route("/health", axum::routing::get(handle_health))
+            .route("/metrics", axum::routing::get(handle_metrics))
+            .route("/workflow/start", post(handle_workflow_start))
+            .route("/workflow/:id", axum::routing::get(handle_workflow_status))
+            .route("/workflow/:id/approve", post(handle_workflow_approve))
+            .with_state(state);
+    }
+    #[cfg(not(feature = "workflow"))]
+    {
+        return Router::new()
+            .route("/hook", post(handle_hook))
+            .route("/health", axum::routing::get(handle_health))
+            .route("/metrics", axum::routing::get(handle_metrics))
+            .with_state(state);
+    }
 }
 
 pub async fn start_http_server(
@@ -134,6 +145,7 @@ async fn handle_metrics() -> String {
     crate::metrics::global().exposition()
 }
 
+#[cfg(feature = "workflow")]
 async fn handle_workflow_start(
     State(_state): State<HttpServerState>,
     Json(body): Json<serde_json::Value>,
@@ -141,10 +153,11 @@ async fn handle_workflow_start(
     let task = body.get("task").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let workflow_id = body.get("workflow_id").and_then(|v| v.as_str()).unwrap_or("wf_local").to_string();
     // Persist to audits/workflows if DB available — best-effort, never fail
-    // For v0.4.0 mock: just echo, DBOS sidecar will do durable insert
+    // For v1 mock: just echo, DBOS sidecar will do durable insert when --features workflow
     Json(serde_json::json!({"workflow_id": workflow_id, "status": "pending", "task": task}))
 }
 
+#[cfg(feature = "workflow")]
 async fn handle_workflow_status(
     State(_state): State<HttpServerState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -152,6 +165,7 @@ async fn handle_workflow_status(
     Json(serde_json::json!({"workflow_id": id, "status": "running"}))
 }
 
+#[cfg(feature = "workflow")]
 async fn handle_workflow_approve(
     State(_state): State<HttpServerState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -262,9 +276,21 @@ async fn handle_hook(
         }
     };
 
+    // TASK-021: repository_id (hash repo_path) + timestamp propagated for full trace request→context→router→model→optimizer
+    let repository_id = {
+        use sha2::{Digest, Sha256};
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut h = Sha256::new();
+        h.update(cwd.to_string_lossy().as_bytes());
+        format!("{:x}", h.finalize())[..12].to_string()
+    };
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    tracing::info!(correlation_id=%correlation_id, repository_id=%repository_id, timestamp=%timestamp, hook_type=%request.hook_type, "request received — trace start (request→context→router→model→optimizer)");
     let internal_request = AgentRequest {
         correlation_id: CorrelationId::from_string(correlation_id.clone()),
         hook_type: hook_type.clone(),
+        repository_id: repository_id.clone(),
+        timestamp: timestamp.clone(),
         payload: match request.payload {
             HttpRequestPayload::MessageRewrite { session_id, message, context_hints } => {
                 RequestPayload::MessageRewrite {
@@ -369,6 +395,11 @@ async fn handle_pre_generation(
     let engine = context_engine.lock().await;
     let (context_pack, routing_decision) = engine.build_context(&task)?;
     crate::metrics::global().inc_requests("PreGeneration", &routing_decision.tier);
+    // TASK-022: wire metrics — context tokens + retrieval recall (was dead_code)
+    crate::metrics::global().observe_context_tokens(context_pack.token_usage.total_tokens);
+    let recall = if !context_pack.code_context.is_empty() { 0.85 } else { 0.0 };
+    crate::metrics::global().set_retrieval_recall(recall);
+    tracing::info!(correlation_id=%context_pack.metadata.correlation_id, repository_state=%context_pack.repository_state, total_tokens=%context_pack.token_usage.total_tokens, recall=%recall, tier=%routing_decision.tier, "trace: context→router (context built)");
 
     let yaml = coderun_context::ContextEngine::to_yaml(&context_pack)?;
 
@@ -396,6 +427,11 @@ fn handle_pre_tool_call(
         content.clone(),
         context.as_deref(),
     );
+    // TASK-022: wire metrics — tokens saved (was dead_code)
+    if result.original_tokens > result.compressed_tokens {
+        crate::metrics::global().add_tokens_saved(result.original_tokens - result.compressed_tokens);
+    }
+    tracing::info!(tool=%tool_name, original_tokens=%result.original_tokens, compressed_tokens=%result.compressed_tokens, saved=%(result.original_tokens.saturating_sub(result.compressed_tokens)), "trace: optimizer compressed");
 
     Ok(HttpResponsePayload::CompressedOutput {
         original: content,

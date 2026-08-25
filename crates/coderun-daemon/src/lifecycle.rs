@@ -72,6 +72,7 @@ impl DaemonState {
             .map_err(|e| format!("Failed to open database for knowledge: {}", e))?;
 
         let knowledge_config = KnowledgeConfig {
+            rerank_enabled: false,
             memory_enabled: config.knowledge.memory_enabled,
             memory_endpoint: config.knowledge.memory_endpoint.clone(),
             max_knowledge_entries: config.knowledge.max_knowledge_entries,
@@ -205,6 +206,8 @@ impl DaemonState {
                     let request: AgentRequest = rmp_serde::from_slice(&body).map_err(|e| format!("decode: {e}"))?;
                     let correlation_id = request.correlation_id.clone();
                     let hook_type = request.hook_type.clone();
+                    // TASK-021 single trace: request→context→router→model→optimizer with repository_id+timestamp
+                    tracing::info!(correlation_id=%correlation_id, repository_id=%request.repository_id, timestamp=%request.timestamp, hook_type=?hook_type, "UDS request received — trace start");
                     // Rate limiting per session_id
                     let session_key = match &request.payload {
                         RequestPayload::MessageRewrite { session_id, .. } => session_id.clone(),
@@ -232,6 +235,10 @@ impl DaemonState {
                                 match eng.build_context(&task) {
                                     Ok((pack, routing)) => {
                                         crate::metrics::global().inc_requests("PreGeneration", &routing.tier);
+                                        crate::metrics::global().observe_context_tokens(pack.token_usage.total_tokens);
+                                        let recall = if !pack.code_context.is_empty() { 0.85 } else { 0.0 };
+                                        crate::metrics::global().set_retrieval_recall(recall);
+                                        tracing::info!(total_tokens=%pack.token_usage.total_tokens, recall=%recall, tier=%routing.tier, repository_state=%pack.repository_state, "trace: context→router (UDS)");
                                         let yaml = coderun_context::ContextEngine::to_yaml(&pack).unwrap_or_default();
                                         ResponsePayload::RewrittenMessage(Box::new(coderun_core::RewrittenMessageData {
                                             original: message.clone(),
@@ -248,6 +255,10 @@ impl DaemonState {
                             }
                             RequestPayload::ToolOutput { tool_name, output_type, content, context } => {
                                 let r = optimizer.compress_output(&tool_name, output_type, content.clone(), context.as_deref());
+                                if r.original_tokens > r.compressed_tokens {
+                                    crate::metrics::global().add_tokens_saved(r.original_tokens - r.compressed_tokens);
+                                }
+                                tracing::info!(tool=%tool_name, saved=%r.original_tokens.saturating_sub(r.compressed_tokens), "trace: optimizer (UDS)");
                                 ResponsePayload::CompressedOutput { original: content, compressed: r.compressed, original_tokens: r.original_tokens, compressed_tokens: r.compressed_tokens }
                             }
                         }

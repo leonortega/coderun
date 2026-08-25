@@ -55,13 +55,9 @@ impl Database {
         let migration_003 = include_str!("migrations/003_graph.sql");
         self.apply_migration("003_graph", migration_003)?;
 
-        // Migration 004: Event persistence
-        let migration_004 = include_str!("migrations/004_events.sql");
-        self.apply_migration("004_events", migration_004)?;
-
-        // Migration 005: Audits + workflows (DBOS)
-        let migration_005 = include_str!("migrations/005_audits.sql");
-        self.apply_migration("005_audits", migration_005)?;
+        // v1: 004_events and 005_audits removed per TASK-002/TASK-001 — preserved in future/workflow/migrations/
+        // Event persistence (ring buffer + SQLite) and workflow audits are NOT part of v1 hot path.
+        // v1 keeps only tracing + metrics + correlation IDs (EventBus is in-memory only).
 
         Ok(())
     }
@@ -130,9 +126,14 @@ impl Database {
         Ok(())
     }
 
-    /// Delete a file by path
+    /// Delete a file by path — cascades to symbols (TASK-010: stale symbols must disappear)
     pub fn delete_file(&self, path: &str) -> Result<(), String> {
         let start = Instant::now();
+        // Delete symbols first to avoid FOREIGN KEY constraint (symbols.file_id → files.id)
+        let _ = self.conn.execute(
+            "DELETE FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path = ?1)",
+            params![path],
+        );
         self.conn
             .execute("DELETE FROM files WHERE path = ?1", params![path])
             .map_err(|e| format!("Failed to delete file: {}", e))?;
@@ -592,8 +593,8 @@ impl Database {
         Ok(())
     }
 
-    // ── Audits & Workflows (DBOS, v0.4.0 §1.3) ─────────────────────
-
+    // ── Audits & Workflows — future/workflow only (TASK-001, not v1) ─────────────────────
+    #[cfg(feature = "workflow")]
     pub fn insert_audit(&self, workflow_id: Option<&str>, correlation_id: Option<&str>, actor: &str, task: &str, ctx_pack_hash: Option<&str>, payload: Option<&str>) -> Result<i64, String> {
         self.conn.execute(
             "INSERT INTO audits (workflow_id, correlation_id, actor, task, ctx_pack_hash, payload) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -602,6 +603,7 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    #[cfg(feature = "workflow")]
     pub fn list_audits(&self, limit: usize) -> Result<Vec<AuditRecord>, String> {
         let mut stmt = self.conn.prepare("SELECT id, workflow_id, correlation_id, actor, task, ctx_pack_hash, payload, created_at FROM audits ORDER BY id DESC LIMIT ?1").map_err(|e| format!("Failed to prepare: {e}"))?;
         let rows = stmt.query_map(params![limit as i64], |row| Ok(AuditRecord {
@@ -610,6 +612,7 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("{e}"))
     }
 
+    #[cfg(feature = "workflow")]
     pub fn upsert_workflow(&self, workflow_id: &str, status: &str, task: &str) -> Result<(), String> {
         self.conn.execute(
             "INSERT INTO workflows (workflow_id, status, task, updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(workflow_id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at",
@@ -618,6 +621,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(feature = "workflow")]
     pub fn get_workflow(&self, workflow_id: &str) -> Result<Option<WorkflowRecord>, String> {
         let res = self.conn.query_row("SELECT workflow_id, status, task, created_at, updated_at FROM workflows WHERE workflow_id=?1", params![workflow_id], |row| Ok(WorkflowRecord {
             workflow_id: row.get(0)?, status: row.get(1)?, task: row.get(2)?, created_at: row.get(3)?, updated_at: row.get(4)?,
@@ -625,6 +629,7 @@ impl Database {
         match res { Ok(r) => Ok(Some(r)), Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), Err(e) => Err(format!("{e}")) }
     }
 
+    #[cfg(feature = "workflow")]
     pub fn list_workflows(&self, limit: usize) -> Result<Vec<WorkflowRecord>, String> {
         let mut stmt = self.conn.prepare("SELECT workflow_id, status, task, created_at, updated_at FROM workflows ORDER BY created_at DESC LIMIT ?1").map_err(|e| format!("{e}"))?;
         let rows = stmt.query_map(params![limit as i64], |row| Ok(WorkflowRecord {
@@ -696,6 +701,7 @@ pub struct MemoryRecord {
     pub created_at: String,
 }
 
+#[cfg(feature = "workflow")]
 #[derive(Debug, Clone)]
 pub struct AuditRecord {
     pub id: i64,
@@ -708,6 +714,7 @@ pub struct AuditRecord {
     pub created_at: String,
 }
 
+#[cfg(feature = "workflow")]
 #[derive(Debug, Clone)]
 pub struct WorkflowRecord {
     pub workflow_id: String,
@@ -902,32 +909,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── v0.5.0 first-class tool tests ──────────────────────────────────
-
-    #[test]
-    fn test_005_audits_migration_exists() {
-        let db = test_db();
-        // 005 adds audits + workflows tables
-        db.insert_audit(Some("wf_1"), Some("req_1"), "actor", "task", Some("hash"), Some("payload")).unwrap();
-        let audits = db.list_audits(10).unwrap();
-        assert_eq!(audits.len(), 1);
-        assert_eq!(audits[0].workflow_id.as_deref(), Some("wf_1"));
-        db.upsert_workflow("wf_1", "pending", "task1").unwrap();
-        let w = db.get_workflow("wf_1").unwrap().unwrap();
-        assert_eq!(w.status, "pending");
-        db.upsert_workflow("wf_1", "completed", "task1").unwrap();
-        let w2 = db.get_workflow("wf_1").unwrap().unwrap();
-        assert_eq!(w2.status, "completed");
-    }
-
-    #[test]
-    fn test_audit_list_and_workflow_list() {
-        let db = test_db();
-        for i in 0..3 {
-            db.insert_audit(Some(&format!("wf_{i}")), None, "actor", &format!("task {i}"), None, None).unwrap();
-            db.upsert_workflow(&format!("wf_{i}"), "pending", &format!("task {i}")).unwrap();
-        }
-        assert_eq!(db.list_audits(2).unwrap().len(), 2);
-        assert_eq!(db.list_workflows(10).unwrap().len(), 3);
-    }
+    // v1: 004/005 migrations removed — tests moved to future/workflow
+    // Workflow audits/workflows are NOT part of v1 hot path (TASK-001/002)
 }

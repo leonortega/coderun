@@ -12,7 +12,8 @@ max_connections = 5
 
 [index]
 path = "~/.coderun/index/"
-languages = ["rust", "typescript", "javascript", "python", "go", "java", "c", "cpp"]
+# v1: only rust/typescript/javascript/python (go/java/c/cpp behind --features extended-languages; see TASK-012)
+languages = ["rust", "typescript", "javascript", "python"]
 
 [knowledge]
 memory_enabled = true
@@ -55,10 +56,10 @@ enabled = true
 max_output_tokens = 8000
 compression_level = "balanced"
 
-[workflow]
-enabled = true
-engine = "dbos"
-dbos_endpoint = "http://localhost:3001"
+# [workflow] — v1 REMOVED (future/workflow only, opt-in --features workflow)
+# enabled = false
+# engine = "noop"
+# dbos_endpoint = "http://localhost:3001"
 
 [logging]
 level = "info"

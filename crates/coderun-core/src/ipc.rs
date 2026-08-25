@@ -14,12 +14,18 @@ pub enum HookType {
 
 // ── Request Types ───────────────────────────────────────────────────────
 
-/// Message sent from agent to daemon
+/// Message sent from agent to daemon — includes repository_id + timestamp for full trace (TASK-021)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRequest {
     pub correlation_id: CorrelationId,
     pub hook_type: HookType,
     pub payload: RequestPayload,
+    /// repository_id: hash of repo_path (TASK-021)
+    #[serde(default)]
+    pub repository_id: String,
+    /// ISO8601 timestamp of request creation (TASK-021)
+    #[serde(default)]
+    pub timestamp: String,
 }
 
 /// Payload variants for incoming requests
@@ -101,13 +107,41 @@ pub enum OutputType {
     Other,
 }
 
-/// The assembled context pack returned to agents
+/// The assembled context pack returned to agents — stable artifact (TASK-008)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextPack {
     pub behavioral_skills: String,
     pub docs_context: String,
     pub code_context: String,
     pub token_usage: TokenUsage,
+    /// Provenance for each included item (TASK-009) — why it was selected
+    #[serde(default)]
+    pub provenance: Vec<ContextProvenance>,
+    /// Determinism metadata: task hash + repo state hash
+    #[serde(default)]
+    pub metadata: ContextMetadata,
+    /// Repository state (git HEAD hash) for determinism/stability (TASK-008)
+    #[serde(default)]
+    pub repository_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContextMetadata {
+    pub task_hash: String,
+    pub correlation_id: String,
+    pub cache_order: Vec<String>,
+    /// git HEAD hash of the repository state at build time (TASK-008/009)
+    #[serde(default)]
+    pub repository_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextProvenance {
+    pub path: String,
+    pub source: String, // "code" | "docs" | "skills"
+    pub retriever: String, // "tantivy" | "skill_engine" | "bm25"
+    pub score: f64,
+    pub reason: String,
 }
 
 /// Token usage breakdown
@@ -221,6 +255,8 @@ mod tests {
                     language: Some("rust".to_string()),
                 }),
             },
+            repository_id: "test_repo_hash".to_string(),
+            timestamp: "2026-08-25T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
@@ -276,6 +312,9 @@ mod tests {
                 ]
                 .into(),
             },
+            provenance: vec![],
+            metadata: ContextMetadata::default(),
+            repository_state: String::new(),
         };
         let json = serde_json::to_string(&pack).unwrap();
         let parsed: ContextPack = serde_json::from_str(&json).unwrap();

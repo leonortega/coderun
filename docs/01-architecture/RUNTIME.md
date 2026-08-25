@@ -220,13 +220,11 @@ enabled = true                        # Enable RTK compression
 max_output_tokens = 8000              # Max tokens per compressed output
 compression_level = "balanced"        # light, balanced, aggressive
 
-[workflow]                            # DBOS required since v0.6.0 (V0_6_0_PLAN.md:1)
-enabled = true                        # true default (was false pre-v0.6.0)
-engine = "dbos"                       # dbos only; noop kept for #[cfg(test)]
-dbos_endpoint = "http://localhost:3001"
-dbos_shared_secret = ""               # HMAC via hmac crate (secrets::verify_hmac); local default 'your-secret' is fine — only set a real secret/token when connecting to DBOS Cloud/Conductor (see docs/02-workflows/DBOS.md)
-auto_governance = false
-require_approval_tiers = ["capable"]
+# [workflow] — v1 REMOVED (future/workflow only, opt-in --features workflow)
+# See future/workflow/README.md — not part of v1 runtime (TASK-001)
+# enabled = false
+# engine = "noop"
+# dbos_endpoint = "http://localhost:3001"
 
 [logging]
 level = "info"                        # Log level: error, warn, info, debug, trace
@@ -246,9 +244,6 @@ retention_days = 7                    # Log retention
 | `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
 | `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
 | `CODERUN_ENGRAM_ENDPOINT` | knowledge.memory_endpoint | http://localhost:9090 |
-| `CODERUN_DBOS_ENDPOINT` | workflow.dbos_endpoint | http://localhost:3001 |
-| `CODERUN_DBOS_SECRET` | workflow.dbos_shared_secret | local HMAC (default `your-secret` is fine); only set a real secret when connecting to DBOS Cloud/Conductor |
-| `CODERUN_WORKFLOW_ENABLED` | workflow.enabled | true (since v0.6.0) |
 
 ## IPC Protocol
 

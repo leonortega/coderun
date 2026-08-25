@@ -1,13 +1,14 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Coderun v0.5.0 first-class installer (Windows PowerShell 5.1)
+  Coderun v1.0.0 (0.6.0) first-class installer (Windows PowerShell 5.1)
+  V1 scope: local AI runtime only (DBOS/workflows in future/workflow, opt-in CODERUN_WORKFLOW_ENABLED=true)
   Installs ALL stack tools as first-class (no optional except LSP, no Temporal) + uses prebuilt coderun (no compile/test).
   Idempotent - re-run to update.
 
 .DESCRIPTION
   Tools: Rust 1.75, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
-         ast-grep, engram (local .coderun/engram/*.zip), FlashRank (local .coderun/models/flashrank.onnx), codebase-memory-mcp, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo, DBOS sidecar
+         ast-grep, engram (local .coderun/engram/*.zip), FlashRank (local .coderun/models/flashrank.onnx), codebase-memory-mcp, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo, DBOS sidecar (future/workflow only)
   Prebuilt: target/release/coderun.exe + coderun-daemon.exe are used directly (no cargo build/test).
 
 .PARAMETER SkipBuild
@@ -34,7 +35,7 @@ function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
-Info "Coderun v0.5.0 installer"
+Info "Coderun v1.0.0 installer (0.6.0, DBOS/workflow future-only)"
 
 # 0. Prereqs - Rust 1.85+ required for RTK (edition2024)
 $needRustInstall = $false
@@ -244,102 +245,37 @@ else {
   }
   $ErrorActionPreference = $prevEA2
 
-  # DBOS sidecar deps - build to dist for reliable start (fix ts-node loader)
-  if (Test-Path "$Root\workflow\dbos\package.json") {
-    Push-Location "$Root\workflow\dbos"
+  # v1: DBOS sidecar NOT built — future/workflow only, gated behind CODERUN_WORKFLOW_ENABLED=true (TASK-001)
+  if ($env:CODERUN_WORKFLOW_ENABLED -eq "true" -and (Test-Path "$Root\future\workflow\dbos\package.json")) {
+    Push-Location "$Root\future\workflow\dbos"
     try {
       npm install 2>&1 | Out-Null
       npx tsc 2>&1 | Out-Null
       npx tsc --noEmit 2>&1 | Out-Null
-      if (Test-Path "dist/main.js") { Ok "DBOS sidecar deps + built dist/main.js" } else { Warn "DBOS build failed - dist/main.js missing" }
-    } catch { Warn "DBOS npm install/build failed - $_" }
+      if (Test-Path "dist/main.js") { Ok "future/workflow DBOS deps + built dist/main.js" } else { Warn "future/workflow DBOS build failed - dist/main.js missing" }
+    } catch { Warn "future/workflow DBOS npm install/build failed - $_" }
     Pop-Location
   }
+  # legacy workflow/dbos never built in v1 (TASK-001 purge)
+  if (Test-Path "$Root\workflow\dbos\package.json") { Warn "legacy workflow/dbos/package.json found — v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)" }
 }
 
-# 0b. Ensure workflow config exists (local DBOS sidecar, no secret required)
+# 0b. v1: workflow NOT part of hot path — preserved in future/workflow/ (TASK-001)
+# No workflow config required for `coderun serve`/`doctor`. Future opt-in via --features workflow.
 $cfgPath = Join-Path $Root ".coderun/config.toml"
 try {
   New-Item -ItemType Directory -Force -Path (Split-Path $cfgPath -Parent) | Out-Null
-  if (-not (Test-Path $cfgPath)) {
-    $initCfg = "[workflow]`r`nenabled = true`r`nengine = `"dbos`"`r`ndbos_endpoint = `"http://localhost:3001`"`r`n"
-    Set-Content -LiteralPath $cfgPath -Value $initCfg -Encoding UTF8
-    Ok "Created .coderun/config.toml with [workflow] dbos"
-  } else {
+  if (Test-Path $cfgPath) {
     $content = Get-Content -LiteralPath $cfgPath -Raw -ErrorAction SilentlyContinue
-    if ($content -notmatch '\[workflow\]') {
-      $append = "`r`n[workflow]`r`nenabled = true`r`nengine = `"dbos`"`r`ndbos_endpoint = `"http://localhost:3001`"`r`n"
-      Add-Content -LiteralPath $cfgPath -Value $append -Encoding UTF8; Ok "Appended [workflow] to .coderun/config.toml"
-    } else {
-      Ok "workflow config at .coderun/config.toml"
-    }
-    # Remove legacy dbos_shared_secret if present (local sidecar no longer uses CODERUN_DBOS_SECRET)
-    if ($content -match 'dbos_shared_secret') {
-      try {
-        $cleaned = $content -replace '(?m)^\s*dbos_shared_secret\s*=.*\r?\n', ""
-        [System.IO.File]::WriteAllText($cfgPath, $cleaned, [System.Text.Encoding]::UTF8)
-        Info "  Removed legacy dbos_shared_secret from .coderun/config.toml (no longer required for local DBOS)"
-      } catch {}
-    }
-  }
+    if ($content -match '^\[workflow\]' -or $content -match 'dbos_shared_secret') {
+      Info "  workflow config found in $cfgPath — v1 ignores it (future/workflow only)"
+      if ($content -match 'dbos_shared_secret') {
+        try { $cleaned = $content -replace '(?m)^\s*dbos_shared_secret\s*=.*\r?\n', ""; [System.IO.File]::WriteAllText($cfgPath, $cleaned, [System.Text.Encoding]::UTF8); Info "  Removed legacy dbos_shared_secret" } catch {}
+      }
+    } else { Ok "v1 config at $cfgPath — no [workflow] required (future/workflow opt-in)" }
+  } else { Ok "v1 config — no [workflow] required (future/workflow opt-in)" }
 } catch { Info "  workflow config check skipped: $_" }
-
-# 0c. Ensure DBOS health (local sidecar, no auth)
-$cfgDbosEndpoint = "http://localhost:3001"
-try {
-  $projCfg = Get-Content -LiteralPath $cfgPath -Raw -ErrorAction SilentlyContinue
-  if ($projCfg -match 'dbos_endpoint\s*=\s*"([^"]+)"') { $cfgDbosEndpoint = $Matches[1] }
-} catch {}
-if (-not [string]::IsNullOrWhiteSpace($env:CODERUN_DBOS_ENDPOINT)) { $cfgDbosEndpoint = $env:CODERUN_DBOS_ENDPOINT }
-Info "Checking DBOS health at $cfgDbosEndpoint/health ..."
-$reachable = $false
-try {
-  $resp = Invoke-WebRequest -Uri "$cfgDbosEndpoint/health" -TimeoutSec 2 -UseBasicParsing -ErrorAction SilentlyContinue
-  if ($resp -and $resp.StatusCode -eq 200) { $reachable = $true }
-} catch {}
-if ($reachable) { Ok "DBOS reachable at $cfgDbosEndpoint" } else {
-  Info "  DBOS not reachable - attempting to start sidecar..."
-  $started = $false
-  try {
-    if (Test-Path "$Root\workflow\dbos\dist\main.js") {
-      $nodeExe = "node"
-      if (Get-Command "node.exe" -ErrorAction SilentlyContinue) { $nodeExe = "node.exe" }
-      $psi = New-Object System.Diagnostics.ProcessStartInfo
-      $psi.FileName = $nodeExe
-      $psi.Arguments = "dist/main.js"
-      $psi.WorkingDirectory = "$Root\workflow\dbos"
-      $psi.UseShellExecute = $false
-      $psi.CreateNoWindow = $true
-      $psi.EnvironmentVariables["DBOS_PORT"] = "3001"
-      # also ensure no secret required
-      $proc = [System.Diagnostics.Process]::Start($psi)
-      if ($proc) { $started = $true; Start-Sleep -Seconds 3 }
-    } elseif (Test-Path "$Root\workflow\dbos\package.json") {
-      # Fallback: npm start (now runs node dist/main.js after package.json fix)
-      $npmCmd = "npm"
-      if (Get-Command "npm.cmd" -ErrorAction SilentlyContinue) { $npmCmd = "npm.cmd" }
-      $psi = New-Object System.Diagnostics.ProcessStartInfo
-      $psi.FileName = $npmCmd
-      $psi.Arguments = "start"
-      $psi.WorkingDirectory = "$Root\workflow\dbos"
-      $psi.UseShellExecute = $false
-      $psi.CreateNoWindow = $true
-      $psi.EnvironmentVariables["DBOS_PORT"] = "3001"
-      $proc = [System.Diagnostics.Process]::Start($psi)
-      if ($proc) { $started = $true; Start-Sleep -Seconds 3 }
-    }
-  } catch { Info "  DBOS autostart skipped: $_" }
-  for ($i = 0; $i -lt 12 -and -not $reachable; $i++) {
-    Start-Sleep -Seconds 1
-    try {
-      $resp = Invoke-WebRequest -Uri "$cfgDbosEndpoint/health" -TimeoutSec 2 -UseBasicParsing -ErrorAction SilentlyContinue
-      if ($resp -and $resp.StatusCode -eq 200) { $reachable = $true; break }
-    } catch {}
-  }
-  if ($reachable) { Ok "DBOS sidecar started at $cfgDbosEndpoint" } else {
-    if ($started) { Warn "DBOS started but not reachable at $cfgDbosEndpoint - check: cd workflow/dbos; node dist/main.js (logs at workflow/dbos)" } else { Warn "DBOS not reachable at $cfgDbosEndpoint - hint: cd workflow/dbos; npm run build; node dist/main.js" }
-  }
-}
+# v1: DBOS sidecar NOT started — future/workflow only (TASK-001: serve works without DBOS)
 
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
 if ($SkipBuild) { Info "Skipping build check (--SkipBuild)" }
@@ -484,5 +420,6 @@ if (Test-Path $pluginDir) {
 } else { Warn "packages/opencode-coderun not found - skipping npm plugin install" }
 Info "Restart opencode to load plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open)"
 
-Info "Done - next: coderun serve  |  coderun preview 'add auth'  |  coderun workflow start 'refactor' --require-approval  |  curl http://127.0.0.1:9527/metrics"
+Info "Done (v1) - next: coderun serve  |  coderun preview 'add auth'  |  curl http://127.0.0.1:9527/metrics  |  coderun doctor (v1 disabled, no DBOS)"
 Info "Docs: mkdocs serve  |  promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
+Info "Opt-in workflow: `$env:CODERUN_WORKFLOW_ENABLED='true'; bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

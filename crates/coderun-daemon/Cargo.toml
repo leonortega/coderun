@@ -16,7 +16,6 @@ coderun-knowledge.workspace = true
 coderun-skills.workspace = true
 coderun-context.workspace = true
 coderun-optimizer.workspace = true
-coderun-workflow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -27,4 +26,10 @@ axum = "0.7"
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 sha2.workspace = true
+chrono.workspace = true
 prometheus = { version = "0.13", optional = true }
+
+[features]
+default = []
+# v1: workflow preserved in future/workflow — not part of default workspace
+workflow = []

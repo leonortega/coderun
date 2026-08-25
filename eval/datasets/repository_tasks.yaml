@@ -1,0 +1,297 @@
+# Coderun Golden Dataset — 50 real coding tasks (TASK-005)
+# Each task identifies expected relevant files for retrieval evaluation (TASK-006)
+# Categories: bug fixing, feature addition, refactoring, testing, documentation, code search, architecture questions
+# Metrics: Recall@5, Recall@10, MRR, tokens, latency, duplicate ratio — see eval/metrics/retrieval.py
+
+- task: "Fix authentication timeout in login flow"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-core/src/config.rs
+    - crates/coderun-daemon/src/http_server.rs
+    - crates/coderun-daemon/src/lifecycle.rs
+  expected_symbols: ["Config::validate", "handle_hook"]
+
+- task: "Add pagination to users endpoint"
+  category: "feature addition"
+  expected_files:
+    - crates/coderun-storage/src/lib.rs
+    - crates/coderun-knowledge/src/lib.rs
+    - crates/coderun-context/src/lib.rs
+
+- task: "Refactor repository indexing to incremental via hash"
+  category: "refactoring"
+  expected_files:
+    - crates/coderun-repo-intel/src/lib.rs
+    - crates/coderun-storage/src/lib.rs
+    - crates/coderun-repo-intel/src/watcher.rs
+
+- task: "Add test for dedup skips duplicate content block"
+  category: "testing"
+  expected_files:
+    - crates/coderun-context/src/lib.rs
+    - crates/coderun-core/src/ipc.rs
+
+- task: "Document supported languages for v1"
+  category: "documentation"
+  expected_files:
+    - README.md
+    - .coderun/config.toml
+    - crates/coderun-core/src/config.rs
+
+- task: "Find where BuildContext assembles token budget"
+  category: "code search"
+  expected_files:
+    - crates/coderun-context/src/lib.rs
+    - crates/coderun-core/src/ipc.rs
+
+- task: "Explain how Model Router selects tier"
+  category: "architecture questions"
+  expected_files:
+    - crates/coderun-router/src/lib.rs
+    - crates/coderun-core/src/config.rs
+
+- task: "Fix race condition in EventBus broadcast"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-events/src/lib.rs
+    - crates/coderun-daemon/src/lifecycle.rs
+
+- task: "Add skill priority and specificity handling"
+  category: "feature addition"
+  expected_files:
+    - crates/coderun-skills/src/lib.rs
+    - crates/coderun-knowledge/src/lib.rs
+
+- task: "Refactor SkillEngine to normalize Claude/Cursor/Continue formats"
+  category: "refactoring"
+  expected_files:
+    - crates/coderun-skills/src/lib.rs
+
+- task: "Test memory retrieval fail-open when Engram down"
+  category: "testing"
+  expected_files:
+    - crates/coderun-knowledge/src/engram.rs
+    - crates/coderun-knowledge/src/lib.rs
+
+- task: "Document context provenance fields"
+  category: "documentation"
+  expected_files:
+    - crates/coderun-core/src/ipc.rs
+    - crates/coderun-context/src/lib.rs
+
+- task: "Search for where HMAC is used for secrets"
+  category: "code search"
+  expected_files:
+    - crates/coderun-core/src/secrets.rs
+    - crates/coderun-daemon/src/ratelimit.rs
+
+- task: "How does Knowledge Hub fallback from tantivy to LIKE?"
+  category: "architecture questions"
+  expected_files:
+    - crates/coderun-knowledge/src/lib.rs
+    - crates/coderun-storage/src/lib.rs
+
+- task: "Fix token counting fallback when tiktoken fails"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-context/src/lib.rs
+    - crates/coderun-optimizer/src/lib.rs
+
+- task: "Add repository_id to request correlation"
+  category: "feature addition"
+  expected_files:
+    - crates/coderun-core/src/ipc.rs
+    - crates/coderun-daemon/src/http_server.rs
+    - crates/coderun-daemon/src/lifecycle.rs
+
+- task: "Refactor Prometheus metrics to in-memory histogram"
+  category: "refactoring"
+  expected_files:
+    - crates/coderun-daemon/src/metrics.rs
+
+- task: "Benchmark RTK vs built-in compressor"
+  category: "testing"
+  expected_files:
+    - crates/coderun-optimizer/src/rtk.rs
+    - crates/coderun-optimizer/src/lib.rs
+    - benches/context_bench.rs
+
+- task: "Document LiteLLM fallback chain"
+  category: "documentation"
+  expected_files:
+    - crates/coderun-router/src/lib.rs
+    - crates/coderun-router/src/litellm.rs
+
+- task: "Where is frozen prefix boundary added?"
+  category: "code search"
+  expected_files:
+    - crates/coderun-context/src/lib.rs
+
+- task: "How does dedup fingerprint work per session?"
+  category: "architecture questions"
+  expected_files:
+    - crates/coderun-context/src/lib.rs
+
+- task: "Fix incremental indexing stale symbols after delete"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-repo-intel/src/lib.rs
+    - crates/coderun-storage/src/lib.rs
+
+- task: "Add OpenCode adapter E2E test"
+  category: "feature addition"
+  expected_files:
+    - packages/opencode-coderun/src/index.ts
+    - crates/coderun-daemon/src/http_server.rs
+
+- task: "Refactor tantivy BM25 primary with FlashRank rerank"
+  category: "refactoring"
+  expected_files:
+    - crates/coderun-knowledge/src/lib.rs
+    - crates/coderun-knowledge/src/rerank.rs
+
+- task: "Validate dependency graph A->B->C traversal"
+  category: "testing"
+  expected_files:
+    - crates/coderun-repo-intel/src/graph.rs
+
+- task: "Document evaluation infrastructure"
+  category: "documentation"
+  expected_files:
+    - eval/datasets/repository_tasks.yaml
+    - eval/metrics/retrieval.py
+
+- task: "Search where rate limiting is enforced"
+  category: "code search"
+  expected_files:
+    - crates/coderun-daemon/src/ratelimit.rs
+    - crates/coderun-daemon/src/http_server.rs
+
+- task: "Explain fail-open design for optimizer"
+  category: "architecture questions"
+  expected_files:
+    - crates/coderun-optimizer/src/lib.rs
+    - crates/coderun-core/src/error.rs
+
+- task: "Fix config merge overriding defaults"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-core/src/config.rs
+
+- task: "Add metrics for tokens saved and retrieval quality"
+  category: "feature addition"
+  expected_files:
+    - crates/coderun-daemon/src/metrics.rs
+    - crates/coderun-context/src/lib.rs
+
+- task: "Refactor daemon UDS + HTTP fallback shared state"
+  category: "refactoring"
+  expected_files:
+    - crates/coderun-daemon/src/lifecycle.rs
+    - crates/coderun-daemon/src/http_server.rs
+
+- task: "Test SkillEngine conflict detection"
+  category: "testing"
+  expected_files:
+    - crates/coderun-skills/src/lib.rs
+
+- task: "Document v1 architecture without workflow"
+  category: "documentation"
+  expected_files:
+    - docs/coderun_v1_review_and_tasks.md
+    - README.md
+
+- task: "Find CLI preview implementation"
+  category: "code search"
+  expected_files:
+    - crates/coderun-cli/src/main.rs
+
+- task: "How does Engram memory namespace work?"
+  category: "architecture questions"
+  expected_files:
+    - crates/coderun-knowledge/src/engram.rs
+    - crates/coderun-storage/src/lib.rs
+
+- task: "Fix SQLite WAL mode enabling"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-storage/src/lib.rs
+
+- task: "Add baseline vs Coderun benchmark harness"
+  category: "feature addition"
+  expected_files:
+    - eval/baseline/run.py
+    - eval/metrics/baseline.py
+
+- task: "Refactor Context Pack to stable artifact with metadata"
+  category: "refactoring"
+  expected_files:
+    - crates/coderun-core/src/ipc.rs
+    - crates/coderun-context/src/lib.rs
+
+- task: "Measure context retrieval Recall@5"
+  category: "testing"
+  expected_files:
+    - eval/metrics/retrieval.py
+    - eval/datasets/repository_tasks.yaml
+
+- task: "Document supported languages explicitly"
+  category: "documentation"
+  expected_files:
+    - docs/01-architecture/RUNTIME.md
+    - README.md
+
+- task: "Search where tree-sitter languages are enabled"
+  category: "code search"
+  expected_files:
+    - crates/coderun-repo-intel/src/parser.rs
+    - crates/coderun-core/src/config.rs
+
+- task: "Explain repository intelligence pipeline"
+  category: "architecture questions"
+  expected_files:
+    - crates/coderun-repo-intel/src/lib.rs
+    - crates/coderun-repo-intel/src/parser.rs
+
+- task: "Fix skills directory creation on init"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-cli/src/main.rs
+
+- task: "Add 4-language default with extended flag"
+  category: "feature addition"
+  expected_files:
+    - crates/coderun-repo-intel/Cargo.toml
+    - crates/coderun-core/src/config.rs
+
+- task: "Refactor optimistic context truncation with reversible cache"
+  category: "refactoring"
+  expected_files:
+    - crates/coderun-context/src/lib.rs
+
+- task: "Test routing tier selection for simple task"
+  category: "testing"
+  expected_files:
+    - crates/coderun-router/src/lib.rs
+
+- task: "Document observability correlation IDs"
+  category: "documentation"
+  expected_files:
+    - crates/coderun-daemon/src/metrics.rs
+    - crates/coderun-events/src/lib.rs
+
+- task: "Where is tantivy index stored?"
+  category: "code search"
+  expected_files:
+    - crates/coderun-storage/src/tantivy_index.rs
+    - crates/coderun-repo-intel/src/lib.rs
+
+- task: "How does optimizer compress shell output?"
+  category: "architecture questions"
+  expected_files:
+    - crates/coderun-optimizer/src/lib.rs
+
+- task: "Fix deadlock in KnowledgeHub retrieve"
+  category: "bug fixing"
+  expected_files:
+    - crates/coderun-knowledge/src/lib.rs

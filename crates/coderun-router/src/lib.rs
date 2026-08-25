@@ -4,8 +4,10 @@ use coderun_core::{RoutingDecision, RoutingScores, IModelGateway};
 use tracing::{debug, info};
 
 /// Model Router: heuristic complexity scoring and tier-based model selection
+/// TASK-018: separate model config from routing logic — routing chooses tier, ModelsConfig defines actual models
 pub struct ModelRouter {
     config: RouterConfig,
+    models: ModelsConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -15,9 +17,13 @@ pub struct RouterConfig {
     pub scope_weight: f64,
     pub fast_threshold: f64,
     pub capable_threshold: f64,
-    pub fast_model: String,
-    pub balanced_model: String,
-    pub capable_model: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelsConfig {
+    pub fast: String,
+    pub balanced: String,
+    pub capable: String,
 }
 
 impl Default for RouterConfig {
@@ -28,9 +34,16 @@ impl Default for RouterConfig {
             scope_weight: 0.3,
             fast_threshold: 0.3,
             capable_threshold: 0.7,
-            fast_model: "gpt-4o-mini".to_string(),
-            balanced_model: "gpt-4o".to_string(),
-            capable_model: "o1".to_string(),
+        }
+    }
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self {
+            fast: "gpt-4o-mini".to_string(),
+            balanced: "gpt-4o".to_string(),
+            capable: "o1".to_string(),
         }
     }
 }
@@ -48,7 +61,14 @@ pub struct RoutingRequest {
 
 impl ModelRouter {
     pub fn new(config: RouterConfig) -> Self {
-        Self { config }
+        Self { config, models: ModelsConfig::default() }
+    }
+    /// TASK-018: new with explicit ModelsConfig (ModelRouter::new reads ModelsConfig)
+    pub fn new_with_models(config: RouterConfig, models: ModelsConfig) -> Self {
+        Self { config, models }
+    }
+    pub fn from_models(models: ModelsConfig) -> Self {
+        Self { config: RouterConfig::default(), models }
     }
 
     /// Select the best model for a given request
@@ -85,13 +105,13 @@ impl ModelRouter {
             + semantic * self.config.semantic_weight
             + scope * self.config.scope_weight;
 
-        // Map score to tier
+        // Map score to tier — models from ModelsConfig (TASK-018)
         let (tier, model) = if final_score < self.config.fast_threshold {
-            ("fast".to_string(), self.config.fast_model.clone())
+            ("fast".to_string(), self.models.fast.clone())
         } else if final_score > self.config.capable_threshold {
-            ("capable".to_string(), self.config.capable_model.clone())
+            ("capable".to_string(), self.models.capable.clone())
         } else {
-            ("balanced".to_string(), self.config.balanced_model.clone())
+            ("balanced".to_string(), self.models.balanced.clone())
         };
 
         let reasoning = format!(
@@ -211,10 +231,10 @@ impl coderun_core::IModelGateway for ModelRouter {
 
     fn tier_to_model(&self, tier: &str) -> String {
         match tier {
-            "fast" => self.config.fast_model.clone(),
-            "balanced" => self.config.balanced_model.clone(),
-            "capable" => self.config.capable_model.clone(),
-            _ => self.config.balanced_model.clone(),
+            "fast" => self.models.fast.clone(),
+            "balanced" => self.models.balanced.clone(),
+            "capable" => self.models.capable.clone(),
+            _ => self.models.balanced.clone(),
         }
     }
 }

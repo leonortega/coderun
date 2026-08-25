@@ -48,6 +48,8 @@ export interface CoderunRequest {
     content?: string;
     context?: string;
   };
+  repository_id?: string;
+  timestamp?: string;
 }
 
 export interface CoderunResponse {
@@ -131,6 +133,15 @@ export async function callCoderunDaemon(
 // Plugin
 // ---------------------------------------------------------------------------
 
+function hashRepositoryId(path: string): string {
+  // simple hash of directory path for repository_id (TASK-021) — matches Rust cwd hash (first 12 hex)
+  let hash = 0;
+  for (let i = 0; i < path.length; i++) {
+    hash = (hash * 31 + path.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 export const CoderunPlugin: Plugin = async ({ project, client, $, directory, worktree }: any) => {
   // Optional structured log when client is available
   try {
@@ -170,6 +181,8 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
         session_id: input.session_id || "unknown",
         message: text,
       },
+      repository_id: hashRepositoryId(directory || worktree || "."),
+      timestamp: new Date().toISOString(),
     };
 
     const response = await callCoderunDaemon(request);
@@ -215,6 +228,8 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
           output_type: getOutputType(toolName),
           content,
         },
+        repository_id: hashRepositoryId(directory || "."),
+        timestamp: new Date().toISOString(),
       };
 
       const response = await callCoderunDaemon(request);

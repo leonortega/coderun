@@ -1,19 +1,19 @@
 # Coderun — AI Runtime
 
-An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via UDS/MessagePack (HTTP fallback), enriching them with repository context, knowledge, skills, and model routing decisions. v0.6.0 promotes DBOS to **required** durability (SQLite+Litestream native async), introduces `chat.message` primary hook + `message.updated` compat shim, and adds `--features extended-languages` (4 default + 4 on flag).
+An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via UDS/MessagePack (HTTP fallback), enriching them with repository context, knowledge, skills, and model routing decisions. **v1** returns to the agreed local-runtime scope: DBOS/workflows move to `future/workflow` (opt-in via `--features workflow`), event persistence is in-memory only (`tracing`+`metrics`+`correlation_id` canonical), and default languages are `rust/typescript/javascript/python` (`go/java/c/cpp` behind `--features extended-languages`).
 
 ## Features
 
 - **Context Engine** — Assembles contextual information from your codebase for better AI responses (`BuildContext` — `skills → docs → code` + `FROZEN PREFIX END` + dedup, requires 30s budget, fail-open)
 - **Repository Intelligence** — Incremental indexing: tree-sitter AST (4 default, +4 behind `--features extended-languages`: `go,java,c,cpp`) + ripgrep + tantivy BM25 + `sg-core` ast-grep structural + dependency graph (`graph.rs`)
 - **Knowledge Hub** — Unified surface: SQLite+tantivy+FlashRank (TF-IDF fallback on model miss) + engram (HTTP 2s timeout, fail-open to `memory`) + BM25→rerank adaptive `K 5-20`
-- **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io) — single canonical `SkillEngine::from_skills` scorer (v0.6.0 duplicate collapse)
-- **Model Router** — Heuristic complexity scoring (structural/semantic/scope `0.3/0.4/0.3`) + LiteLLM gateway with `capable→balanced→fast` fallback + `cost_usd`
+- **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io) — canonical `Skill {priority,specificity}` + `max_skills_per_request=5` + conflict detection
+- **Model Router** — Heuristic complexity scoring (structural/semantic/scope `0.3/0.4/0.3`) + LiteLLM gateway with `capable→balanced→fast` fallback + `cost_usd` (`[models]` separate from `[routing]`)
 - **Execution Optimizer** — RTK adoption (`RtkAdapter` if binary present) + built-in compressors + tee-on-failure `~/.coderun/logs/tool-failures/` + `tiktoken-rs` honest savings reporting
-- **Event Bus** — Async-only observability (`ContextBuilt`…`MemorySaved`) → SQLite `004_events.sql` for `preview`/`replay` (never on hot path)
-- **DBOS Workflows (v0.6.0 required)** — Durable workflows via DBOS Transact **required** single-node SQLite+Litestream native async (`async_trait IWorkflowEngine`, `dbos-transact` `governedWorkflow`, `005_audits.sql`, `HMAC` via `hmac` crate)
+- **Event Bus** — Async-only in-memory observability (`ContextBuilt`…`MemorySaved`) + `tracing`/`metrics`/`correlation_id` — no SQLite persistence in v1
+- **Workflows** — Not in v1 (preserved in `future/workflow/` for opt-in only)
 - **Metrics** — Prometheus exposition `GET /metrics` (`coderun_build_context_duration_seconds` histogram `0.01-30s`, `coderun_requests_total`, `coderun_fail_open_total`), Grafana `docs/dashboards/coderun.json`
-- **Fail-Open Design** — Always returns a response on hot path, never blocks the agent (30s hard timeout → `OriginalPassthrough`); DBOS path fail-closed when `workflow.enabled=true`
+- **Fail-Open Design** — Always returns a response on hot path, never blocks the agent (30s hard timeout → `OriginalPassthrough`)
 
 ## Quick Start
 
@@ -56,14 +56,14 @@ cargo build -p coderun-core
 ## Test
 
 ```bash
-# Run all tests (193 tests, v0.6.0; 166 in v0.5.0)
+# Run all tests (v1: ~190 tests; workflow in future/workflow --features workflow)
 cargo test
 cargo test --features extended-languages -p coderun-repo-intel  # +4 langs (go,java,c,cpp)
 
 # Run tests for a specific crate
-cargo test -p coderun-core       # secrets HMAC (LazyLock), config v0.6.0 defaults, async Noop
-cargo test -p coderun-workflow   # DBOS native async + HMAC core re-export
+cargo test -p coderun-core       # secrets HMAC (LazyLock), config v1 defaults
 cargo test -p coderun-repo-intel # parser 4 default + extended-languages gate
+# future/workflow: cargo test -p coderun-workflow --manifest-path future/workflow/Cargo.toml
 
 # Run with output
 cargo test -- --nocapture
@@ -83,23 +83,22 @@ cargo audit
 
 ```
 coderun/
-├── Cargo.toml                    # Workspace root (0.6.0, 12 crates, async-trait + hmac)
+├── Cargo.toml                    # Workspace root (v1, 10+1 crates; workflow in future/workflow --features workflow)
 ├── crates/
-│   ├── coderun-core/             # Shared types, errors, config (WorkflowConfig enabled:true, HMAC LazyLock) (~32 tests)
-│   ├── coderun-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics + /workflow/* (RwLock, rate-limit HMAC via core)
-│   ├── coderun-cli/              # CLI — init/index/serve/preview/replay/workflow/doctor (12 cmds + workflow async)
+│   ├── coderun-core/             # Shared types, errors, config (WorkflowConfig enabled:false, HMAC LazyLock) (~32 tests)
+│   ├── coderun-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics (workflow routes behind --features workflow)
+│   ├── coderun-cli/              # CLI — init/index/serve/preview/replay/doctor (workflow behind --features workflow, replay legacy)
 │   ├── coderun-repo-intel/       # Repository Intelligence — tree-sitter 4+4 extended-languages + ripgrep + tantivy + graph + watcher + lsp (21 tests)
 │   ├── coderun-knowledge/        # Knowledge Hub — SQLite+tantivy→rerank→engram deterministic reads (16 tests, collapsed scorer)
 │   ├── coderun-skills/           # Skill Engine — MD/TOML/YAML parsing, tag matching from_skills (8 tests)
 │   ├── coderun-context/          # Context Engine — BuildContext (tiktoken, frozen-prefix, dedup, reversible) (11 tests)
 │   ├── coderun-router/           # Model Router — heuristic + LiteLLM fallback chain + cost (11 tests)
 │   ├── coderun-optimizer/        # Execution Optimizer — RTK adapter + compressors (11 tests)
-│   ├── coderun-events/           # Event Bus — broadcast + ring→SQLite 004_events
-│   ├── coderun-storage/          # Local Storage — SQLite WAL + tantivy + audits 005_audits (22 tests)
-│   └── coderun-workflow/         # DBOS Workflows — native async DBOSWorkflowEngine + HMAC core (8 tests)
-├── workflow/dbos/                # DBOS Transact sidecar (Node/TS, SQLite+Litestream, governed.ts native)
+│   ├── coderun-events/           # Event Bus — in-memory broadcast + tracing/correlation (SQLite 004_events legacy, future/workflow only)
+│   ├── coderun-storage/          # Local Storage — SQLite WAL + tantivy + audits 005_audits (22 tests, 004/005 legacy for future/workflow)
+├── future/workflow/              # durable workflows preserved out of hot path (DBOS Transact sidecar, governed.ts) — opt-in CODERUN_WORKFLOW_ENABLED=true
 ├── .coderun/
-│   ├── config.toml               # Default configuration (includes [workflow] enabled:true)
+│   ├── config.toml               # Default configuration (v1: [workflow] enabled:false, languages 4-default)
 │   └── skills/                   # Skill definitions
 ├── adapters/
 │   ├── cursor/extension.ts       # Cursor Tier 1
@@ -154,14 +153,13 @@ Start the daemon server (UDS primary on `/tmp/coderun.sock` + HTTP fallback on `
 coderun serve
 coderun serve --socket /tmp/coderun.sock --port 9527
 
-# The daemon will:
-# 1. Load configuration (incl. [workflow] for DBOS)
-# 2. Initialize logging + metrics (`/metrics` exposition)
-# 3. Open database (migrations 001-005, WAL) + tantivy (MmapDirectory)
+# The daemon will (v1: no DBOS/workflow — future/workflow only):
+# 1. Load configuration (v1: no [workflow] required)
+# 2. Initialize logging + metrics (`/metrics` exposition — token savings, retrieval recall)
+# 3. Open database (migrations 001-003, WAL) + tantivy (MmapDirectory)
 # 4. Start background indexing + git watcher
-# 5. Spawn DBOS sidecar if workflow.enabled=true (HTTP :3001 health probe)
-# 6. Start UDS+MessagePack primary and HTTP fallback
-# 7. Wait for shutdown signal (Ctrl+C)
+# 5. Start UDS+MessagePack primary and HTTP fallback (no sidecar)
+# 6. Wait for shutdown signal (Ctrl+C)
 ```
 
 ### `coderun preview <prompt>`
@@ -180,24 +178,13 @@ Shows:
 - Token budget `by_source` (`behavioral_skills 20% / docs 15% / code 55%`)
 - Model routing decision + fallback chain `capable→balanced→fast`
 
-### `coderun replay <correlation_id>`
+### `coderun replay` — removed in v1
 
-Replay persisted events from SQLite `004_events.sql`.
+Event replay and SQLite persistence (`004_events.sql`) removed from hot path (TASK-002). v1 keeps `tracing` + `metrics` + `correlation_id` (in-memory `EventBus`), future/workflow preserves replay.
 
-```bash
-coderun replay req_abc123
-```
+### `coderun workflow` — future only
 
-### `coderun workflow ...` (v0.6.0 — DBOS required)
-
-Durable workflows are **required** (SQLite+Litestream native async). Use `--require-approval` for human gate.
-
-```bash
-coderun workflow start "refactor auth" --require-approval  # → wf_* (fail-closed if DBOS down)
-coderun workflow status wf_123
-coderun workflow approve wf_123   # POST /workflow/:id/approve + local DB update
-coderun workflow list
-```
+Durable workflows are **NOT part of v1** (preserved in `future/workflow/`, opt-in `--features workflow`). v1 `coderun serve`/`doctor` work without DBOS (TASK-001).
 
 ### `coderun status`
 
@@ -281,10 +268,10 @@ coderun doctor
 
 Output:
 ```
-Coderun Doctor (v0.6.0 — 8 probes, DBOS required)
+Coderun Doctor (v1 — 8 probes, DBOS future only)
 ═══════════════════════════════════════
 
-SQLite:          ✓ OK (WAL, migrations 001-005)
+SQLite:          ✓ OK (WAL, migrations 001-003)
 Config:          ✓ OK (4 langs + extended-languages flag noted)
 Skills directory: ✓ OK
 Socket path:     ✓ OK (/tmp/coderun.sock)
@@ -338,9 +325,7 @@ Configuration is loaded in order of priority (highest wins):
 | `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
 | `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
 | `CODERUN_ENGRAM_ENDPOINT` | knowledge.memory_endpoint | http://localhost:9090 |
-| `CODERUN_DBOS_ENDPOINT` | workflow.dbos_endpoint | http://localhost:3001 |
-| `CODERUN_DBOS_SECRET` | workflow.dbos_shared_secret | `your-secret` default (local sidecar); only set a real secret when connecting to DBOS Cloud/Conductor |
-| `CODERUN_WORKFLOW_ENABLED` | workflow.enabled | **true** (since v0.6.0, was false) |
+<!-- workflow env vars removed from v1 — see future/workflow/README.md (opt-in CODERUN_WORKFLOW_ENABLED=true) -->
 
 ## Skills
 
@@ -530,7 +515,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 
 | Component | Status | Implementation |
 |-----------|--------|----------------|
-| Config System | ✅ Complete | TOML + env (`CODERUN_DBOS_*`), `[workflow]` `enabled:true` default, `index.languages` 4 default + `extended-languages` warn, validation |
+| Config System | ✅ Complete | TOML + env (`CODERUN_*` v1), `[workflow]` future only (opt-in `CODERUN_WORKFLOW_ENABLED=true`), `index.languages` 4 default + `extended-languages` warn, validation |
 | Core Types | ✅ Complete | IPC (MessagePack), `IWorkflowEngine` **async** `async_trait`, HMAC `hmac` crate `LazyLock<Regex>` |
 | Event Bus | ✅ Complete | `broadcast` + ring→SQLite `004_events.sql` for `replay` |
 | Storage | ✅ Complete | SQLite WAL + tantivy BM25 + `005_audits.sql` (`audits`+`workflows`) + `cost_usd` |

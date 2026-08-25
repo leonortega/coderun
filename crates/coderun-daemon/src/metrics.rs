@@ -37,12 +37,16 @@ impl Histogram {
     }
 }
 
+// TASK-022: metrics should answer How fast? How many tokens saved? How much context? Which model? How often fail-open? How good is retrieval?
 #[derive(Default)]
 pub struct Metrics {
     requests_total: Mutex<HashMap<String, usize>>,
     build_duration: Mutex<Histogram>,
     fail_open_total: Mutex<usize>,
     index_files: Mutex<usize>,
+    tokens_saved: Mutex<usize>,
+    context_tokens: Mutex<Histogram>,
+    retrieval_recall: Mutex<f64>,
 }
 
 impl Metrics {
@@ -52,6 +56,9 @@ impl Metrics {
             build_duration: Mutex::new(Histogram::new(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0])),
             fail_open_total: Mutex::new(0),
             index_files: Mutex::new(0),
+            tokens_saved: Mutex::new(0),
+            context_tokens: Mutex::new(Histogram::new(vec![100.0, 1000.0, 5000.0, 12000.0, 30000.0])),
+            retrieval_recall: Mutex::new(0.0),
         }
     }
 
@@ -72,6 +79,17 @@ impl Metrics {
         if let Ok(mut g) = self.index_files.lock() { *g = n; }
     }
 
+    // TASK-022: token savings (optimizer), context size, retrieval quality
+    pub fn add_tokens_saved(&self, n: usize) {
+        if let Ok(mut c) = self.tokens_saved.lock() { *c += n; }
+    }
+    pub fn observe_context_tokens(&self, n: usize) {
+        if let Ok(mut h) = self.context_tokens.lock() { h.observe(n as f64); }
+    }
+    pub fn set_retrieval_recall(&self, recall: f64) {
+        if let Ok(mut r) = self.retrieval_recall.lock() { *r = recall; }
+    }
+
     pub fn exposition(&self) -> String {
         let mut out = String::new();
         out.push_str("# HELP coderun_requests_total Total requests by hook+tier\n# TYPE coderun_requests_total counter\n");
@@ -89,7 +107,15 @@ impl Metrics {
         if let Ok(g) = self.index_files.lock() {
             out.push_str(&format!("# HELP coderun_index_files Indexed files\n# TYPE coderun_index_files gauge\ncoderun_index_files {}\n", *g));
         }
-        // Tier selection histogram is derived from requests_total; keep simple for v0.4.0
+        if let Ok(c) = self.tokens_saved.lock() {
+            out.push_str(&format!("# HELP coderun_tokens_saved_total Tokens saved by optimizer\n# TYPE coderun_tokens_saved_total counter\ncoderun_tokens_saved_total {}\n", *c));
+        }
+        if let Ok(h) = self.context_tokens.lock() {
+            out.push_str(&h.exposition("coderun_context_tokens", "Context tokens per request"));
+        }
+        if let Ok(r) = self.retrieval_recall.lock() {
+            out.push_str(&format!("# HELP coderun_retrieval_recall Retrieval recall@5\n# TYPE coderun_retrieval_recall gauge\ncoderun_retrieval_recall {}\n", *r));
+        }
         out
     }
 }

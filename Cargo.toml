@@ -12,8 +12,9 @@ members = [
     "crates/coderun-optimizer",
     "crates/coderun-events",
     "crates/coderun-storage",
-    "crates/coderun-workflow",
+    "crates/coderun-bench",
 ]
+exclude = ["crates/coderun-workflow", "future/workflow", "workflow/dbos"]
 
 [workspace.package]
 version = "0.6.0"
@@ -79,4 +80,4 @@ coderun-router = { path = "crates/coderun-router" }
 coderun-optimizer = { path = "crates/coderun-optimizer" }
 coderun-daemon = { path = "crates/coderun-daemon" }
 coderun-cli = { path = "crates/coderun-cli" }
-coderun-workflow = { path = "crates/coderun-workflow" }
+# future/workflow — opt-in only: coderun-workflow = { path = "crates/coderun-workflow" }

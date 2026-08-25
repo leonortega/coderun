@@ -52,12 +52,6 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
-
-    /// Replay what BuildContext did produce for a past correlation ID
-    Replay {
-        /// Correlation ID to replay
-        correlation_id: String,
-    },
     
     /// Show daemon status and metrics
     Status,
@@ -74,7 +68,8 @@ enum Commands {
         action: ConfigAction,
     },
 
-    /// Durable workflows (DBOS, v0.4.0)
+    /// Durable workflows (DBOS) — requires --features workflow (future/workflow, NOT v1)
+    #[cfg(feature = "workflow")]
     Workflow {
         #[command(subcommand)]
         action: WorkflowAction,
@@ -106,6 +101,7 @@ enum ConfigAction {
     },
 }
 
+#[cfg(feature = "workflow")]
 #[derive(Subcommand)]
 enum WorkflowAction {
     /// Start a durable workflow
@@ -140,10 +136,10 @@ fn main() {
         Commands::Init { wizard } => cmd_init(wizard),
         Commands::Index { watch } => cmd_index(watch),
         Commands::Preview { prompt, session, no_cache } => cmd_preview(&prompt, &session, no_cache),
-        Commands::Replay { correlation_id } => cmd_replay(&correlation_id),
         Commands::Status => cmd_status(),
         Commands::Skills { action } => cmd_skills(action),
         Commands::Config { action } => cmd_config(action),
+        #[cfg(feature = "workflow")]
         Commands::Workflow { action } => cmd_workflow(action),
         Commands::Doctor => cmd_doctor(),
     };
@@ -335,52 +331,6 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
     Ok(())
 }
 
-fn cmd_replay(correlation_id: &str) -> Result<(), String> {
-    println!("Replaying events for correlation_id: {}", correlation_id);
-    println!("═══════════════════════════════════════");
-    println!();
-    // In v0.3.0, events are persisted to SQLite `events` table (004_events.sql) and in-memory buffer.
-    // CLI replays by opening the database and querying events table.
-    let db_path = get_db_path();
-    if !db_path.exists() {
-        println!("Database not found at {}. Run `coderun init`.", db_path.display());
-        return Ok(());
-    }
-    let db = coderun_storage::Database::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
-    // Query events table directly via rusqlite (storage exposes events via raw query)
-    // Fallback to in-memory EventBus replay if DB has no events yet.
-    match query_events(&db, correlation_id) {
-        Ok(events) if !events.is_empty() => {
-            println!("Found {} events for {}:", events.len(), correlation_id);
-            for (i, (event_type, payload)) in events.iter().enumerate() {
-                println!("  {}. [{}] {}", i+1, event_type, payload.chars().take(120).collect::<String>());
-            }
-        }
-        Ok(_) => {
-            println!("No persisted events for {} in SQLite.", correlation_id);
-            println!("Note: events are persisted after daemon has handled requests; in-memory buffer is lost on restart.");
-            println!("Try `coderun preview \"your prompt\"` to generate a new ContextBuilt event, then replay its correlation ID from daemon logs.");
-        }
-        Err(e) => {
-            println!("Failed to query events: {}", e);
-        }
-    }
-    println!();
-    println!("(For live replay, query daemon's EventBus via UDS/HTTP — persistence to SQLite lands in 004_events.sql)");
-    Ok(())
-}
-
-fn query_events(_db: &coderun_storage::Database, correlation_id: &str) -> Result<Vec<(String,String)>, String> {
-    // Use the Database's connection via a helper — we need raw access, so we open a second connection to query.
-    let path = get_db_path();
-    let conn = rusqlite::Connection::open(&path).map_err(|e| format!("Failed to open DB for events: {}", e))?;
-    let mut stmt = conn.prepare("SELECT event_type, payload FROM events WHERE correlation_id = ?1 ORDER BY id").map_err(|e| format!("prepare: {e}"))?;
-    let rows = stmt.query_map([correlation_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?))).map_err(|e| format!("query: {e}"))?;
-    let mut out = Vec::new();
-    for r in rows { out.push(r.map_err(|e| format!("row: {e}"))?); }
-    Ok(out)
-}
-
 fn cmd_status() -> Result<(), String> {
     println!("Coderun Status");
     println!("═══════════════════════════════════════");
@@ -546,10 +496,11 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "workflow")]
 fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = Config::load(&project_root).unwrap_or_default();
-    // v0.6.0: IWorkflowEngine is async — create single-thread runtime for CLI sync context
+    // v1: workflow opt-in only — preserved in future/workflow
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     let engine: Box<dyn coderun_core::traits::IWorkflowEngine> = if config.workflow.enabled && config.workflow.engine == "dbos" {
         Box::new(coderun_workflow::dbos::DBOSWorkflowEngine::new(config.workflow.dbos_endpoint.clone(), config.workflow.dbos_shared_secret.clone()))
@@ -630,20 +581,20 @@ fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
 
 #[allow(clippy::cmp_owned)]
 fn cmd_doctor() -> Result<(), String> {
-    println!("Coderun Doctor (v0.4.0 — 8 probes)");
+    println!("Coderun Doctor (v1 — 8 probes, workflow opt-in via --features workflow)");
     println!("═══════════════════════════════════════");
     println!();
     
     let mut all_ok = true;
     
-    // Check SQLite (critical)
+    // Check SQLite (critical) — v1: migrations 001-003 only (004/005 moved to future/workflow)
     print!("SQLite:          ");
     let db_path = get_db_path();
     match coderun_storage::Database::open(&db_path) {
         Ok(db) => {
             // Check migrations
             match db.get_file_count() {
-                Ok(_) => println!("✓ OK (WAL, migrations 001-005)"),
+                Ok(_) => println!("✓ OK (WAL, migrations 001-003, v1)"),
                 Err(e) => { println!("✗ FAILED: {}", e); all_ok = false; }
             }
         },
@@ -763,25 +714,10 @@ fn cmd_doctor() -> Result<(), String> {
         if redacted.contains("[REDACTED]") { println!("✓ OK (redaction before outbound calls)"); } else { println!("⚠ Probe failed"); }
     }
 
-    // Check workflow / DBOS
+    // Workflow — v1 NOT part of hot path (future/workflow only)
     print!("Workflow/DBOS:   ");
     {
-        let cfg = Config::load(&project_root).unwrap_or_default();
-        if !cfg.workflow.enabled {
-            println!("○ Disabled (set workflow.enabled=true for DBOS durable workflows)");
-        } else if cfg.workflow.engine == "dbos" {
-            // Probe /health
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
-            let reachable = if let Some(rt) = rt {
-                rt.block_on(async {
-                    tokio::time::timeout(std::time::Duration::from_millis(800), reqwest::Client::new().get(format!("{}/health", cfg.workflow.dbos_endpoint)).send()).await
-                        .map(|r| r.map(|resp| resp.status().is_success()).unwrap_or(false)).unwrap_or(false)
-                })
-            } else { false };
-            if reachable { println!("✓ OK (DBOS at {})", cfg.workflow.dbos_endpoint); } else { println!("⚠ DBOS not reachable at {} (hint: npx dbos start or `workflow/dbos`)", cfg.workflow.dbos_endpoint); }
-        } else {
-            println!("○ Engine={} (noop)", cfg.workflow.engine);
-        }
+        println!("○ v1 disabled — preserved in future/workflow/ (opt-in --features workflow)");
     }
 
     // Check metrics endpoint
@@ -793,8 +729,9 @@ fn cmd_doctor() -> Result<(), String> {
     println!();
     
     if all_ok {
-        println!("✓ All critical checks passed (v0.4.0)");
-        println!("  Try: `coderun preview \"test\"`, `coderun replay <id>`, `coderun workflow start \"task\"`");
+        println!("✓ All critical checks passed (v1 — DBOS/workflow disabled by default)");
+        println!("  Try: `coderun preview \"test\"`, `coderun doctor`, `coderun serve` (no DBOS required)");
+        println!("  Opt-in workflow: cargo build --features workflow && coderun --features workflow workflow start \"task\"");
     } else {
         println!("⚠ Some checks failed. Run 'coderun init' to initialize.");
     }

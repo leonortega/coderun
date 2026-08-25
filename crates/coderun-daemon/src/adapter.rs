@@ -493,6 +493,8 @@ mod tests {
                 message: "test message".to_string(),
                 context_hints: None,
             },
+            repository_id: String::new(),
+            timestamp: String::new(),
         };
 
         assert_eq!(request.hook_type, HookType::PreGeneration);
@@ -506,6 +508,8 @@ mod tests {
                 content: "file content".to_string(),
                 context: None,
             },
+            repository_id: String::new(),
+            timestamp: String::new(),
         };
 
         assert_eq!(request2.hook_type, HookType::PreToolCall);
@@ -524,7 +528,8 @@ mod tests {
                     language: Some("rust".to_string()),
                 }),
             },
-        };
+            repository_id: String::new(),
+            timestamp: String::new(),        };
 
         let bytes = rmp_serde::to_vec(&request).unwrap();
         assert!(!bytes.is_empty());
@@ -592,7 +597,8 @@ mod tests {
                     message: "test".to_string(),
                     context_hints: None,
                 },
-            };
+            repository_id: String::new(),
+            timestamp: String::new(),            };
             let bytes = rmp_serde::to_vec(&request).unwrap();
             let decoded: AgentRequest = rmp_serde::from_slice(&bytes).unwrap();
             assert_eq!(decoded.hook_type, *ht);
@@ -652,7 +658,8 @@ mod tests {
                 message: "hello world".to_string(),
                 context_hints: None,
             },
-        };
+            repository_id: String::new(),
+            timestamp: String::new(),        };
         let resp = handle_request(req, engine, opt, event_bus).await;
         // Should succeed or at worst fail-open, never be OriginalPassthrough with empty reason unless timeout
         assert!(resp.latency_ms < 5000);

@@ -18,9 +18,9 @@ pub struct Config {
     pub context: ContextConfig,
     pub model: ModelConfig,
     pub routing: RoutingConfig,
+    pub models: ModelsConfig,
     pub litellm: LiteLlmConfig,
     pub rtk: RtkConfig,
-    pub workflow: WorkflowConfig,
     pub logging: LoggingConfig,
 }
 
@@ -87,9 +87,15 @@ pub struct RoutingConfig {
     pub scope_weight: f64,
     pub fast_threshold: f64,
     pub capable_threshold: f64,
-    pub fast_model: String,
-    pub balanced_model: String,
-    pub capable_model: String,
+    // TASK-018: model names moved to [models] — no duplication here (ModelsConfig is sole source)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelsConfig {
+    pub fast: String,
+    pub balanced: String,
+    pub capable: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,23 +112,6 @@ pub struct RtkConfig {
     pub enabled: bool,
     pub max_output_tokens: usize,
     pub compression_level: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WorkflowConfig {
-    /// Enable DBOS durable workflows
-    pub enabled: bool,
-    /// Engine: "dbos" | "noop"
-    pub engine: String,
-    /// DBOS sidecar HTTP endpoint
-    pub dbos_endpoint: String,
-    /// Shared HMAC secret for DBOS→daemon signing
-    pub dbos_shared_secret: Option<String>,
-    /// Auto-governance for tier=capable tasks
-    pub auto_governance: bool,
-    /// Tiers that require approval when governance is on
-    pub require_approval_tiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,9 +214,17 @@ impl Default for RoutingConfig {
             scope_weight: 0.3,
             fast_threshold: 0.3,
             capable_threshold: 0.7,
-            fast_model: "gpt-4o-mini".to_string(),
-            balanced_model: "gpt-4o".to_string(),
-            capable_model: "o1".to_string(),
+        }
+    }
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        // TASK-018: separate model config from routing logic — [models] defines actual models, routing chooses tier
+        Self {
+            fast: "gpt-4o-mini".to_string(),
+            balanced: "gpt-4o".to_string(),
+            capable: "o1".to_string(),
         }
     }
 }
@@ -248,20 +245,6 @@ impl Default for RtkConfig {
             enabled: true,
             max_output_tokens: 8000,
             compression_level: "balanced".to_string(),
-        }
-    }
-}
-
-impl Default for WorkflowConfig {
-    fn default() -> Self {
-        // v0.6.0: DBOS required, enabled true default (SQLite + Litestream)
-        Self {
-            enabled: true,
-            engine: "dbos".to_string(),
-            dbos_endpoint: "http://localhost:3001".to_string(),
-            dbos_shared_secret: None,
-            auto_governance: false,
-            require_approval_tiers: vec!["capable".to_string()],
         }
     }
 }
@@ -343,9 +326,9 @@ impl Config {
         self.context = other.context;
         self.model = other.model;
         self.routing = other.routing;
+        self.models = other.models;
         self.litellm = other.litellm;
         self.rtk = other.rtk;
-        self.workflow = other.workflow;
         self.logging = other.logging;
     }
 
@@ -373,15 +356,6 @@ impl Config {
         }
         if let Ok(val) = std::env::var("CODERUN_ENGRAM_ENDPOINT") {
             self.knowledge.memory_endpoint = val;
-        }
-        if let Ok(val) = std::env::var("CODERUN_DBOS_ENDPOINT") {
-            self.workflow.dbos_endpoint = val;
-        }
-        if let Ok(val) = std::env::var("CODERUN_DBOS_SECRET") {
-            self.workflow.dbos_shared_secret = Some(val);
-        }
-        if let Ok(val) = std::env::var("CODERUN_WORKFLOW_ENABLED") {
-            self.workflow.enabled = val == "true" || val == "1";
         }
     }
 
@@ -498,20 +472,7 @@ impl Config {
             .into());
         }
 
-        // Workflow — v0.6.0 required
-        let valid_engines = ["noop", "dbos"];
-        if !valid_engines.contains(&self.workflow.engine.as_str()) {
-            return Err(ConfigError::InvalidValue {
-                field: "workflow.engine".to_string(),
-                message: format!("must be one of: {}", valid_engines.join(", ")),
-            }
-            .into());
-        }
-        // Warn if enabled but secret missing (HMAC required) — not fatal for dev; token only needed for cloud
-        if self.workflow.enabled && self.workflow.engine == "dbos" && self.workflow.dbos_shared_secret.is_none() {
-            tracing::warn!("workflow.enabled=true but dbos_shared_secret missing — local default 'your-secret' is fine; set CODERUN_DBOS_SECRET / DBOS_CONDUCTOR_KEY only when connecting to DBOS Cloud/Conductor");
-        }
-        // Extended languages warning
+        // Extended languages warning (v1: only rust/ts/js/py default)
         let extended = ["go", "java", "c", "cpp"];
         for lang in &self.index.languages {
             if extended.contains(&lang.as_str()) {
@@ -597,9 +558,11 @@ semantic_weight = 0.3
 scope_weight = 0.2
 fast_threshold = 0.2
 capable_threshold = 0.8
-fast_model = "gpt-4o-mini"
-balanced_model = "gpt-4o"
-capable_model = "o1"
+
+[models]
+fast = "gpt-4o-mini"
+balanced = "gpt-4o"
+capable = "o1"
 
 [litellm]
 endpoint = "http://custom:4000"
@@ -741,16 +704,6 @@ socket_path = "/test/sock"
     }
 
     #[test]
-    fn test_v060_defaults_workflow_required() {
-        let config = Config::default();
-        // DBOS required since v0.6.0
-        assert!(config.workflow.enabled, "workflow.enabled should be true since v0.6.0");
-        assert_eq!(config.workflow.engine, "dbos");
-        assert_eq!(config.workflow.dbos_endpoint, "http://localhost:3001");
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
     fn test_v060_defaults_index_four_languages() {
         let config = Config::default();
         assert_eq!(config.index.languages.len(), 4);
@@ -760,63 +713,6 @@ socket_path = "/test/sock"
         with_extended.index.languages.push("go".to_string());
         with_extended.index.languages.push("java".to_string());
         assert!(with_extended.validate().is_ok(), "extended languages should warn, not fail");
-    }
-
-    #[test]
-    fn test_v060_toml_roundtrip_workflow() {
-        let toml = r#"
-[workflow]
-enabled = true
-engine = "dbos"
-dbos_endpoint = "http://localhost:3001"
-auto_governance = true
-require_approval_tiers = ["capable", "balanced"]
-
-[index]
-path = "/tmp/index"
-languages = ["rust", "python", "go"]
-"#;
-        let config = Config::from_toml(toml).unwrap();
-        assert!(config.workflow.enabled);
-        assert_eq!(config.workflow.engine, "dbos");
-        assert!(config.workflow.auto_governance);
-        assert_eq!(config.index.languages.len(), 3);
-        assert!(config.validate().is_ok());
-        // Round-trip preserves
-        let serialized = config.to_toml().unwrap();
-        let reloaded = Config::from_toml(&serialized).unwrap();
-        assert_eq!(reloaded.workflow.engine, "dbos");
-        assert_eq!(reloaded.index.languages, config.index.languages);
-    }
-
-    #[test]
-    fn test_v060_validation_invalid_workflow_engine() {
-        let mut config = Config::default();
-        config.workflow.engine = "temporal".to_string();
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("workflow.engine"));
-    }
-
-    #[test]
-    fn test_v060_env_overrides_dbos() {
-        let orig_endpoint = std::env::var("CODERUN_DBOS_ENDPOINT").ok();
-        let orig_secret = std::env::var("CODERUN_DBOS_SECRET").ok();
-        let orig_enabled = std::env::var("CODERUN_WORKFLOW_ENABLED").ok();
-
-        std::env::set_var("CODERUN_DBOS_ENDPOINT", "http://example:9999");
-        std::env::set_var("CODERUN_DBOS_SECRET", "test-secret-xyz");
-        std::env::set_var("CODERUN_WORKFLOW_ENABLED", "false");
-
-        let mut config = Config::default();
-        config.apply_env_overrides();
-        assert_eq!(config.workflow.dbos_endpoint, "http://example:9999");
-        assert_eq!(config.workflow.dbos_shared_secret, Some("test-secret-xyz".to_string()));
-        assert!(!config.workflow.enabled);
-
-        // Restore
-        match orig_endpoint { Some(v) => std::env::set_var("CODERUN_DBOS_ENDPOINT", v), None => std::env::remove_var("CODERUN_DBOS_ENDPOINT") }
-        match orig_secret { Some(v) => std::env::set_var("CODERUN_DBOS_SECRET", v), None => std::env::remove_var("CODERUN_DBOS_SECRET") }
-        match orig_enabled { Some(v) => std::env::set_var("CODERUN_WORKFLOW_ENABLED", v), None => std::env::remove_var("CODERUN_WORKFLOW_ENABLED") }
     }
 
     #[test]

@@ -10,8 +10,11 @@ use tracing::{debug, info};
 
 // ── Configuration ───────────────────────────────────────────────────────
 
+/// KnowledgeConfig — rerank_enabled gates FlashRank (default false, BM25 primary), memory_enabled gates engram
+// TASK-013/014: simplify retrieval pipeline — Tantivy BM25 primary, FlashRank optional, engram optional enrichment
 #[derive(Debug, Clone)]
 pub struct KnowledgeConfig {
+    pub rerank_enabled: bool,
     pub memory_enabled: bool,
     pub memory_endpoint: String,
     pub max_knowledge_entries: usize,
@@ -20,6 +23,7 @@ pub struct KnowledgeConfig {
 impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
+            rerank_enabled: false, // TASK-013: BM25 primary, FlashRank opt-in (documented, bench compares)
             memory_enabled: true,
             memory_endpoint: "http://localhost:9090".to_string(),
             max_knowledge_entries: 10000,
@@ -140,9 +144,8 @@ impl KnowledgeHub {
         let adaptive_k = ((remaining_budget / avg_doc_tokens).clamp(5, 20)).min(records.len()).max(1);
         let to_rerank = records.len().min(adaptive_k.max(max_results));
 
-        // Step 3: in-process reranking via FlashRank (TF-IDF fallback when ort int8 not loaded)
-        // Convert to RerankCandidate, rerank, map back
-        let reranker = crate::rerank::Reranker::new(crate::rerank::RerankerConfig { enabled: true, ..Default::default() });
+        // Step 3: in-process reranking via FlashRank (TF-IDF fallback when ort int8 not loaded) — gated behind rerank_enabled (TASK-013, BM25 primary)
+        let reranker = crate::rerank::Reranker::new(crate::rerank::RerankerConfig { enabled: self.config.rerank_enabled, ..Default::default() });
         let candidates: Vec<crate::rerank::RerankCandidate> = records
             .into_iter()
             .take(to_rerank)
@@ -693,7 +696,7 @@ mod tests {
     fn test_engram_config_driven_timeout() {
         let db = test_db();
         let event_bus = EventBus::new();
-        let config = KnowledgeConfig { memory_enabled: true, memory_endpoint: "http://127.0.0.1:59999".to_string(), max_knowledge_entries: 10000 };
+        let config = KnowledgeConfig { rerank_enabled: false, memory_enabled: true, memory_endpoint: "http://127.0.0.1:59999".to_string(), max_knowledge_entries: 10000 };
         let hub = KnowledgeHub::new(db, event_bus, config);
         hub.memory_save("default", "timeout_test", "timeout value").unwrap();
         let hits = hub.try_engram_search("timeout_test", None, 5).unwrap();
@@ -714,8 +717,8 @@ mod tests {
         let mut hub = KnowledgeHub::new(db, crate::EventBus::new(), cfg);
         // Inject two skills
         hub.skills = vec![
-            coderun_skills::Skill { name: "Rust Expert".to_string(), tags: vec!["rust".into(), "cargo".into()], instructions: "rust".into(), examples: vec![], constraints: vec![], description: "".into() },
-            coderun_skills::Skill { name: "Python Expert".to_string(), tags: vec!["python".into()], instructions: "py".into(), examples: vec![], constraints: vec![], description: "".into() },
+            coderun_skills::Skill { name: "Rust Expert".to_string(), tags: vec!["rust".into(), "cargo".into()], instructions: "rust".into(), examples: vec![], constraints: vec![], description: "".into(), priority: 2, specificity: 0.4 },
+            coderun_skills::Skill { name: "Python Expert".to_string(), tags: vec!["python".into()], instructions: "py".into(), examples: vec![], constraints: vec![], description: "".into(), priority: 1, specificity: 0.2 },
         ];
         // Same input to both engines should yield identical top match
         let hub_matches = hub.match_skills("help with rust cargo", 5);

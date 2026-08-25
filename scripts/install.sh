@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Coderun v0.5.0 first-class installer (Unix: Linux/macOS, bash)
+# Coderun v1.0.0 (0.6.0) first-class installer (Unix: Linux/macOS, bash)
+# V1 scope: local AI runtime only (DBOS/workflows in future/workflow, opt-in CODERUN_WORKFLOW_ENABLED=true)
 # Tools are FIRST-CLASS (no optional except LSP, no Temporal) + uses prebuilt coderun (no compile/test).
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external]
 # Note: --skip-build is deprecated (build always skipped, prebuilt at target/release/coderun is used)
@@ -9,7 +10,7 @@ SKIP_BUILD=false; SKIP_EXTERNAL=false
 for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; esac; done
 info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
-info "Coderun v0.5.0 installer"
+info "Coderun v1.0.0 installer (0.6.0, DBOS/workflow future-only)"
 # Rust 1.85+ required for RTK (edition2024)
 NEED_RUST=false
 if ! command -v rustc >/dev/null 2>&1; then NEED_RUST=true
@@ -74,28 +75,19 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
    fi
    if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else pip3 install --user mkdocs mkdocs-material pymdown-extensions >/dev/null 2>&1; if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else warn "mkdocs install failed - try: pip3 install --user mkdocs mkdocs-material pymdown-extensions"; fi; fi
    rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "eslint/promptfoo check"
-    if [ -f "$ROOT/workflow/dbos/package.json" ]; then (cd "$ROOT/workflow/dbos" && npm install >/dev/null 2>&1 && npx tsc >/dev/null 2>&1 && npx tsc --noEmit >/dev/null 2>&1 && [ -f dist/main.js ] && ok "DBOS sidecar deps + built dist/main.js" || warn "DBOS build failed"); fi
+     # v1: DBOS sidecar NOT built — future/workflow only, gated behind CODERUN_WORKFLOW_ENABLED=true (TASK-001)
+     if [ "${CODERUN_WORKFLOW_ENABLED:-false}" = "true" ] && [ -f "$ROOT/future/workflow/dbos/package.json" ]; then (cd "$ROOT/future/workflow/dbos" && npm install >/dev/null 2>&1 && npx tsc >/dev/null 2>&1 && npx tsc --noEmit >/dev/null 2>&1 && [ -f dist/main.js ] && ok "future/workflow DBOS built" || warn "future DBOS build failed"); fi
+     # legacy workflow/dbos never built in v1 (TASK-001 purge)
+     if [ -f "$ROOT/workflow/dbos/package.json" ]; then warn "legacy workflow/dbos/package.json found — v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)"; fi
 fi
 
-# 0b. Ensure workflow config exists (local DBOS sidecar, no secret required)
+# 0b. v1: workflow NOT part of hot path — preserved in future/workflow/ (TASK-001)
+# No workflow config required for `coderun serve`/`doctor`. Future opt-in via --features workflow.
 CFG_PATH="$ROOT/.coderun/config.toml"
 mkdir -p "$(dirname "$CFG_PATH")"
-if [ ! -f "$CFG_PATH" ]; then
-  cat > "$CFG_PATH" <<EOF
-[workflow]
-enabled = true
-engine = "dbos"
-dbos_endpoint = "http://localhost:3001"
-EOF
-  ok "Created .coderun/config.toml with [workflow] dbos"
-else
-  if ! grep -q "^\[workflow\]" "$CFG_PATH" 2>/dev/null; then
-    printf '\n[workflow]\nenabled = true\nengine = "dbos"\ndbos_endpoint = "http://localhost:3001"\n' >> "$CFG_PATH"
-    ok "Appended [workflow] to .coderun/config.toml"
-  else
-    ok "workflow config at .coderun/config.toml"
-  fi
-  # Remove legacy dbos_shared_secret if present (local sidecar no longer uses CODERUN_DBOS_SECRET)
+if grep -q "^\[workflow\]" "$CFG_PATH" 2>/dev/null; then
+  info "  workflow config found in $CFG_PATH — v1 ignores it (future/workflow only)"
+  # Remove legacy workflow section for clean v1 (optional, keep if user wants future)
   if grep -q "dbos_shared_secret" "$CFG_PATH" 2>/dev/null; then
     python3 -c "
 import pathlib, re
@@ -104,51 +96,12 @@ raw=p.read_text()
 raw=re.sub(r'(?m)^\s*dbos_shared_secret\s*=.*\n', '', raw)
 p.write_text(raw)
 " 2>/dev/null || sed -i '/dbos_shared_secret/d' "$CFG_PATH" 2>/dev/null || true
-    info "  Removed legacy dbos_shared_secret from $CFG_PATH (no longer required)"
+    info "  Removed legacy dbos_shared_secret from $CFG_PATH"
   fi
-fi
-
-# 0c. Ensure DBOS health
-DBOS_ENDPOINT="${CODERUN_DBOS_ENDPOINT:-http://localhost:3001}"
-if [ -f "$CFG_PATH" ]; then
-  CFG_EP=$(grep -E 'dbos_endpoint\s*=\s*"' "$CFG_PATH" 2>/dev/null | sed -E 's/.*dbos_endpoint\s*=\s*"([^"]+)".*/\1/' | head -1)
-  [ -n "$CFG_EP" ] && DBOS_ENDPOINT="$CFG_EP"
-fi
-info "Checking DBOS health at $DBOS_ENDPOINT/health ..."
-REACHABLE=false
-if command -v curl >/dev/null 2>&1; then
-  if curl -sf --max-time 2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; fi
-elif command -v wget >/dev/null 2>&1; then
-  if wget -qO- --timeout=2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; fi
-fi
-if [ "$REACHABLE" = true ]; then
-  ok "DBOS reachable at $DBOS_ENDPOINT"
 else
-  info "  DBOS not reachable - attempting to start sidecar..."
-  STARTED=false
-  if [ -f "$ROOT/workflow/dbos/dist/main.js" ] && command -v node >/dev/null 2>&1; then
-    (cd "$ROOT/workflow/dbos" && DBOS_PORT=$(echo "$DBOS_ENDPOINT" | sed -E 's/.*:([0-9]+).*/\1/' | head -1) nohup node dist/main.js >/tmp/coderun-dbos.log 2>&1 & echo $! > /tmp/coderun-dbos.pid) 2>/dev/null || true
-    sleep 3
-    STARTED=true
-  elif [ -f "$ROOT/workflow/dbos/package.json" ] && command -v npm >/dev/null 2>&1; then
-    (cd "$ROOT/workflow/dbos" && DBOS_PORT=$(echo "$DBOS_ENDPOINT" | sed -E 's/.*:([0-9]+).*/\1/' | head -1) nohup npm start >/tmp/coderun-dbos.log 2>&1 & echo $! > /tmp/coderun-dbos.pid) 2>/dev/null || true
-    sleep 3
-    STARTED=true
-  fi
-  for i in $(seq 1 12 2>/dev/null || echo "1 2 3 4 5 6 7 8 9 10 11 12"); do
-    sleep 1
-    if command -v curl >/dev/null 2>&1; then
-      if curl -sf --max-time 2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; break; fi
-    elif command -v wget >/dev/null 2>&1; then
-      if wget -qO- --timeout=2 "$DBOS_ENDPOINT/health" >/dev/null 2>&1; then REACHABLE=true; break; fi
-    fi
-  done
-  if [ "$REACHABLE" = true ]; then
-    ok "DBOS sidecar started at $DBOS_ENDPOINT"
-  else
-    if [ "$STARTED" = true ]; then warn "DBOS started but not reachable at $DBOS_ENDPOINT - check: cd workflow/dbos; node dist/main.js"; else warn "DBOS not reachable at $DBOS_ENDPOINT - hint: cd workflow/dbos; npm run build; node dist/main.js"; fi
-  fi
+  ok "v1 config at $CFG_PATH — no [workflow] required (future/workflow opt-in)"
 fi
+# v1: DBOS sidecar NOT started — future/workflow only (TASK-001: serve works without DBOS)
 
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
 if [ "$SKIP_BUILD" = true ]; then info "Skipping build check (--skip-build)"; fi
@@ -248,5 +201,6 @@ else
 fi
 info "Restart opencode to load plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527)"
 
-info "Done - next: coderun serve | coderun preview 'add auth' | coderun workflow start 'refactor' --require-approval | curl http://127.0.0.1:9527/metrics"
+info "Done (v1) - next: coderun serve | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor (v1 disabled, no DBOS)"
 info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
+info "Opt-in workflow: CODERUN_WORKFLOW_ENABLED=true bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

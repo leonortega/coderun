@@ -8,7 +8,7 @@ providers:
 
 tests:
   - ./datasets/model-routing.yaml
-  - ./datasets/context-quality.yaml
+  - ./datasets/repository_tasks.yaml
 
 outputPath: ./results/evaluation.json
 

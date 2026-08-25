@@ -87,13 +87,21 @@ fn try_codebase_memory_mcp(_repo_root: &Path, _files: &[PathBuf]) -> Option<Depe
 /// Extract imports via simple regex (fallback when tree-sitter grammar not loaded — kept ONLY inside Err branch above)
 fn extract_imports(content: &str, _current_file: &str, _repo_root: &Path) -> Vec<String> {
     let mut deps = Vec::new();
-    // Rust: use crate::foo::bar, mod foo
+    // Rust: use crate::foo::bar, mod foo  (TASK-011: handle mod b; → b.rs)
     // JS/TS: import ... from "path", require("path")
     // Python: import foo, from foo import bar
     // Simpler line scan (regex retained for future ast-grep upgrade)
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("use ") || trimmed.starts_with("mod ") {
+            // handle `mod b;` → b.rs (currently only `use` was handled)
+            if let Some(rest) = trimmed.strip_prefix("mod ") {
+                let name = rest.split(|c: char| c == ';' || c == '{' || c.is_whitespace()).next().unwrap_or("").trim();
+                if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    deps.push(format!("{}.rs", name));
+                    continue;
+                }
+            }
             if let Some(rest) = trimmed.strip_prefix("use ") {
                 let clean = rest.split(';').next().unwrap_or("").trim().split(" as ").next().unwrap_or("").trim().to_string();
                 let parts: Vec<&str> = clean.split("::").collect();
