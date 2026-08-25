@@ -107,6 +107,10 @@ else
       if pip3 show "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would pip3 uninstall -y $pkg"; else pip3 uninstall -y "$pkg" 2>/dev/null && ok "uninstalled $pkg (pip)"; fi; else skip "$pkg not installed"; fi
     done
   fi
+  if command -v rustup >/dev/null 2>&1; then
+    if $DRY_RUN; then skip "would rustup component remove clippy"; else rustup component remove clippy 2>/dev/null && ok "removed rustup component clippy" || warn "clippy remove failed"; fi
+    if $DRY_RUN; then skip "would rustup self uninstall -y"; else rustup self uninstall -y 2>/dev/null && ok "uninstalled rustup" || warn "rustup uninstall failed"; fi
+  else skip "rustup not installed"; fi
 fi
 
 # 5. Data (default: remove) - use .coderun relative

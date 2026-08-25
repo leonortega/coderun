@@ -357,7 +357,15 @@ if (-not $doRemoveExternal) {
     }
   } else { Skip "pip not found - skipping pip package removal" }
 
-  Skip "keeping rustup component clippy (shared toolchain - remove manually via 'rustup component remove clippy' if desired)"
+  # clippy + rustup (was skipped, now actually removed as requested)
+  if (Test-Cmd rustup) {
+    if ($PSCmdlet.ShouldProcess("clippy (rustup component remove clippy)", "rustup component remove")) {
+      try { rustup component remove clippy 2>&1 | Out-Null; Ok "removed rustup component clippy" } catch { Warn "failed to remove clippy: $_" }
+    } else { Skip "would rustup component remove clippy" }
+    if ($PSCmdlet.ShouldProcess("rustup (rustup self uninstall -y)", "rustup self uninstall")) {
+      try { rustup self uninstall -y 2>&1 | Out-Null; Ok "uninstalled rustup" } catch { Warn "rustup uninstall failed: $_" }
+    } else { Skip "would rustup self uninstall -y" }
+  } else { Skip "rustup not installed" }
 }
 
 # 5. Remove data - global data is removed, repository .coderun is NEVER deleted by default (use -RemoveRepo) - use .opencode/.coderun relative
