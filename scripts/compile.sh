@@ -19,4 +19,20 @@ info "Compiling coderun ($([ "$RELEASE" = true ] && echo release || echo debug))
 if [ -n "$FEATURES" ]; then info "Features: $FEATURES"; fi
 if [ "$RELEASE" = true ]; then cargo build --release ${FEATURES:+--features "$FEATURES"}; ok "target/release/coderun + coderun-daemon"; else cargo build ${FEATURES:+--features "$FEATURES"}; ok "target/debug/coderun + coderun-daemon"; fi
 if [ "$SKIP_TESTS" = true ]; then info "Skipping tests (--skip-tests)"; else info "cargo test --workspace --quiet ..."; cargo test --workspace --quiet ${FEATURES:+--features "$FEATURES"} && ok "tests passing" || warn "cargo test had failures"; fi
+# --- opencode-coderun npm plugin ---
+if command -v npm >/dev/null 2>&1; then
+  if [ -d "$ROOT/packages/opencode-coderun" ]; then
+    info "Building npm plugin packages/opencode-coderun ..."
+    (
+      cd "$ROOT/packages/opencode-coderun"
+      if [ -f package-lock.json ]; then npm ci --silent || npm install --silent; else npm install --silent; fi
+      npm run build --silent && ok "opencode-coderun dist built" || { warn "opencode-coderun build failed"; exit 0; }
+      if [ "$SKIP_TESTS" = true ]; then info "Skipping opencode-coderun tests (--skip-tests)"; else npm test --silent && ok "opencode-coderun tests passing" || warn "opencode-coderun tests had failures"; fi
+    )
+  else
+    warn "packages/opencode-coderun not found - skipping npm build"
+  fi
+else
+  warn "npm not found - skipping opencode-coderun build (install Node.js 18+)"
+fi
 info "Compile done. Next: bash scripts/install.sh  (uses pre-compiled binary, no rebuild)"

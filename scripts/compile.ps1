@@ -73,4 +73,40 @@ if ($SkipTests) {
   if ($LASTEXITCODE -ne 0) { Warn "cargo test had failures - see above" } else { Ok "tests passing (add -Features extended-languages for go,java,c,cpp)" }
 }
 
+# --- opencode-coderun npm plugin ---
+$npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+$pluginDir = Join-Path $Root "packages/opencode-coderun"
+if ($npmCmd) {
+  if (Test-Path $pluginDir) {
+    Info "Building npm plugin packages/opencode-coderun ..."
+    Push-Location $pluginDir
+    try {
+      $hasLock = Test-Path (Join-Path $pluginDir "package-lock.json")
+      if ($hasLock) {
+        & npm ci --silent
+      } else {
+        & npm install --silent
+      }
+      if ($LASTEXITCODE -ne 0) { Warn "npm install failed for opencode-coderun - see above" }
+      else {
+        & npm run build --silent
+        if ($LASTEXITCODE -ne 0) { Warn "opencode-coderun build failed" }
+        else {
+          Ok "opencode-coderun dist built"
+          if ($SkipTests) {
+            Info "Skipping opencode-coderun tests (--SkipTests)"
+          } else {
+            & npm test --silent
+            if ($LASTEXITCODE -ne 0) { Warn "opencode-coderun tests had failures - see above" } else { Ok "opencode-coderun tests passing" }
+          }
+        }
+      }
+    } finally { Pop-Location }
+  } else {
+    Warn "packages/opencode-coderun not found - skipping npm build"
+  }
+} else {
+  Warn "npm not found - skipping opencode-coderun build (install Node.js 18+)"
+}
+
 Info "Compile done. Next: powershell -ExecutionPolicy Bypass -File scripts/install.ps1  (uses pre-compiled binary, no rebuild)"

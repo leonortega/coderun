@@ -1,5 +1,6 @@
 ﻿{
     "$schema": "https://opencode.ai/config.json",
+    "plugin": ["opencode-coderun"],
     "mcp": {
         "codebase-memory": {
             "command": ["npx", "-y", "codebase-memory-mcp"],
