@@ -252,7 +252,9 @@ fn cmd_init(wizard: bool) -> Result<(), String> {
     let profile_path = coderun_dir.join("profile.json");
     std::fs::write(&profile_path, &profile_json)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
-    let _ = db.store_knowledge("profile", "repository-profile", &profile_json, 1.0, "bootstrap");
+    // TASK-030: knowledge is stamped with this repo's identity so retrieval stays repo-scoped
+    let repo_id = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
+    let _ = db.store_knowledge("profile", "repository-profile", &profile_json, 1.0, "bootstrap", &repo_id);
 
     println!();
     println!("✓ Bootstrap complete in {}ms", started.elapsed().as_millis());
@@ -291,6 +293,14 @@ fn cmd_init(wizard: bool) -> Result<(), String> {
     );
     println!("  Knowledge seeded:  {} entries", knowledge_seeded);
     println!("  Profile:           {}", profile_path.display());
+    // TASK-038: per-repo artifact home — generated deliverables live inside the analyzed repo
+    match ensure_artifact_dir(&project_root, "context") {
+        Ok(dir) => {
+            println!("  Artifacts:         {}", dir.display());
+            print_gitignore_hint();
+        }
+        Err(e) => println!("  Artifacts:         (skipped: {})", e),
+    }
     println!();
     println!("Next steps:");
     println!("  1. Run 'coderun serve' to start the daemon");
@@ -495,6 +505,8 @@ fn detect_stack(root: &Path, d: &mut Discovery) {
 }
 
 fn ingest_seed_documents(root: &Path, db: &coderun_storage::Database) -> (usize, Option<String>) {
+    // TASK-030: seed documents are stamped with the analyzed repo's identity
+    let repo_id = coderun_core::repository_id_from_path(&root.to_string_lossy());
     let mut seeded = 0usize;
     let mut readme = None;
     for name in ["README.md", "Readme.md", "readme.md", "README"] {
@@ -503,7 +515,7 @@ fn ingest_seed_documents(root: &Path, db: &coderun_storage::Database) -> (usize,
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let truncated: String = content.chars().take(65_536).collect();
                 if db
-                    .store_knowledge("docs", name, &truncated, 0.9, "bootstrap")
+                    .store_knowledge("docs", name, &truncated, 0.9, "bootstrap", &repo_id)
                     .is_ok()
                 {
                     seeded += 1;
@@ -524,7 +536,7 @@ fn ingest_seed_documents(root: &Path, db: &coderun_storage::Database) -> (usize,
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
                     if db
-                        .store_knowledge("adr", &rel, &content, 1.0, "bootstrap")
+                        .store_knowledge("adr", &rel, &content, 1.0, "bootstrap", &repo_id)
                         .is_ok()
                     {
                         seeded += 1;
@@ -659,6 +671,14 @@ fn cmd_index(watch: bool) -> Result<(), String> {
     println!("  Files skipped:    {}", stats.files_skipped);
     println!("  Files deleted:    {}", stats.files_deleted);
     println!("  Duration:         {}ms", stats.duration_ms);
+    // TASK-038: per-repo artifact home for any generated reports/exports
+    match ensure_artifact_dir(&project_root, "context") {
+        Ok(dir) => {
+            println!("  Artifacts:        {}", dir.display());
+            print_gitignore_hint();
+        }
+        Err(e) => println!("  Artifacts:        (skipped: {})", e),
+    }
     // Also show graph edge count (new in v0.3.0)
     if let Ok(g) = repo_intel.build_dependency_graph() {
         println!("  Dependency edges: {}", g.edge_count());
@@ -705,7 +725,7 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
             hub
         };
         let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), coderun_context::ContextConfig::default());
-        let task = coderun_core::TaskRequest { message: prompt.to_string(), session_id: effective_session.clone(), context_hints: None };
+        let task = coderun_core::TaskRequest { message: prompt.to_string(), session_id: effective_session.clone(), context_hints: None, repository_id: String::new(), repository_path: None };
         let (pack, routing) = ctx.build_context(&task).map_err(|e| e.to_string())?;
         println!("Skills matched:");
         if pack.behavioral_skills.is_empty() { println!("  (none — deduped or no match)"); } else { println!("  {}", pack.behavioral_skills.lines().next().unwrap_or("").trim()); if pack.behavioral_skills.contains("FROZEN PREFIX END") { println!("  [frozen-prefix boundary present ✓]"); } }
@@ -913,7 +933,7 @@ fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
     };
     match action {
         WorkflowAction::Start { prompt, require_approval } => {
-            let task = coderun_core::TaskRequest { message: prompt.clone(), session_id: format!("cli-{}", uuid::Uuid::new_v4()), context_hints: None };
+            let task = coderun_core::TaskRequest { message: prompt.clone(), session_id: format!("cli-{}", uuid::Uuid::new_v4()), context_hints: None, repository_id: String::new(), repository_path: None };
             if require_approval { println!("Starting workflow with approval gate..."); }
             let res = rt.block_on(engine.start_workflow(&task, &config));
             match res {
@@ -1155,6 +1175,21 @@ fn cmd_doctor() -> Result<(), String> {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// TASK-038: per-repo artifact home — ALL generated deliverables for an analyzed repo land in
+/// `<repo>/.coderun/artifacts/<name>/` (NEVER back into the coderun source repository).
+/// `coderun init` owns `.coderun/`, so creating on demand is safe.
+fn ensure_artifact_dir(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
+    let dir = repo_root.join(".coderun").join("artifacts").join(name);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create artifact directory {}: {}", dir.display(), e))?;
+    Ok(dir)
+}
+
+/// TASK-038: do not auto-edit the analyzed repo's .gitignore — print a hint instead.
+fn print_gitignore_hint() {
+    println!("  Hint: consider adding '.coderun/artifacts/' to this repository's .gitignore");
+}
 
 fn get_db_path() -> PathBuf {
     dirs().unwrap_or_else(|| PathBuf::from("."))

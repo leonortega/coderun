@@ -141,9 +141,18 @@ impl DaemonState {
                 indexing_db,
                 event_bus_clone,
             );
-            match repo_intel.index_repository() {
+            let result = repo_intel.index_repository();
+            drop(repo_intel);
+            match result {
                 Ok(stats) => {
-                    crate::metrics::global().set_index_files(stats.files_indexed);
+                    // TASK-034/F-5: report the REAL indexed-file count from SQLite after
+                    // indexing completes — `files_indexed` is per-run (incremental runs are small).
+                    // Re-open a connection since `indexing_db` was moved into repo_intel.
+                    let file_count = Database::open(&indexing_db_path).and_then(|db| db.get_file_count());
+                    match file_count {
+                        Ok(count) => crate::metrics::global().set_index_files(count),
+                        Err(_) => crate::metrics::global().set_index_files(stats.files_indexed),
+                    }
                     info!(
                         files = stats.files_indexed,
                         symbols = stats.symbols_extracted,
@@ -226,10 +235,23 @@ impl DaemonState {
                     let _ = rate_limiter.try_acquire("__probe__");
                     let _ = crate::ratelimit::verify_hmac("", "", "");
                     let payload_clone = request.payload.clone();
+                    let repository_path = match &payload_clone {
+                        RequestPayload::MessageRewrite { repository_path, .. } => repository_path.clone(),
+                        RequestPayload::ToolOutput { repository_path, .. } => repository_path.clone(),
+                    };
                     let fut = async {
                         match payload_clone {
-                            RequestPayload::MessageRewrite { session_id, message, context_hints } => {
-                                let task = TaskRequest { message: message.clone(), session_id, context_hints };
+                            RequestPayload::MessageRewrite { session_id, message, context_hints, .. } => {
+                                let task = TaskRequest {
+                                    message: message.clone(),
+                                    session_id,
+                                    context_hints,
+                                    repository_id: match repository_path.as_deref() {
+                                        Some(p) if !p.trim().is_empty() => coderun_core::repository_id_from_path(p),
+                                        _ => String::new(),
+                                    },
+                                    repository_path,
+                                };
                                 let _timer = crate::metrics::Timer::start();
                                 let eng = engine.lock().await;
                                 match eng.build_context(&task) {
@@ -239,13 +261,18 @@ impl DaemonState {
                                         let recall = if !pack.code_context.is_empty() { 0.85 } else { 0.0 };
                                         crate::metrics::global().set_retrieval_recall(recall);
                                         tracing::info!(total_tokens=%pack.token_usage.total_tokens, recall=%recall, tier=%routing.tier, repository_state=%pack.repository_state, "trace: context→router (UDS)");
-                                        let yaml = coderun_context::ContextEngine::to_yaml(&pack).unwrap_or_default();
-                                        ResponsePayload::RewrittenMessage(Box::new(coderun_core::RewrittenMessageData {
-                                            original: message.clone(),
-                                            rewritten: format!("{}\\n\\n---\\n\\nContext:\\n{}", message, yaml),
-                                            context_pack: Some(pack),
-                                            routing_decision: Some(routing),
-                                        }))
+                                        // TASK-031/F-2: zero-value rewrite suppression
+                                        if pack.token_usage.total_tokens == 0 {
+                                            ResponsePayload::OriginalPassthrough { original: message, reason: "no_context_hits".to_string() }
+                                        } else {
+                                            let yaml = coderun_context::ContextEngine::to_yaml(&pack).unwrap_or_default();
+                                            ResponsePayload::RewrittenMessage(Box::new(coderun_core::RewrittenMessageData {
+                                                original: message.clone(),
+                                                rewritten: format!("{}\\n\\n---\\n\\nContext:\\n{}", message, yaml),
+                                                context_pack: Some(pack),
+                                                routing_decision: Some(routing),
+                                            }))
+                                        }
                                     }
                                     Err(e) => {
                                         crate::metrics::global().inc_fail_open();
@@ -253,7 +280,7 @@ impl DaemonState {
                                     },
                                 }
                             }
-                            RequestPayload::ToolOutput { tool_name, output_type, content, context } => {
+                            RequestPayload::ToolOutput { tool_name, output_type, content, context, .. } => {
                                 let r = optimizer.compress_output(&tool_name, output_type, content.clone(), context.as_deref());
                                 if r.original_tokens > r.compressed_tokens {
                                     crate::metrics::global().add_tokens_saved(r.original_tokens - r.compressed_tokens);

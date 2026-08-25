@@ -76,6 +76,8 @@ mod tests {
                         message: "test".to_string(),
                         session_id: "s".to_string(),
                         context_hints: None,
+                        repository_id: String::new(),
+                        repository_path: None,
                     },
                     &crate::config::Config::default()
                 )

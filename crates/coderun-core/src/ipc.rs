@@ -37,6 +37,9 @@ pub enum RequestPayload {
         session_id: String,
         message: String,
         context_hints: Option<ContextHints>,
+        /// Absolute path of the agent's workspace root (TASK-036) — overrides daemon CWD for scoping
+        #[serde(default)]
+        repository_path: Option<String>,
     },
     /// Pre-tool: compress tool output before sending to LLM
     ToolOutput {
@@ -44,6 +47,9 @@ pub enum RequestPayload {
         output_type: OutputType,
         content: String,
         context: Option<String>,
+        /// Absolute path of the agent's workspace root (TASK-036)
+        #[serde(default)]
+        repository_path: Option<String>,
     },
 }
 
@@ -178,6 +184,35 @@ pub struct TaskRequest {
     pub message: String,
     pub session_id: String,
     pub context_hints: Option<ContextHints>,
+    /// Repository identity (hash of repo path) for scoped retrieval — TASK-030
+    pub repository_id: String,
+    /// Agent workspace root path — TASK-036 (daemon may serve multiple repos)
+    pub repository_path: Option<String>,
+}
+
+impl TaskRequest {
+    /// Convenience constructor with no repository scoping (daemon-CWD fallback)
+    pub fn new(message: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            session_id: session_id.into(),
+            context_hints: None,
+            repository_id: String::new(),
+            repository_path: None,
+        }
+    }
+}
+
+// ── Repository Identity ─────────────────────────────────────────────────
+
+/// Shared repository identity helper: SHA-256 of the repo path, first 12 hex chars.
+/// Used by the daemon (per-request resolution, TASK-036) and repo-intel (index stamping, TASK-030)
+/// so both sides derive identical ids from the same path.
+pub fn repository_id_from_path(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(path.as_bytes());
+    format!("{:x}", h.finalize())[..12].to_string()
 }
 
 // ── Search Types ────────────────────────────────────────────────────────
@@ -254,6 +289,7 @@ mod tests {
                     files_mentioned: Some(vec!["src/auth.rs".to_string()]),
                     language: Some("rust".to_string()),
                 }),
+                repository_path: Some("C:\\repos\\demo".to_string()),
             },
             repository_id: "test_repo_hash".to_string(),
             timestamp: "2026-08-25T00:00:00Z".to_string(),
@@ -262,6 +298,27 @@ mod tests {
         let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req.correlation_id, parsed.correlation_id);
         assert_eq!(req.hook_type, parsed.hook_type);
+    }
+
+    #[test]
+    fn test_request_payload_repository_path_backcompat() {
+        // Old payloads without repository_path still deserialize (TASK-036)
+        let json = r#"{"type":"MessageRewrite","session_id":"s","message":"m"}"#;
+        let parsed: RequestPayload = serde_json::from_str(json).unwrap();
+        match parsed {
+            RequestPayload::MessageRewrite { repository_path, .. } => assert!(repository_path.is_none()),
+            _ => panic!("expected MessageRewrite"),
+        }
+    }
+
+    #[test]
+    fn test_repository_id_from_path_stable() {
+        let a = crate::ipc::repository_id_from_path("C:\\repos\\demo");
+        let b = crate::ipc::repository_id_from_path("C:\\repos\\demo");
+        let c = crate::ipc::repository_id_from_path("C:\\repos\\other");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 12);
     }
 
     #[test]

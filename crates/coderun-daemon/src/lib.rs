@@ -1,0 +1,7 @@
+// coderun-daemon library surface — enables integration tests (TASK-035) to boot the
+// HTTP router directly while keeping the `coderun-daemon` binary thin.
+pub mod adapter;
+pub mod http_server;
+pub mod lifecycle;
+pub mod metrics;
+pub mod ratelimit;

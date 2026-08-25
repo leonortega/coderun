@@ -58,6 +58,25 @@ for sock in "$HOME/.coderun/coderun.sock" "/tmp/coderun.sock" ".coderun/coderun.
   fi
 done
 
+# 1b. TASK-037: remove installed binaries (~/.coderun/bin) + revert PATH entries.
+# Always executed: PATH is shell state, independent of --keep-data/--remove-repo.
+info "Removing installed coderun binaries from ~/.coderun/bin..."
+for bin in "$HOME/.coderun/bin/coderun" "$HOME/.coderun/bin/coderun-daemon"; do
+  if [ -e "$bin" ]; then if $DRY_RUN; then skip "would rm $bin"; else rm -f "$bin" && ok "removed $bin"; fi; else skip "not found $bin"; fi
+done
+if [ -d "$HOME/.coderun/bin" ] && [ -z "$(ls -A "$HOME/.coderun/bin" 2>/dev/null)" ]; then
+  if $DRY_RUN; then skip "would rmdir ~/.coderun/bin"; else rmdir "$HOME/.coderun/bin" 2>/dev/null && ok "removed empty ~/.coderun/bin/"; fi
+fi
+# Revert PATH: drop our marker block from ~/.profile and ~/.bashrc (idempotent)
+for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+  if [ -f "$rc" ] && grep -qs "CODERUN_BIN_PATH" "$rc"; then
+    if $DRY_RUN; then skip "would remove coderun PATH lines from $rc"
+    else
+      sed -i '/# CODERUN_BIN_PATH/d; /\.coderun\/bin/d' "$rc" 2>/dev/null && ok "removed coderun PATH entry from $rc" || warn "failed to edit $rc"
+    fi
+  else skip "no coderun PATH entry in $rc"; fi
+done
+
 # 2. Build artifacts (use .opencode/.coderun relative, not absolute repo)
 if $KEEP_BUILD; then info "Skipping build artifact removal (--keep-build)";
 else

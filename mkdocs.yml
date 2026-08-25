@@ -40,5 +40,8 @@ nav:
     - Principles: docs/00-project/PRINCIPLES.md
     - Scope: docs/00-project/SCOPE.md
 
-# Knowledge Hub ingestion: on `coderun index`, walk docs/**/*.md and push category=docs entries into tantivy.
+# Knowledge Hub ingestion: on `coderun index`, walk docs/**/*.md and push category=docs entries into tantivy
+# (repository-stamped since TASK-030 — retrieval is scoped per repo).
 # Deploy: `mkdocs gh-deploy` or `mkdocs build` → docs-site/build → served via GitHub Pages.
+# NOTE (TASK-038): docs-site/build applies to the CODERUN repo's own site only. Per-target builds
+# of an ANALYZED repo's docs land in <analyzed-repo>/.coderun/artifacts/ — never in this repository.

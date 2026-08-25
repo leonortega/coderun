@@ -120,12 +120,30 @@ info "Checking prebuilt coderun..."
 if [ -f "$ROOT/target/release/coderun" ] || [ -f "$ROOT/target/release/coderun.exe" ]; then ok "coderun at target/release/coderun(.exe)"; else warn "coderun binary not found at target/release/coderun - build manually: cargo build --release"; echo "prebuilt coderun missing - expected at target/release/coderun" >&2; exit 1; fi
 if [ -f "$ROOT/target/release/coderun-daemon" ] || [ -f "$ROOT/target/release/coderun-daemon.exe" ]; then ok "coderun-daemon at target/release/coderun-daemon(.exe)"; else warn "coderun-daemon not found at target/release/coderun-daemon"; fi
 
+# 1b. TASK-037: ship binaries to ~/.coderun/bin + persist on PATH, so coderun keeps working
+# from any directory/shell even if this repo checkout is moved or cleaned. Idempotent re-run.
+BIN_DIR="$HOME/.coderun/bin"
+mkdir -p "$BIN_DIR"
+SRC_CLI="$ROOT/target/release/coderun";   [ -f "$SRC_CLI" ]   || SRC_CLI="$ROOT/target/release/coderun.exe"
+SRC_DAEMON="$ROOT/target/release/coderun-daemon"; [ -f "$SRC_DAEMON" ] || SRC_DAEMON="$ROOT/target/release/coderun-daemon.exe"
+INSTALLED_CLI="$BIN_DIR/coderun"
+if [ -f "$SRC_CLI" ]; then cp -f "$SRC_CLI" "$INSTALLED_CLI" 2>/dev/null && chmod +x "$INSTALLED_CLI" && ok "coderun installed to $INSTALLED_CLI" || { warn "failed to copy coderun to $BIN_DIR"; INSTALLED_CLI="$SRC_CLI"; }
+else warn "no coderun binary to install (expected $ROOT/target/release/coderun)"; INSTALLED_CLI="$SRC_CLI"; fi
+INSTALLED_DAEMON="$BIN_DIR/coderun-daemon"
+if [ -f "$SRC_DAEMON" ]; then cp -f "$SRC_DAEMON" "$INSTALLED_DAEMON" 2>/dev/null && chmod +x "$INSTALLED_DAEMON" && ok "coderun-daemon installed to $INSTALLED_DAEMON" || { warn "failed to copy coderun-daemon to $BIN_DIR"; INSTALLED_DAEMON="$SRC_DAEMON"; }
+else INSTALLED_DAEMON="$SRC_DAEMON"; fi
+# Persist on PATH: idempotent append to ~/.profile and ~/.bashrc with a marker comment
+for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+  if [ -f "$rc" ]; then
+    grep -qs "CODERUN_BIN_PATH" "$rc" || printf '\n# CODERUN_BIN_PATH: coderun AI runtime CLI + daemon\nexport PATH="$HOME/.coderun/bin:$PATH"\n' >> "$rc" && ok "PATH entry ensured in $rc"
+  fi
+done
+case ":$PATH:" in *":$BIN_DIR:"*) ;; *) export PATH="$BIN_DIR:$PATH" ;; esac
+
 info "Initializing repo..."
-CODERUN_BIN="$ROOT/target/release/coderun"
-[ -f "$CODERUN_BIN.exe" ] && [ ! -f "$CODERUN_BIN" ] && CODERUN_BIN="$CODERUN_BIN.exe"
-"$CODERUN_BIN" init 2>/dev/null || true
-"$CODERUN_BIN" index 2>/dev/null || true
-"$CODERUN_BIN" doctor
+"$INSTALLED_CLI" init 2>/dev/null || true
+"$INSTALLED_CLI" index 2>/dev/null || true
+"$INSTALLED_CLI" doctor
 
 # 3. opencode MCPs + plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
 OC_GLOBAL="$HOME/.config/opencode"
@@ -214,18 +232,20 @@ fi
 info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). MCPs+plugin now load in EVERY project (global ~/.config/opencode)."
 
 # 4. Start daemon - coderun must be in RUNNING state after installation
+# TASK-037: launch from ~/.coderun/bin (installed copy), repo-independent working dir.
 daemon_health() { curl -s -o /dev/null -m 2 http://127.0.0.1:9527/health; }
 DAEMON_UP=no
 if command -v curl >/dev/null 2>&1 && daemon_health; then
   DAEMON_UP=yes
   ok "coderun daemon already running at http://127.0.0.1:9527 (status: running)"
-elif [ ! -x "$ROOT/target/release/coderun-daemon" ]; then
-  warn "coderun-daemon binary not found at target/release/coderun-daemon - build first (cargo build --release) then re-run installer or start manually"
+elif [ ! -x "$INSTALLED_DAEMON" ]; then
+  warn "coderun-daemon binary not found at $INSTALLED_DAEMON - build first (cargo build --release) then re-run installer or start manually"
 else
   # Stale processes (holding old binary/port but not answering /health) - stop them before restart
   pkill -f coderun-daemon >/dev/null 2>&1 || true
   info "Starting coderun daemon..."
-  (cd "$ROOT" && nohup ./target/release/coderun-daemon >/dev/null 2>&1 &)
+  mkdir -p "$HOME/.coderun"
+  (cd "$HOME/.coderun" && nohup "$INSTALLED_DAEMON" >/dev/null 2>&1 &)
   if command -v curl >/dev/null 2>&1; then
     for _ in $(seq 1 40); do
       sleep 0.5
@@ -235,9 +255,9 @@ else
     sleep 3
     if pgrep -f coderun-daemon >/dev/null 2>&1; then DAEMON_UP=yes; fi
   fi
-  if [ "$DAEMON_UP" = yes ]; then ok "coderun daemon RUNNING (http://127.0.0.1:9527)"; else warn "daemon not responding on :9527 within 20s - start manually: ./target/release/coderun-daemon"; fi
+  if [ "$DAEMON_UP" = yes ]; then ok "coderun daemon RUNNING (http://127.0.0.1:9527, from $INSTALLED_DAEMON)"; else warn "daemon not responding on :9527 within 20s - start manually: $INSTALLED_DAEMON"; fi
 fi
 
-info "Done (v1) - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo 'NOT running (start: ./target/release/coderun-daemon)'; fi) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
+info "Done (v1) - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
 info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
 info "Opt-in workflow: CODERUN_WORKFLOW_ENABLED=true bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

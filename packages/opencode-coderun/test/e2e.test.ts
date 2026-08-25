@@ -85,3 +85,71 @@ describe("E2E: OpenCode → Coderun → BuildContext → Router → LiteLLM", ()
     }
   });
 });
+
+describe("TASK-036/F-7: repository_path travels with every hook payload", () => {
+  it("MessageRewrite payload carries the agent workspace root", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        correlation_id: "req_repo1",
+        hook_type: "PreGeneration",
+        payload: { type: "OriginalPassthrough", original: "hi", reason: "no_context_hits" },
+        latency_ms: 3,
+      }),
+    } as any);
+    await callCoderunDaemon(
+      {
+        hook_type: "PreGeneration",
+        payload: { type: "MessageRewrite", session_id: "s", message: "hi", repository_path: "C:\\repos\\eShopOnWeb" },
+      },
+      { fetchImpl: mockFetch as any },
+    );
+    const [, init] = mockFetch.mock.calls[0];
+    const sent = JSON.parse(init.body);
+    expect(sent.payload.repository_path).toBe("C:\\repos\\eShopOnWeb");
+    // Daemon must answer passthrough on zero hits — plugin leaves prompt untouched then
+    expect(sent.payload.message).toBe("hi");
+  });
+
+  it("ToolOutput payload carries the agent workspace root", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        correlation_id: "req_repo2",
+        hook_type: "PreToolCall",
+        payload: { type: "CompressedOutput", original: "x", compressed: "x", original_tokens: 1, compressed_tokens: 1 },
+        latency_ms: 2,
+      }),
+    } as any);
+    await callCoderunDaemon(
+      {
+        hook_type: "PreToolCall",
+        payload: { type: "ToolOutput", tool_name: "bash", output_type: "ShellOutput", content: "x", repository_path: "/home/dev/eShopOnWeb" },
+      },
+      { fetchImpl: mockFetch as any },
+    );
+    const [, init] = mockFetch.mock.calls[0];
+    const sent = JSON.parse(init.body);
+    expect(sent.payload.repository_path).toBe("/home/dev/eShopOnWeb");
+  });
+
+  it("OriginalPassthrough with no_context_hits signals untouched passthrough contract", async () => {
+    // TASK-031/F-2: daemon must NOT rewrite prompts with zero retrievable value
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        correlation_id: "req_zero",
+        hook_type: "PreGeneration",
+        payload: { type: "OriginalPassthrough", original: "zzzqqq unrelated", reason: "no_context_hits" },
+        latency_ms: 4,
+      }),
+    } as any);
+    const resp = await callCoderunDaemon(
+      { hook_type: "PreGeneration", payload: { type: "MessageRewrite", session_id: "s", message: "zzzqqq unrelated", repository_path: "." } },
+      { fetchImpl: mockFetch as any },
+    );
+    expect(resp!.payload.type).toBe("OriginalPassthrough");
+    expect(resp!.payload.reason).toBe("no_context_hits");
+    expect(resp!.payload.original).toBe("zzzqqq unrelated");
+  });
+});

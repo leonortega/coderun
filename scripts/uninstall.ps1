@@ -135,6 +135,39 @@ foreach ($sp in $socketPaths | Select-Object -Unique) {
   }
 }
 
+# 1b. TASK-037: remove installed binaries (~\.coderun\bin) + revert USER PATH entry.
+# Always executed: PATH is machine state, independent of -KeepData/-RemoveRepo.
+Info "Removing installed coderun binaries from ~\.coderun\bin..."
+$coderunBinDir = Join-Path $env:USERPROFILE ".coderun\bin"
+foreach ($bin in @("coderun.exe", "coderun-daemon.exe")) {
+  $p = Join-Path $coderunBinDir $bin
+  if (Test-Path $p) {
+    if ($PSCmdlet.ShouldProcess($p, "Remove-Item")) {
+      try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed $p" } catch { Warn "failed to remove ${p}: $_" }
+    } else { Skip "would remove $p" }
+  } else { Skip "not found $p" }
+}
+if ((Test-Path $coderunBinDir) -and -not (Get-ChildItem -LiteralPath $coderunBinDir -Force -ErrorAction SilentlyContinue)) {
+  if ($PSCmdlet.ShouldProcess($coderunBinDir, "Remove empty dir")) {
+    try { Remove-Item -LiteralPath $coderunBinDir -Force -ErrorAction SilentlyContinue; Ok "removed empty $coderunBinDir" } catch {}
+  }
+}
+# Revert USER PATH (HKCU Environment) — only our exact entry, idempotent
+try {
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if ($userPath) {
+    $entries = $userPath -split ';' | Where-Object { $_ -ne '' }
+    if ($entries -contains $coderunBinDir) {
+      $newUserPath = ($entries | Where-Object { $_ -ne $coderunBinDir }) -join ';'
+      if ($PSCmdlet.ShouldProcess("USER PATH", "Remove $coderunBinDir")) {
+        [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+        Ok "removed $coderunBinDir from USER PATH"
+      } else { Skip "would remove $coderunBinDir from USER PATH" }
+    } else { Skip "$coderunBinDir not on USER PATH" }
+    if (($env:Path -split ';') -contains $coderunBinDir) { $env:Path = (($env:Path -split ';') | Where-Object { $_ -ne $coderunBinDir }) -join ';' }
+  }
+} catch { Warn "could not revert USER PATH: $_" }
+
 # 2. Remove build artifacts - repository folders are NEVER deleted by default (use -RemoveRepo)
 if ($KeepBuild -or -not $doRemoveRepo) {
   Info "Skipping build artifact removal (repository folders preserved - use -RemoveRepo to delete target/)"

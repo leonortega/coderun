@@ -47,6 +47,8 @@ export interface CoderunRequest {
     output_type?: string;
     content?: string;
     context?: string;
+    /** Absolute workspace root of the agent's project — daemon scopes retrieval to it (TASK-036) */
+    repository_path?: string;
   };
   repository_id?: string;
   timestamp?: string;
@@ -134,7 +136,9 @@ export async function callCoderunDaemon(
 // ---------------------------------------------------------------------------
 
 function hashRepositoryId(path: string): string {
-  // simple hash of directory path for repository_id (TASK-021) — matches Rust cwd hash (first 12 hex)
+  // Informational trace id (TASK-021). NOTE: the daemon derives its authoritative
+  // repository_id from payload.repository_path via a shared SHA-256 formula (TASK-036);
+  // this JS hash is NOT used for retrieval scoping.
   let hash = 0;
   for (let i = 0; i < path.length; i++) {
     hash = (hash * 31 + path.charCodeAt(i)) >>> 0;
@@ -143,6 +147,10 @@ function hashRepositoryId(path: string): string {
 }
 
 export const CoderunPlugin: Plugin = async ({ project, client, $, directory, worktree }: any) => {
+  // TASK-036/F-7: the agent's active workspace root — sent with EVERY hook payload so ONE
+  // shared daemon serves multiple opencode windows on different repos simultaneously.
+  const repositoryPath: string = worktree || directory || project?.worktree || process.cwd();
+
   // Optional structured log when client is available
   try {
     await client?.app?.log?.({
@@ -150,7 +158,7 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
         service: "opencode-coderun",
         level: "info",
         message: "Plugin initialized",
-        extra: { directory, worktree, daemonUrl: getDaemonUrl() },
+        extra: { directory, worktree, repositoryPath, daemonUrl: getDaemonUrl() },
       },
     });
   } catch {
@@ -180,8 +188,9 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
         type: "MessageRewrite",
         session_id: input.session_id || "unknown",
         message: text,
+        repository_path: repositoryPath,
       },
-      repository_id: hashRepositoryId(directory || worktree || "."),
+      repository_id: hashRepositoryId(repositoryPath),
       timestamp: new Date().toISOString(),
     };
 
@@ -196,6 +205,8 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
       }
       console.log(`[coderun] Enriched message (${response.latency_ms}ms)`);
     }
+    // OriginalPassthrough (incl. reason "no_context_hits", TASK-031): leave the user's
+    // prompt byte-identical — no metadata-only rewrite.
   }
 
   return {
@@ -227,8 +238,9 @@ export const CoderunPlugin: Plugin = async ({ project, client, $, directory, wor
           tool_name: toolName,
           output_type: getOutputType(toolName),
           content,
+          repository_path: repositoryPath,
         },
-        repository_id: hashRepositoryId(directory || "."),
+        repository_id: hashRepositoryId(repositoryPath),
         timestamp: new Date().toISOString(),
       };
 

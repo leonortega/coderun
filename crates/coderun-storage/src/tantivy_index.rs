@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, QueryParser, Query, TermQuery};
 use tantivy::schema::*;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
 use tracing::info;
@@ -15,6 +15,8 @@ pub struct CodeIndexSchema {
     pub content_field: Field,
     pub language_field: Field,
     pub symbols_field: Field,
+    /// Repository scope field (TASK-030) — every doc is stamped so retrieval can be repo-scoped
+    pub repository_field: Field,
 }
 
 impl Default for CodeIndexSchema {
@@ -31,6 +33,7 @@ impl CodeIndexSchema {
         let content_field = schema_builder.add_text_field("content", TEXT | STORED);
         let language_field = schema_builder.add_text_field("language", STRING | STORED);
         let symbols_field = schema_builder.add_text_field("symbols", TEXT | STORED);
+        let repository_field = schema_builder.add_text_field("repository_id", STRING | STORED);
 
         Self {
             schema: schema_builder.build(),
@@ -38,6 +41,7 @@ impl CodeIndexSchema {
             content_field,
             language_field,
             symbols_field,
+            repository_field,
         }
     }
 }
@@ -94,7 +98,7 @@ impl TantivyIndex {
                 .map_err(|e| format!("Failed to create index reader: {}", e))
     }
 
-    /// Add a document to the index
+    /// Add a document to the index, stamped with its repository scope (TASK-030)
     pub fn add_document(
         &self,
         writer: &mut IndexWriter,
@@ -102,6 +106,7 @@ impl TantivyIndex {
         content: &str,
         language: &str,
         symbols: &[String],
+        repository_id: &str,
     ) -> Result<(), String> {
         let symbols_text = symbols.join(" ");
 
@@ -110,6 +115,7 @@ impl TantivyIndex {
             self.schema.content_field => content,
             self.schema.language_field => language,
             self.schema.symbols_field => symbols_text.as_str(),
+            self.schema.repository_field => repository_id,
         );
 
         writer
@@ -119,12 +125,23 @@ impl TantivyIndex {
         Ok(())
     }
 
-    /// Delete a document from the index
-    pub fn delete_document(&self, writer: &mut IndexWriter, path: &str) -> Result<(), String> {
-        writer.delete_term(tantivy::Term::from_field_text(
-            self.schema.path_field,
-            path,
-        ));
+    /// Delete a document from the index — scoped to a repository so two repos
+    /// sharing a relative path never delete each other's docs (TASK-030)
+    pub fn delete_document(
+        &self,
+        writer: &mut IndexWriter,
+        path: &str,
+        repository_id: &str,
+    ) -> Result<(), String> {
+        let repo_term = tantivy::Term::from_field_text(self.schema.repository_field, repository_id);
+        let path_term = tantivy::Term::from_field_text(self.schema.path_field, path);
+        let both = BooleanQuery::new(vec![
+            (tantivy::query::Occur::Must, Box::new(TermQuery::new(repo_term, IndexRecordOption::Basic)) as Box<dyn Query>),
+            (tantivy::query::Occur::Must, Box::new(TermQuery::new(path_term, IndexRecordOption::Basic)) as Box<dyn Query>),
+        ]);
+        let _ = writer
+            .delete_query(Box::new(both))
+            .map_err(|e| format!("Failed to delete document: {}", e))?;
 
         Ok(())
     }
@@ -138,13 +155,15 @@ impl TantivyIndex {
         Ok(())
     }
 
-    /// Search the index
+    /// Search the index — optionally scoped to a single repository (TASK-030).
+    /// `repository_id: Some(id)` filters hits to docs stamped with that id; `None` searches all.
     pub fn search(
         &self,
         reader: &IndexReader,
         query: &str,
         _language_filter: Option<&str>,
         max_results: usize,
+        repository_id: Option<&str>,
     ) -> Result<Vec<SearchHit>, String> {
         let searcher = reader.searcher();
 
@@ -162,8 +181,24 @@ impl TantivyIndex {
             .parse_query(query)
             .map_err(|e| format!("Failed to parse query: {}", e))?;
 
+        // Repository scope filter (TermQuery AND user query) — TASK-030/F-1
+        let full_query: Box<dyn Query> = match repository_id {
+            Some(repo) => {
+                let repo_term =
+                    tantivy::Term::from_field_text(self.schema.repository_field, repo);
+                Box::new(BooleanQuery::new(vec![
+                    (
+                        tantivy::query::Occur::Must,
+                        Box::new(TermQuery::new(repo_term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                    ),
+                    (tantivy::query::Occur::Must, user_query),
+                ]))
+            }
+            None => Box::new(user_query),
+        };
+
         let top_docs = searcher
-            .search(&user_query, &TopDocs::with_limit(max_results))
+            .search(&full_query, &TopDocs::with_limit(max_results))
             .map_err(|e| format!("Search failed: {}", e))?;
 
         let mut results = Vec::new();
@@ -268,17 +303,25 @@ mod tests {
                 "fn main() { println!(\"Hello\"); }",
                 "rust",
                 &["main".to_string()],
+                "repo_a",
             )
             .unwrap();
 
         index.commit(&mut writer).unwrap();
 
-        // Search
+        // Search — scoped to the right repo finds it (TASK-030)
         let reader = index.reader().unwrap();
-        let results = index.search(&reader, "main", None, 10).unwrap();
-
+        let results = index.search(&reader, "main", None, 10, Some("repo_a")).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, "src/main.rs");
+
+        // Scoped to another repo → no cross-repo leakage (F-1)
+        let other = index.search(&reader, "main", None, 10, Some("repo_b")).unwrap();
+        assert_eq!(other.len(), 0);
+
+        // Unscoped still sees it (back-compat)
+        let all = index.search(&reader, "main", None, 10, None).unwrap();
+        assert_eq!(all.len(), 1);
     }
 
     #[test]
@@ -289,28 +332,24 @@ mod tests {
         let index = TantivyIndex::open(index_path).unwrap();
         let mut writer = index.writer().unwrap();
 
-        // Add a document
+        // Same relative path in two repos (TASK-030: deletes must be repo-scoped)
         index
-            .add_document(
-                &mut writer,
-                "src/main.rs",
-                "fn main() {}",
-                "rust",
-                &["main".to_string()],
-            )
+            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_a")
             .unwrap();
-
+        index
+            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_b")
+            .unwrap();
         index.commit(&mut writer).unwrap();
 
-        // Delete it
-        index.delete_document(&mut writer, "src/main.rs").unwrap();
+        // Delete only repo_a's copy
+        index.delete_document(&mut writer, "src/main.rs", "repo_a").unwrap();
         index.commit(&mut writer).unwrap();
 
-        // Search should return empty
         let reader = index.reader().unwrap();
-        let results = index.search(&reader, "main", None, 10).unwrap();
-
-        assert_eq!(results.len(), 0);
+        let repo_a = index.search(&reader, "main", None, 10, Some("repo_a")).unwrap();
+        assert_eq!(repo_a.len(), 0);
+        let repo_b = index.search(&reader, "main", None, 10, Some("repo_b")).unwrap();
+        assert_eq!(repo_b.len(), 1, "other repo's doc must survive");
     }
 
 
@@ -324,7 +363,7 @@ mod tests {
         let mut writer = index.writer().unwrap();
 
         index
-            .add_document(&mut writer, "test.rs", "test", "rust", &[])
+            .add_document(&mut writer, "test.rs", "test", "rust", &[], "repo_a")
             .unwrap();
         index.commit(&mut writer).unwrap();
 

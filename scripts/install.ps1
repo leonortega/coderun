@@ -307,12 +307,46 @@ $prebuiltDaemon = Join-Path $Root "target\release\coderun-daemon.exe"
 if (Test-Path $prebuilt) { Ok "coderun at target/release/coderun.exe" } else { Warn "coderun binary not found at target/release/coderun.exe - build manually: cargo build --release"; Fail "prebuilt coderun.exe missing - expected at target/release/coderun.exe" }
 if (Test-Path $prebuiltDaemon) { Ok "coderun-daemon at target/release/coderun-daemon.exe" } else { Warn "coderun-daemon not found at target/release/coderun-daemon.exe" }
 
+# 1b. TASK-037: ship binaries to %USERPROFILE%\.coderun\bin + persist on the USER PATH,
+# so `coderun --version` and the daemon keep working from ANY directory/shell even if this
+# repo checkout is moved or cleaned (cargo clean / -RemoveRepo). Idempotent re-run.
+$binDir = Join-Path $env:USERPROFILE ".coderun\bin"
+$installedCli = Join-Path $binDir "coderun.exe"
+$installedDaemon = Join-Path $binDir "coderun-daemon.exe"
+try {
+  New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+  Copy-Item -LiteralPath $prebuilt -Destination $installedCli -Force -ErrorAction Stop
+  Ok "coderun.exe installed to $installedCli"
+} catch { Warn "failed to copy coderun.exe to ${binDir}: $_"; $installedCli = $prebuilt }
+if (Test-Path $prebuiltDaemon) {
+  try {
+    Copy-Item -LiteralPath $prebuiltDaemon -Destination $installedDaemon -Force -ErrorAction Stop
+    Ok "coderun-daemon.exe installed to $installedDaemon"
+  } catch {
+    Warn "failed to copy coderun-daemon.exe to ${binDir}: $_"
+    if (-not (Test-Path $installedDaemon)) { $installedDaemon = $prebuiltDaemon }
+  }
+}
+# Persist on the user PATH (HKCU Environment) — append only when missing (idempotent)
+try {
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if ($null -eq $userPath) { $userPath = "" }
+  $entries = $userPath -split ';' | Where-Object { $_ -ne '' }
+  if ($entries -notcontains $binDir) {
+    $newUserPath = ($entries + $binDir) -join ';'
+    [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+    Info "Added $binDir to USER PATH (persisted in HKCU Environment)"
+  } else { Ok "$binDir already on USER PATH" }
+} catch { Warn "could not persist USER PATH: $_" }
+# Current session PATH so subsequent steps resolve coderun without the repo checkout
+if (($env:Path -split ';') -notcontains $binDir) { $env:Path = "$binDir;$env:Path" }
+
 # 2. init + index + doctor
 Info "Initializing repo..."
 $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-try { & ".\target\release\coderun.exe" init 2>&1 | Out-Null } catch {}
-try { & ".\target\release\coderun.exe" index 2>&1 | Out-Null } catch { Info "  index warning (non-fatal, see doctor)" }
-try { & ".\target\release\coderun.exe" doctor } catch {}
+try { & $installedCli init 2>&1 | Out-Null } catch {}
+try { & $installedCli index 2>&1 | Out-Null } catch { Info "  index warning (non-fatal, see doctor)" }
+try { & $installedCli doctor } catch {}
 $ErrorActionPreference = $prevEA2
 
 # 3. opencode MCPs + plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
@@ -456,6 +490,8 @@ if (Test-Path $pluginDir) {
 Info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open). MCPs+plugin now load in EVERY project (global ~\.config\opencode)."
 
 # 4. Start daemon - coderun must be in RUNNING state after installation
+# TASK-037: launch the daemon from ~\.coderun\bin (installed copy) so the runtime keeps
+# working if the repo is moved/cleaned — NOT from target\release.
 function Test-DaemonHealth {
   try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9527/health" -UseBasicParsing -TimeoutSec 2; return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) } catch { return $false }
 }
@@ -463,8 +499,8 @@ Info "Starting coderun daemon..."
 $daemonUp = Test-DaemonHealth
 if ($daemonUp) {
   Ok "coderun daemon already running at http://127.0.0.1:9527 (status: running)"
-} elseif (-not (Test-Path $prebuiltDaemon)) {
-  Warn "coderun-daemon.exe not found at target/release/coderun-daemon.exe - build first (cargo build --release) then re-run installer or start manually"
+} elseif (-not (Test-Path $installedDaemon)) {
+  Warn "coderun-daemon.exe not found at $installedDaemon - build first (cargo build --release) then re-run installer or start manually"
 } else {
   # Stale processes (holding old binary/port but not answering /health) - stop them before restart
   foreach ($procName in @("coderun-daemon", "coderun")) {
@@ -474,19 +510,22 @@ if ($daemonUp) {
   }
   $prevEA3 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
   try {
-    $daemonProc = Start-Process -FilePath $prebuiltDaemon -WorkingDirectory $Root -WindowStyle Hidden -PassThru -ErrorAction Stop
+    # WorkingDirectory: user .coderun home (repo-independent); scoping comes from per-request repository_path
+    $daemonWorkDir = Join-Path $env:USERPROFILE ".coderun"
+    New-Item -ItemType Directory -Force -Path $daemonWorkDir | Out-Null
+    $daemonProc = Start-Process -FilePath $installedDaemon -WorkingDirectory $daemonWorkDir -WindowStyle Hidden -PassThru -ErrorAction Stop
     for ($i = 0; $i -lt 40; $i++) {
       Start-Sleep -Milliseconds 500
       if ($daemonProc.HasExited) { break }
       if (Test-DaemonHealth) { $daemonUp = $true; break }
     }
-    if ($daemonUp) { Ok "coderun daemon RUNNING (PID $($daemonProc.Id), http://127.0.0.1:9527)" }
-    elseif ($daemonProc.HasExited) { Warn "daemon exited immediately (exit code $($daemonProc.ExitCode)) - start manually: .\target\release\coderun-daemon.exe (check .coderun\config.toml)" }
+    if ($daemonUp) { Ok "coderun daemon RUNNING (PID $($daemonProc.Id), http://127.0.0.1:9527, from $installedDaemon)" }
+    elseif ($daemonProc.HasExited) { Warn "daemon exited immediately (exit code $($daemonProc.ExitCode)) - start manually: $installedDaemon (check .coderun\config.toml)" }
     else { Warn "daemon started (PID $($daemonProc.Id)) but /health not responding within 20s - verify: curl http://127.0.0.1:9527/metrics" }
-  } catch { Warn "failed to start daemon: $_ - start manually: .\target\release\coderun-daemon.exe" }
+  } catch { Warn "failed to start daemon: $_ - start manually: $installedDaemon" }
   $ErrorActionPreference = $prevEA3
 }
 
-Info "Done (v1) - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: .\target\release\coderun-daemon.exe)' }) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
+Info "Done (v1) - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
 Info "Docs: mkdocs serve  |  promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
 Info "Opt-in workflow: `$env:CODERUN_WORKFLOW_ENABLED='true'; bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

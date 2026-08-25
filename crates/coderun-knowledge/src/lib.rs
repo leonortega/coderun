@@ -69,14 +69,21 @@ impl KnowledgeHub {
 
     // ── Knowledge Storage ──────────────────────────────────────────
 
-    /// Store a knowledge entry
+    /// Store a knowledge entry (unscoped — legacy/global '' repository_id)
     pub fn store_knowledge(&self, entry: &KnowledgeEntry) -> Result<i64, String> {
+        self.store_knowledge_for_repo(entry, "")
+    }
+
+    /// Store a knowledge entry scoped to a repository (TASK-030) — idempotent upsert on
+    /// `(category, key, repository_id)` so re-ingestion never grows the table (TASK-032)
+    pub fn store_knowledge_for_repo(&self, entry: &KnowledgeEntry, repository_id: &str) -> Result<i64, String> {
         self.db.store_knowledge(
             &entry.category,
             &entry.key,
             &entry.value,
             entry.confidence,
             &entry.source,
+            repository_id,
         )
     }
 
@@ -127,15 +134,17 @@ impl KnowledgeHub {
 
     /// Retrieve knowledge matching a query — lexical BM25/tantivy + FlashRank reranking
     /// `K` adaptive to token budget: `K = clamp(remaining_budget / avg_doc_tokens, 5, 20)`; expensive rerank bounded.
+    /// `repository_id: Some(id)` scopes results to one repository (TASK-030/F-1).
     pub fn retrieve_knowledge(
         &self,
         query: &str,
         category_filter: Option<&str>,
         max_results: usize,
+        repository_id: Option<&str>,
     ) -> Result<Vec<KnowledgeEntry>, String> {
         // Step 1: lexical search (tantivy if available, else LIKE) — cheap pass, collect top 20
         let lexical_limit = 20usize;
-        let records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit)?;
+        let records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit, repository_id)?;
 
         // Step 2: adaptive K for reranker (bound expensive step, not cheap lexical pass)
         // Assume avg doc ~80 tokens, remaining budget heuristic: max_results * 200 tokens
@@ -162,7 +171,7 @@ impl KnowledgeHub {
 
         // Preserve original records for lookup after rerank
         // Re-run records fetch to map ids → entries after reranking
-        let original_records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit)?;
+        let original_records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit, repository_id)?;
         let reranked = reranker.rerank(query, candidates);
 
         // Step 4: map reranked candidates back to KnowledgeEntry, filter by confidence ≥0.3, take max_results
@@ -549,7 +558,7 @@ mod tests {
             relevance_score: None,
         }).unwrap();
 
-        let results = hub.retrieve_knowledge("snake", None, 10).unwrap();
+        let results = hub.retrieve_knowledge("snake", None, 10, None).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].value.contains("snake_case"));
     }
@@ -657,6 +666,21 @@ mod tests {
     // Note: try_engram_search is private → test via public retrieve_knowledge/memory_search paths
 
     #[test]
+    fn test_retrieve_knowledge_repo_scoped() {
+        // TASK-030/F-1: retrieval must be repository-scoped
+        let hub = test_hub();
+        hub.store_knowledge_for_repo(&KnowledgeEntry { id: None, category: "docs".to_string(), key: "checkout.md".to_string(), value: "eshop basket checkout flow".to_string(), confidence: 0.9, source: "mkdocs".to_string(), relevance_score: None }, "repo_eshop").unwrap();
+        hub.store_knowledge_for_repo(&KnowledgeEntry { id: None, category: "docs".to_string(), key: "router.md".to_string(), value: "coderun daemon router checkout".to_string(), confidence: 0.9, source: "mkdocs".to_string(), relevance_score: None }, "repo_coderun").unwrap();
+
+        let eshop = hub.retrieve_knowledge("checkout", None, 10, Some("repo_eshop")).unwrap();
+        assert_eq!(eshop.len(), 1);
+        assert_eq!(eshop[0].key, "checkout.md", "only the requested repo's docs may surface");
+
+        let other = hub.retrieve_knowledge("basket", None, 10, Some("repo_coderun")).unwrap();
+        assert!(other.is_empty(), "no cross-repo leakage");
+    }
+
+    #[test]
     fn test_try_engram_search_fallback_when_endpoint_down() {
         // Engram MCP primary tries HTTP 2s timeout → on Err falls back to local LIKE with WARN
         let hub = test_hub(); // default memory_endpoint http://localhost:9090 (likely down in CI)
@@ -664,7 +688,7 @@ mod tests {
         // try_engram_search is private, but retrieve_knowledge exercises it via the same path
         // When engram is down, retrieve should still return local hits via fallback
         hub.store_knowledge(&KnowledgeEntry { id: None, category: "default".to_string(), key: "fallback_key".to_string(), value: "fallback_value contains engram_test_token".to_string(), confidence: 0.8, source: "test".to_string(), relevance_score: None }).unwrap();
-        let res = hub.retrieve_knowledge("engram_test_token", None, 5).unwrap();
+        let res = hub.retrieve_knowledge("engram_test_token", None, 5, None).unwrap();
         assert!(!res.is_empty(), "fallback LIKE should return hits when engram down");
     }
 
@@ -686,7 +710,7 @@ mod tests {
         for i in 0..5 {
             hub.store_knowledge(&KnowledgeEntry { id: None, category: "docs".to_string(), key: format!("k{i}"), value: format!("FlashRank ort rerank test doc {i} contains rust"), confidence: 0.6, source: "test".to_string(), relevance_score: None }).unwrap();
         }
-        let res = hub.retrieve_knowledge("rust", Some("docs"), 3).unwrap();
+        let res = hub.retrieve_knowledge("rust", Some("docs"), 3, None).unwrap();
         assert!(!res.is_empty());
         assert!(res.len() <= 3);
         // Adaptive K is exercised internally — no panic means pipeline (tantivy→rerank→engram) works

@@ -55,6 +55,10 @@ impl Database {
         let migration_003 = include_str!("migrations/003_graph.sql");
         self.apply_migration("003_graph", migration_003)?;
 
+        // Migration 006: repository-scoped knowledge (TASK-030) + dedup cleanup (TASK-032)
+        let migration_006 = include_str!("migrations/006_knowledge_repo.sql");
+        self.apply_migration("006_knowledge_repo", migration_006)?;
+
         // v1: 004_events and 005_audits removed per TASK-002/TASK-001 — preserved in future/workflow/migrations/
         // Event persistence (ring buffer + SQLite) and workflow audits are NOT part of v1 hot path.
         // v1 keeps only tracing + metrics + correlation IDs (EventBus is in-memory only).
@@ -323,13 +327,15 @@ impl Database {
 
     // ── Knowledge Operations ───────────────────────────────────────
 
-    /// Store a knowledge entry
-    pub fn store_knowledge(&self, category: &str, key: &str, value: &str, confidence: f64, source: &str) -> Result<i64, String> {
+    /// Store a knowledge entry — idempotent upsert on (category, key, repository_id) (TASK-032)
+    pub fn store_knowledge(&self, category: &str, key: &str, value: &str, confidence: f64, source: &str, repository_id: &str) -> Result<i64, String> {
         let start = Instant::now();
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO knowledge (category, key, value, confidence, source, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![category, key, value, confidence, source, Utc::now().to_rfc3339()],
+                "INSERT INTO knowledge (category, key, value, confidence, source, repository_id, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(category, key, repository_id) DO UPDATE SET
+                   value = excluded.value, confidence = excluded.confidence, source = excluded.source, updated_at = excluded.updated_at",
+                params![category, key, value, confidence, source, repository_id, Utc::now().to_rfc3339()],
             )
             .map_err(|e| format!("Failed to store knowledge: {}", e))?;
         let id = self.conn.last_insert_rowid();
@@ -341,7 +347,7 @@ impl Database {
     pub fn get_knowledge(&self, category: &str, key: &str) -> Result<Option<KnowledgeRecord>, String> {
         let start = Instant::now();
         let result = self.conn.query_row(
-            "SELECT id, category, key, value, confidence, source, created_at, updated_at FROM knowledge WHERE category = ?1 AND key = ?2",
+            "SELECT id, category, key, value, confidence, source, created_at, updated_at, repository_id FROM knowledge WHERE category = ?1 AND key = ?2 ORDER BY confidence DESC LIMIT 1",
             params![category, key],
             |row| {
                 Ok(KnowledgeRecord {
@@ -353,6 +359,7 @@ impl Database {
                     source: row.get(5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
+                    repository_id: row.get(8)?,
                 })
             },
         );
@@ -369,7 +376,7 @@ impl Database {
         let start = Instant::now();
         let mut stmt = self
             .conn
-            .prepare("SELECT id, category, key, value, confidence, source, created_at, updated_at FROM knowledge ORDER BY confidence DESC")
+            .prepare("SELECT id, category, key, value, confidence, source, created_at, updated_at, repository_id FROM knowledge ORDER BY confidence DESC")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let records = stmt
@@ -383,6 +390,7 @@ impl Database {
                     source: row.get(5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
+                    repository_id: row.get(8)?,
                 })
             })
             .map_err(|e| format!("Failed to query knowledge: {}", e))?
@@ -398,7 +406,7 @@ impl Database {
         let start = Instant::now();
         let mut stmt = self
             .conn
-            .prepare("SELECT id, category, key, value, confidence, source, created_at, updated_at FROM knowledge WHERE category = ?1 ORDER BY confidence DESC")
+            .prepare("SELECT id, category, key, value, confidence, source, created_at, updated_at, repository_id FROM knowledge WHERE category = ?1 ORDER BY confidence DESC")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let records = stmt
@@ -412,6 +420,7 @@ impl Database {
                     source: row.get(5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
+                    repository_id: row.get(8)?,
                 })
             })
             .map_err(|e| format!("Failed to query knowledge: {}", e))?
@@ -449,18 +458,22 @@ impl Database {
         Ok(affected)
     }
 
-    /// Search knowledge by text (simple LIKE-based search)
-    pub fn search_knowledge(&self, query: &str, category_filter: Option<&str>, min_confidence: f64, max_results: usize) -> Result<Vec<KnowledgeRecord>, String> {
+    /// Search knowledge by text (LIKE-based) — optionally scoped to a repository (TASK-030).
+    /// `repository_filter: Some(id)` matches ONLY rows stamped with that id (strict — legacy ''
+    /// rows never leak across repos). `None` returns everything.
+    pub fn search_knowledge(&self, query: &str, category_filter: Option<&str>, min_confidence: f64, max_results: usize, repository_filter: Option<&str>) -> Result<Vec<KnowledgeRecord>, String> {
         let start = Instant::now();
         let pattern = format!("%{}%", query);
-        
+
         let mut records = Vec::new();
-        
+
+        // Build parameterized SQL manually to keep the existing filter shapes
         if let Some(cat) = category_filter {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, category, key, value, confidence, source, created_at, updated_at FROM knowledge WHERE (key LIKE ?1 OR value LIKE ?1) AND category = ?2 AND confidence >= ?3 ORDER BY confidence DESC LIMIT ?4"
-            ).map_err(|e| format!("Failed to prepare query: {}", e))?;
-            let rows = stmt.query_map(params![pattern, cat, min_confidence, max_results], |row| {
+            let sql_with_repo = "SELECT id, category, key, value, confidence, source, created_at, updated_at, repository_id FROM knowledge WHERE (key LIKE ?1 OR value LIKE ?1) AND category = ?2 AND confidence >= ?3 AND repository_id = ?4 ORDER BY confidence DESC LIMIT ?5";
+            let sql_plain   = "SELECT id, category, key, value, confidence, source, created_at, updated_at, repository_id FROM knowledge WHERE (key LIKE ?1 OR value LIKE ?1) AND category = ?2 AND confidence >= ?3 ORDER BY confidence DESC LIMIT ?4";
+            let mut stmt = self.conn.prepare(if repository_filter.is_some() { sql_with_repo } else { sql_plain })
+                .map_err(|e| format!("Failed to prepare query: {}", e))?;
+            let map_row = |row: &rusqlite::Row| -> Result<KnowledgeRecord, rusqlite::Error> {
                 Ok(KnowledgeRecord {
                     id: row.get(0)?,
                     category: row.get(1)?,
@@ -470,16 +483,23 @@ impl Database {
                     source: row.get(5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
+                    repository_id: row.get(8)?,
                 })
-            }).map_err(|e| format!("Failed to query knowledge: {}", e))?;
+            };
+            let rows = if let Some(repo) = repository_filter {
+                stmt.query_map(params![pattern, cat, min_confidence, repo, max_results], map_row)
+            } else {
+                stmt.query_map(params![pattern, cat, min_confidence, max_results], map_row)
+            }.map_err(|e| format!("Failed to query knowledge: {}", e))?;
             for row in rows {
                 records.push(row.map_err(|e| format!("Failed to read row: {}", e))?);
             }
         } else {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, category, key, value, confidence, source, created_at, updated_at FROM knowledge WHERE (key LIKE ?1 OR value LIKE ?1) AND confidence >= ?2 ORDER BY confidence DESC LIMIT ?3"
-            ).map_err(|e| format!("Failed to prepare query: {}", e))?;
-            let rows = stmt.query_map(params![pattern, min_confidence, max_results], |row| {
+            let sql_with_repo = "SELECT id, category, key, value, confidence, source, created_at, updated_at, repository_id FROM knowledge WHERE (key LIKE ?1 OR value LIKE ?1) AND confidence >= ?2 AND repository_id = ?3 ORDER BY confidence DESC LIMIT ?4";
+            let sql_plain   = "SELECT id, category, key, value, confidence, source, created_at, updated_at, repository_id FROM knowledge WHERE (key LIKE ?1 OR value LIKE ?1) AND confidence >= ?2 ORDER BY confidence DESC LIMIT ?3";
+            let mut stmt = self.conn.prepare(if repository_filter.is_some() { sql_with_repo } else { sql_plain })
+                .map_err(|e| format!("Failed to prepare query: {}", e))?;
+            let map_row = |row: &rusqlite::Row| -> Result<KnowledgeRecord, rusqlite::Error> {
                 Ok(KnowledgeRecord {
                     id: row.get(0)?,
                     category: row.get(1)?,
@@ -489,12 +509,18 @@ impl Database {
                     source: row.get(5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
+                    repository_id: row.get(8)?,
                 })
-            }).map_err(|e| format!("Failed to query knowledge: {}", e))?;
+            };
+            let rows = if let Some(repo) = repository_filter {
+                stmt.query_map(params![pattern, min_confidence, repo, max_results], map_row)
+            } else {
+                stmt.query_map(params![pattern, min_confidence, max_results], map_row)
+            }.map_err(|e| format!("Failed to query knowledge: {}", e))?;
             for row in rows {
                 records.push(row.map_err(|e| format!("Failed to read row: {}", e))?);
             }
-        };
+        }
 
         log_slow("search_knowledge", start);
         Ok(records)
@@ -690,6 +716,8 @@ pub struct KnowledgeRecord {
     pub source: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Owning repository scope (TASK-030) — '' marks legacy/global rows
+    pub repository_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -911,4 +939,64 @@ mod tests {
 
     // v1: 004/005 migrations removed — tests moved to future/workflow
     // Workflow audits/workflows are NOT part of v1 hot path (TASK-001/002)
+
+    #[test]
+    fn test_knowledge_repo_scoping_and_upsert() {
+        // TASK-030/032: repository-scoped search, idempotent upsert, duplicate collapse
+        let db = test_db();
+        db.store_knowledge("docs", "guide.md", "v1 eshop checkout", 0.8, "mkdocs", "repo_a").unwrap();
+        // Re-store same key → upsert, not growth (F-3)
+        db.store_knowledge("docs", "guide.md", "v2 eshop checkout", 0.9, "mkdocs", "repo_a").unwrap();
+        // Same key in another repo → separate row (cross-repo isolation)
+        db.store_knowledge("docs", "guide.md", "other repo checkout content zzz", 0.7, "mkdocs", "repo_b").unwrap();
+
+        let all = db.get_all_knowledge().unwrap();
+        assert_eq!(all.len(), 2, "upsert must not grow the table");
+        let a = db.get_knowledge("docs", "guide.md").unwrap().unwrap();
+        assert!((a.confidence - 0.9).abs() < 1e-9, "highest-confidence write wins");
+
+        let hits_a = db.search_knowledge("checkout", None, 0.0, 10, Some("repo_a")).unwrap();
+        assert_eq!(hits_a.len(), 1);
+        assert_eq!(hits_a[0].repository_id, "repo_a");
+        let hits_b = db.search_knowledge("checkout", None, 0.0, 10, Some("repo_b")).unwrap();
+        assert_eq!(hits_b.len(), 1);
+        assert!(hits_b[0].value.contains("other repo"), "no cross-repo leakage (F-1)");
+    }
+
+    #[test]
+    fn test_migration_006_collapses_legacy_duplicates() {
+        // Simulate a legacy DB (pre-006): create schema without repository_id via manual SQL,
+        // insert duplicates, then open through Database::open to trigger migration.
+        let dir = std::env::temp_dir().join(format!("coderun_m006_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE knowledge (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );",
+            )
+            .unwrap();
+            for _ in 0..4 {
+                conn.execute(
+                    "INSERT INTO knowledge (category, key, value, confidence, source) VALUES ('docs', 'dup.md', 'dup content', 0.6, 'mkdocs')",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+        let db = Database::open(&path).unwrap();
+        let rows = db.search_knowledge("dup content", None, 0.0, 100, None).unwrap();
+        assert_eq!(rows.len(), 1, "migration must collapse duplicate rows keeping max confidence");
+        assert_eq!(rows[0].repository_id, "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

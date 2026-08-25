@@ -17,6 +17,8 @@ anyhow.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tempfile = "3"
+# Windows verbatim-path (\\?\\) cleanup for stable repository identity + provenance (TASK-030/033)
+dunce = "1"
 
 # Ripgrep libraries for fast text search
 grep-searcher = "0.1"

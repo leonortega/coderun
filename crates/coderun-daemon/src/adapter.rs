@@ -334,11 +334,13 @@ async fn handle_request(
             session_id,
             message,
             context_hints,
+            repository_path,
         } => {
             handle_pre_generation(
                 message.clone(),
                 session_id.clone(),
                 context_hints.clone(),
+                repository_path.clone(),
                 context_engine,
             ).await
         }
@@ -347,6 +349,7 @@ async fn handle_request(
             output_type,
             content,
             context,
+            ..
         } => {
             handle_pre_tool_call(
                 tool_name.clone(),
@@ -418,12 +421,18 @@ async fn handle_pre_generation(
     message: String,
     session_id: String,
     context_hints: Option<coderun_core::ContextHints>,
+    repository_path: Option<String>,
     context_engine: Arc<RwLock<ContextEngine>>,
 ) -> Result<ResponsePayload, String> {
     let task = TaskRequest {
         message: message.clone(),
         session_id,
         context_hints,
+        repository_id: match repository_path.as_deref() {
+            Some(p) if !p.trim().is_empty() => coderun_core::repository_id_from_path(p),
+            _ => String::new(),
+        },
+        repository_path,
     };
 
     // Metrics + rate-limit + audit (best-effort, off-hot-path)
@@ -431,6 +440,14 @@ async fn handle_pre_generation(
     let engine = context_engine.read().await;
     let (context_pack, routing_decision) = engine.build_context(&task)?;
     crate::metrics::global().inc_requests("PreGeneration", &routing_decision.tier);
+
+    // TASK-031/F-2: zero-value rewrite suppression
+    if context_pack.token_usage.total_tokens == 0 {
+        return Ok(ResponsePayload::OriginalPassthrough {
+            original: message,
+            reason: "no_context_hits".to_string(),
+        });
+    }
 
     Ok(ResponsePayload::RewrittenMessage(Box::new(coderun_core::RewrittenMessageData {
         original: message.clone(),
@@ -459,6 +476,10 @@ fn handle_pre_tool_call(
         content.clone(),
         context.as_deref(),
     );
+    // TASK-034/F-5: honest metrics — tokens_saved must reflect real compression
+    if result.original_tokens > result.compressed_tokens {
+        crate::metrics::global().add_tokens_saved(result.original_tokens - result.compressed_tokens);
+    }
 
     Ok(ResponsePayload::CompressedOutput {
         original: content,
@@ -492,6 +513,7 @@ mod tests {
                 session_id: "test".to_string(),
                 message: "test message".to_string(),
                 context_hints: None,
+                repository_path: None,
             },
             repository_id: String::new(),
             timestamp: String::new(),
@@ -507,6 +529,7 @@ mod tests {
                 output_type: OutputType::FileRead,
                 content: "file content".to_string(),
                 context: None,
+                repository_path: None,
             },
             repository_id: String::new(),
             timestamp: String::new(),
@@ -527,6 +550,7 @@ mod tests {
                     files_mentioned: Some(vec!["src/auth.rs".to_string()]),
                     language: Some("rust".to_string()),
                 }),
+                repository_path: None,
             },
             repository_id: String::new(),
             timestamp: String::new(),        };
@@ -596,6 +620,7 @@ mod tests {
                     session_id: "test".to_string(),
                     message: "test".to_string(),
                     context_hints: None,
+                    repository_path: None,
                 },
             repository_id: String::new(),
             timestamp: String::new(),            };
@@ -657,6 +682,7 @@ mod tests {
                 session_id: "test-session".to_string(),
                 message: "hello world".to_string(),
                 context_hints: None,
+                repository_path: None,
             },
             repository_id: String::new(),
             timestamp: String::new(),        };

@@ -33,6 +33,9 @@ pub enum HttpRequestPayload {
         session_id: Option<String>,
         message: String,
         context_hints: Option<ContextHintsJson>,
+        /// Agent workspace root (TASK-036) — daemon scopes retrieval to THIS repo, not its CWD
+        #[serde(default)]
+        repository_path: Option<String>,
     },
     #[serde(rename = "ToolOutput")]
     ToolOutput {
@@ -40,6 +43,9 @@ pub enum HttpRequestPayload {
         output_type: Option<String>,
         content: String,
         context: Option<String>,
+        /// Agent workspace root (TASK-036)
+        #[serde(default)]
+        repository_path: Option<String>,
     },
 }
 
@@ -65,6 +71,9 @@ pub enum HttpResponsePayload {
     RewrittenMessage {
         original: String,
         rewritten: String,
+        /// Full context pack (TASK-035: lets E2E tests assert provenance uniqueness/scoping)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_pack: Option<coderun_core::ContextPack>,
     },
     #[serde(rename = "CompressedOutput")]
     CompressedOutput {
@@ -277,12 +286,22 @@ async fn handle_hook(
     };
 
     // TASK-021: repository_id (hash repo_path) + timestamp propagated for full trace request→context→router→model→optimizer
+    // TASK-036/F-7: derive repository identity from the AGENT's workspace when provided;
+    // daemon CWD is only the fallback for direct API callers (curl, tests).
+    let repository_path: Option<String> = match &request.payload {
+        HttpRequestPayload::MessageRewrite { repository_path, .. } => repository_path.clone(),
+        HttpRequestPayload::ToolOutput { repository_path, .. } => repository_path.clone(),
+    };
     let repository_id = {
         use sha2::{Digest, Sha256};
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let mut h = Sha256::new();
-        h.update(cwd.to_string_lossy().as_bytes());
-        format!("{:x}", h.finalize())[..12].to_string()
+        if let Some(path) = repository_path.as_deref().filter(|p| !p.trim().is_empty()) {
+            coderun_core::repository_id_from_path(path)
+        } else {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let mut h = Sha256::new();
+            h.update(cwd.to_string_lossy().as_bytes());
+            format!("{:x}", h.finalize())[..12].to_string()
+        }
     };
     let timestamp = chrono::Utc::now().to_rfc3339();
     tracing::info!(correlation_id=%correlation_id, repository_id=%repository_id, timestamp=%timestamp, hook_type=%request.hook_type, "request received — trace start (request→context→router→model→optimizer)");
@@ -292,7 +311,7 @@ async fn handle_hook(
         repository_id: repository_id.clone(),
         timestamp: timestamp.clone(),
         payload: match request.payload {
-            HttpRequestPayload::MessageRewrite { session_id, message, context_hints } => {
+            HttpRequestPayload::MessageRewrite { session_id, message, context_hints, repository_path } => {
                 RequestPayload::MessageRewrite {
                     session_id: session_id.unwrap_or_default(),
                     message,
@@ -300,9 +319,10 @@ async fn handle_hook(
                         files_mentioned: h.files_mentioned,
                         language: h.language,
                     }),
+                    repository_path,
                 }
             }
-            HttpRequestPayload::ToolOutput { tool_name, output_type, content, context } => {
+            HttpRequestPayload::ToolOutput { tool_name, output_type, content, context, repository_path } => {
                 let ot = match output_type.as_deref() {
                     Some("FileRead") => OutputType::FileRead,
                     Some("SearchResult") => OutputType::SearchResult,
@@ -314,6 +334,7 @@ async fn handle_hook(
                     output_type: ot,
                     content,
                     context,
+                    repository_path,
                 }
             }
         },
@@ -351,15 +372,16 @@ async fn handle_request(
     let hook_type = format!("{:?}", request.hook_type);
 
     let payload = match &request.payload {
-        RequestPayload::MessageRewrite { session_id, message, context_hints } => {
+        RequestPayload::MessageRewrite { session_id, message, context_hints, repository_path } => {
             handle_pre_generation(
                 message.clone(),
                 session_id.clone(),
                 context_hints.clone(),
+                repository_path.clone(),
                 &state.context_engine,
             ).await?
         }
-        RequestPayload::ToolOutput { tool_name, output_type, content, context } => {
+        RequestPayload::ToolOutput { tool_name, output_type, content, context, .. } => {
             handle_pre_tool_call(
                 tool_name.clone(),
                 output_type.clone(),
@@ -383,12 +405,18 @@ async fn handle_pre_generation(
     message: String,
     session_id: String,
     context_hints: Option<coderun_core::ContextHints>,
+    repository_path: Option<String>,
     context_engine: &Arc<Mutex<ContextEngine>>,
 ) -> Result<HttpResponsePayload, String> {
     let task = TaskRequest {
         message: message.clone(),
         session_id,
         context_hints,
+        repository_id: match repository_path.as_deref() {
+            Some(p) if !p.trim().is_empty() => coderun_core::repository_id_from_path(p),
+            _ => String::new(),
+        },
+        repository_path,
     };
 
     let _timer = crate::metrics::Timer::start();
@@ -401,6 +429,16 @@ async fn handle_pre_generation(
     crate::metrics::global().set_retrieval_recall(recall);
     tracing::info!(correlation_id=%context_pack.metadata.correlation_id, repository_state=%context_pack.repository_state, total_tokens=%context_pack.token_usage.total_tokens, recall=%recall, tier=%routing_decision.tier, "trace: context→router (context built)");
 
+    // TASK-031/F-2: zero-value rewrite suppression — when all three content sources are empty,
+    // return the original untouched instead of a metadata-only skeleton (~500-700 tokens for nothing).
+    if context_pack.token_usage.total_tokens == 0 {
+        tracing::info!(correlation_id=%context_pack.metadata.correlation_id, "no context hits — OriginalPassthrough (TASK-031)");
+        return Ok(HttpResponsePayload::OriginalPassthrough {
+            original: message,
+            reason: "no_context_hits".to_string(),
+        });
+    }
+
     let yaml = coderun_context::ContextEngine::to_yaml(&context_pack)?;
 
     let rewritten = format!(
@@ -411,6 +449,7 @@ async fn handle_pre_generation(
     Ok(HttpResponsePayload::RewrittenMessage {
         original: message,
         rewritten,
+        context_pack: Some(context_pack),
     })
 }
 

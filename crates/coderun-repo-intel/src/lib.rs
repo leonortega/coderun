@@ -150,6 +150,8 @@ pub struct IndexStats {
 
 pub struct RepositoryIntelligence {
     repo_path: PathBuf,
+    /// Stable repository identity: hash of canonical repo path (TASK-030) — shared formula in coderun-core
+    repository_id: String,
     db: coderun_storage::Database,
     event_bus: EventBus,
     patterns: SymbolPatterns,
@@ -163,14 +165,24 @@ impl RepositoryIntelligence {
     pub fn new(repo_path: PathBuf, db: coderun_storage::Database, event_bus: EventBus) -> Self {
         let patterns = SymbolPatterns::new();
         let file_hashes = HashMap::new();
+        // Canonicalize without Windows verbatim prefix (\\?\\) so both daemon and CLI derive the
+        // SAME repository_id from the same directory (TASK-030/F-1)
+        let canonical = dunce::canonicalize(&repo_path).unwrap_or_else(|_| repo_path.clone());
+        let repository_id = coderun_core::repository_id_from_path(&canonical.to_string_lossy());
 
         Self {
             repo_path,
+            repository_id,
             db,
             event_bus,
             patterns,
             file_hashes,
         }
+    }
+
+    /// Repository identity accessor (hash of canonical repo path, 12 hex chars) — TASK-030
+    pub fn repository_id(&self) -> &str {
+        &self.repository_id
     }
 
     /// Index the repository (full or incremental) — wires tantivy BM25 in-process, incremental + MkDocs ingestion (v0.5.0)
@@ -269,12 +281,12 @@ impl RepositoryIntelligence {
                 }
             }
 
-            // Upsert into tantivy BM25 index (in-process, memory-mapped)
+            // Upsert into tantivy BM25 index (in-process, memory-mapped) — repo-stamped (TASK-030)
             if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                let _ = idx.delete_document(writer, &path_str);
+                let _ = idx.delete_document(writer, &path_str, &self.repository_id);
                 let lang_str = language.as_deref().unwrap_or("text");
                 let sym_names: Vec<String> = extract_symbols(&content, &self.patterns, language.as_deref()).iter().map(|s| s.name.clone()).collect();
-                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names);
+                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names, &self.repository_id);
             }
 
             files_indexed += 1;
@@ -294,7 +306,7 @@ impl RepositoryIntelligence {
             if !seen_paths.contains(path) {
                 self.db.delete_file(path)?;
                 if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                    let _ = idx.delete_document(writer, path);
+                    let _ = idx.delete_document(writer, path, &self.repository_id);
                 }
                 files_deleted += 1;
             }
@@ -307,25 +319,37 @@ impl RepositoryIntelligence {
 
         // FIRST-CLASS v0.5.0: MkDocs ingestion — walk docs/**/*.md → KnowledgeHub category="docs" + tantivy
         // Best-effort: if docs dir exists, push each md to knowledge store so docs feed retrieval (mkdocs.yml:40)
-        if let Ok(docs_root) = std::fs::canonicalize(self.repo_path.join("docs")) {
-            if docs_root.is_dir() {
-                let doc_files = WalkBuilder::new(&docs_root).hidden(false).git_ignore(true).build()
-                    .filter_map(|e| e.ok()).filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
-                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md")).collect::<Vec<_>>();
-                for entry in doc_files {
-                    let path = entry.path();
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        let rel = path.strip_prefix(&self.repo_path).unwrap_or(path).to_string_lossy().to_string();
-                        let _ = self.db.store_knowledge("docs", &rel, &content, 0.8, "mkdocs");
-                        // Also upsert into tantivy if available
-                        if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                            let _ = idx.add_document(writer, &format!("docs:{}", rel), &content, "markdown", &vec![rel.clone()]);
-                        }
+        // TASK-030: docs are stamped with this repository_id; TASK-032: upsert (never grows);
+        // TASK-033: dunce::canonicalize avoids \\?\ verbatim prefixes leaking into keys/paths.
+        let docs_dir = self.repo_path.join("docs");
+        if docs_dir.is_dir() {
+            let docs_root = dunce::canonicalize(&docs_dir).unwrap_or(docs_dir);
+            let doc_files = WalkBuilder::new(&docs_root).hidden(false).git_ignore(true).build()
+                .filter_map(|e| e.ok()).filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md")).collect::<Vec<_>>();
+            for entry in doc_files {
+                let path = entry.path();
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    // Robust relative path — falls back to the cleaned absolute path when
+                    // strip_prefix fails (mixed canonicalization), never a \\?\ prefix.
+                    let rel = path.strip_prefix(&self.repo_path)
+                        .or_else(|_| path.strip_prefix(dunce::canonicalize(&self.repo_path).unwrap_or_else(|_| self.repo_path.clone())))
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .trim_start_matches("\\\\?\\")
+                        .to_string();
+                    // Idempotent upsert keyed on (category, key, repository_id) — TASK-032
+                    let _ = self.db.store_knowledge("docs", &rel, &content, 0.8, "mkdocs", &self.repository_id);
+                    // Also upsert into tantivy — delete-before-add keeps it idempotent (TASK-032)
+                    if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+                        let doc_key = format!("docs:{}", rel);
+                        let _ = idx.delete_document(writer, &doc_key, &self.repository_id);
+                        let _ = idx.add_document(writer, &doc_key, &content, "markdown", &[rel.clone()], &self.repository_id);
                     }
                 }
-                if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                    let _ = idx.commit(writer);
-                }
+            }
+            if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+                let _ = idx.commit(writer);
             }
         }
 
@@ -456,18 +480,21 @@ impl RepositoryIntelligence {
     }
 
     /// Full-text BM25 search via tantivy (spec §3 — tantivy/BM25, in-process, memory-mapped)
+    /// `repository_id: Some(id)` scopes hits to one repository (TASK-030/F-1); `None` searches all.
+    /// Falls back to ripgrep over THIS instance's repo_path when the index misses — inherently repo-scoped.
     pub fn search_fulltext(
         &self,
         query: &str,
         language_filter: Option<&str>,
         max_results: usize,
+        repository_id: Option<&str>,
     ) -> Result<SearchResults, String> {
         // Try tantivy index at default location; fallback to ripgrep if index missing
         let index_path = default_index_path();
         match coderun_storage::tantivy_index::TantivyIndex::open(&index_path) {
             Ok(idx) => {
                 let reader = idx.reader().map_err(|e| format!("tantivy reader: {e}"))?;
-                match idx.search(&reader, query, language_filter, max_results) {
+                match idx.search(&reader, query, language_filter, max_results, repository_id) {
                     Ok(hits) => {
                         if hits.is_empty() {
                             debug!("tantivy returned 0 hits for '{}', falling back to ripgrep", query);
@@ -750,8 +777,15 @@ fn is_likely_binary(path: &Path) -> bool {
     }
 }
 
-/// Default tantivy index path (spec §3 — MmapDirectory)
+/// Default tantivy index path (spec §3 — MmapDirectory).
+/// `CODERUN_INDEX_DIR` overrides for tests/isolation (TASK-035) — keeps the shared
+/// global index from being polluted by parallel test runs.
 fn default_index_path() -> String {
+    if let Ok(dir) = std::env::var("CODERUN_INDEX_DIR") {
+        if !dir.is_empty() {
+            return dir;
+        }
+    }
     if let Some(home) = dirs_home() {
         home.join(".coderun").join("index").to_string_lossy().to_string()
     } else {
@@ -897,6 +931,9 @@ struct ExtractedSymbol {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that touch the shared global tantivy index / CODERUN_INDEX_DIR env
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_detect_language() {
@@ -1067,13 +1104,15 @@ export async function fetchData() {
     #[test]
     fn test_search_fulltext_via_tantivy_fallback() {
         // Full-text BM25: should fallback to ripgrep when tantivy index missing, still return results
+        let _env = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CODERUN_INDEX_DIR");
         let dir = std::env::temp_dir().join(format!("coderun_fulltext_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.md"), "authentication middleware handles token verification").unwrap();
         std::fs::write(dir.join("main.rs"), "fn authenticate() { /* token check */ }").unwrap();
         let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
         let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
-        let res = ri.search_fulltext("authentication", None, 10).unwrap();
+        let res = ri.search_fulltext("authentication", None, 10, None).unwrap();
         assert!(res.total_count >= 1, "fulltext should find at least one hit");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1096,6 +1135,8 @@ export async function fetchData() {
     #[test]
     fn test_mkdocs_ingestion_on_index() {
         // MkDocs first-class: index_repository() walks docs/**/*.md → store_knowledge(category="docs")
+        let _env = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CODERUN_INDEX_DIR");
         let dir = std::env::temp_dir().join(format!("coderun_mkdocs_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("docs").join("guide.md"), "# Guide\nThis is mkdocs test content").unwrap();
@@ -1107,20 +1148,52 @@ export async function fetchData() {
         assert!(stats.files_indexed >= 1);
         // Re-open DB to verify docs knowledge was ingested
         let db2 = coderun_storage::Database::open(&db_path).unwrap();
-        let docs = db2.search_knowledge("mkdocs test content", Some("docs"), 0.0, 10).unwrap();
+        let repo_id = ri_repository_id_for_test(&dir);
+        let docs = db2.search_knowledge("mkdocs test content", Some("docs"), 0.0, 10, Some(&repo_id)).unwrap();
         assert!(!docs.is_empty(), "docs ingestion should have stored guide.md with category=docs");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn test_mkdocs_ingestion_is_idempotent() {
+        // TASK-032/F-3: re-running index N times must not grow the knowledge table
+        let _env = ENV_LOCK.lock().unwrap();
+        let index_dir = std::env::temp_dir().join(format!("coderun_idx_{}", uuid::Uuid::new_v4()));
+        std::env::set_var("CODERUN_INDEX_DIR", index_dir.to_string_lossy().to_string());
+        let dir = std::env::temp_dir().join(format!("coderun_mkdocs_idem_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs").join("guide.md"), "# Guide\nidempotent mkdocs content").unwrap();
+        let db_path = dir.join("test.db");
+        for _ in 0..3 {
+            let db = coderun_storage::Database::open(&db_path).unwrap();
+            let mut ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
+            ri.index_repository().unwrap();
+        }
+        let db2 = coderun_storage::Database::open(&db_path).unwrap();
+        let repo_id = ri_repository_id_for_test(&dir);
+        let hits = db2.search_knowledge("idempotent mkdocs", None, 0.0, 100, Some(&repo_id)).unwrap();
+        assert_eq!(hits.len(), 1, "re-index must upsert, not duplicate (got {})", hits.len());
+        std::env::remove_var("CODERUN_INDEX_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compute the same repository_id an RI under `dir` would compute (canonical path hash)
+    fn ri_repository_id_for_test(dir: &Path) -> String {
+        let canonical = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        coderun_core::repository_id_from_path(&canonical.to_string_lossy())
+    }
+
+    #[test]
     fn test_tantivy_first_class_then_fallback() {
         // Tantivy MmapDirectory primary → when index missing, search_fulltext() falls back to ripgrep with WARN
+        let _env = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CODERUN_INDEX_DIR");
         let dir = std::env::temp_dir().join(format!("coderun_tantivy_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "hello world tantivy primary").unwrap();
         let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
         let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
-        let res = ri.search_fulltext("hello", None, 5).unwrap();
+        let res = ri.search_fulltext("hello", None, 5, None).unwrap();
         assert!(res.total_count >= 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

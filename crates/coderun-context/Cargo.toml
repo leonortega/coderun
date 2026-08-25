@@ -19,3 +19,5 @@ tracing.workspace = true
 anyhow.workspace = true
 tiktoken-rs.workspace = true
 uuid = { version = "1", features = ["v4"] }
+# Windows verbatim-path (\\?\\) cleanup for provenance paths + repo identity (TASK-033)
+dunce = "1"

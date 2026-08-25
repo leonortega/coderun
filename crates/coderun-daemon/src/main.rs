@@ -1,17 +1,10 @@
 #![allow(linker_messages)]
 // coderun-daemon: daemon binary — HTTP server, signal handling, process lifecycle
 
-#[allow(dead_code)]
-mod adapter;
-mod http_server;
-mod lifecycle;
-mod metrics;
-mod ratelimit;
-
 use std::path::PathBuf;
 
 use coderun_core::Config;
-use lifecycle::DaemonState;
+use coderun_daemon::lifecycle::DaemonState;
 
 #[tokio::main]
 async fn main() {
