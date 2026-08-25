@@ -178,22 +178,22 @@ Info "Removing opencode plugins..."
 $pluginProject = Join-Path $Root ".opencode\plugins\coderun.ts"
 $pluginGlobal = Join-Path $env:USERPROFILE ".config\opencode\plugins\coderun.ts"
 $hardcodedGlobalPlugin = "C:\Users\marce\.config\opencode\plugins\coderun.ts"
-# Global plugin (outside repo) - always delete (hardcoded path as requested)
+# Global plugin (outside repo) - always delete (hardcoded path as requested) - plugin 'coderun'
 foreach ($g in @($pluginGlobal, $hardcodedGlobalPlugin) | Select-Object -Unique) {
   if (Test-Path $g) {
     if ($PSCmdlet.ShouldProcess($g, "Remove-Item")) {
-      try { Remove-Item -LiteralPath $g -Force -ErrorAction Stop; Ok "removed global plugin 'coderun' at $g" } catch { Warn "failed to remove $g : $_" }
-    } else { Skip "would remove global plugin 'coderun' at $g" }
-  } else { Skip "not found global plugin 'coderun' at $g" }
+      try { Remove-Item -LiteralPath $g -Force -ErrorAction Stop; Ok "removed global plugin 'coderun'" } catch { Warn "failed to remove global plugin 'coderun': $_" }
+    } else { Skip "would remove global plugin 'coderun'" }
+  } else { Skip "not found global plugin 'coderun'" }
 }
-# Repository plugin - keep unless -RemoveRepo (use .opencode folder, not absolute repo path in logs)
+# Repository plugin - keep unless -RemoveRepo (use .opencode folder, plugin 'coderun')
 if (Test-Path $pluginProject) {
   if ($doRemoveRepo) {
     if ($PSCmdlet.ShouldProcess(".opencode/plugins/coderun.ts", "Remove-Item")) {
-      try { Remove-Item -LiteralPath $pluginProject -Force -ErrorAction Stop; Ok "removed plugin 'coderun' at .opencode/plugins/coderun.ts (--RemoveRepo)" } catch { Warn "failed to remove .opencode/plugins/coderun.ts : $_" }
-    } else { Skip "would remove plugin 'coderun' at .opencode/plugins/coderun.ts" }
-  } else { Skip "keeping plugin 'coderun' at .opencode/plugins/coderun.ts (use -RemoveRepo to delete)" }
-} else { Skip "not found plugin 'coderun' at .opencode/plugins/coderun.ts" }
+      try { Remove-Item -LiteralPath $pluginProject -Force -ErrorAction Stop; Ok "removed plugin 'coderun' (--RemoveRepo)" } catch { Warn "failed to remove plugin 'coderun': $_" }
+    } else { Skip "would remove plugin 'coderun'" }
+  } else { Skip "keeping plugin 'coderun' (use -RemoveRepo to delete)" }
+} else { Skip "not found plugin 'coderun'" }
 # Only clean global empty dir by default; repo dir is kept
 if ((Test-Path $env:USERPROFILE\.config\opencode\plugins) -and -not (Get-ChildItem -LiteralPath "$env:USERPROFILE\.config\opencode\plugins" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ".gitkeep" })) {
   if ($PSCmdlet.ShouldProcess("$env:USERPROFILE\.config\opencode\plugins", "Remove-Item")) {

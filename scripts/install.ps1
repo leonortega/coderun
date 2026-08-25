@@ -432,7 +432,7 @@ $srcPlugin = Join-Path $opencodeDir "plugins\coderun.ts"
 $pluginsDir = Join-Path $opencodeDir "plugins"
 New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
 if (Test-Path $srcPlugin) {
-  Ok "opencode plugin 'coderun' at .opencode/plugins/coderun.ts"
+  Ok "opencode plugin 'coderun'"
   # Global fallback for opencode installed via user config
   $globalPluginDir = "$env:USERPROFILE\.config\opencode\plugins"
   try {

@@ -205,7 +205,7 @@ EOF
 ok "opencode MCPs at .opencode/opencode.jsonc (codebase-memory + engram -> .opencode/engram/engram)"
 SRC_PLUGIN="$ROOT/.opencode/plugins/coderun.ts"
 if [ -f "$SRC_PLUGIN" ]; then
-  ok "opencode plugin 'coderun' at .opencode/plugins/coderun.ts"
+  ok "opencode plugin 'coderun'"
   GLOBAL_PLUGIN_DIR="$HOME/.config/opencode/plugins"
   mkdir -p "$GLOBAL_PLUGIN_DIR" 2>/dev/null
   cp -f "$SRC_PLUGIN" "$GLOBAL_PLUGIN_DIR/" 2>/dev/null && ok "opencode plugin 'coderun' copied to global" || info "  global plugin copy skipped"
