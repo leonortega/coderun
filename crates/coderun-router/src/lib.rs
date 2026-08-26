@@ -57,6 +57,9 @@ pub struct RoutingRequest {
     pub skills_matched: usize,
     pub token_count: usize,
     pub model_override: Option<String>,
+    /// True when both code search and knowledge retrieval returned zero results.
+    /// This signals insufficient context, not simplicity — should escalate tier.
+    pub retrieval_empty: bool,
 }
 
 impl ModelRouter {
@@ -101,9 +104,26 @@ impl ModelRouter {
         );
 
         // Weighted final score
-        let final_score = structural * self.config.structural_weight
+        let mut final_score = structural * self.config.structural_weight
             + semantic * self.config.semantic_weight
             + scope * self.config.scope_weight;
+
+        // Zero-result safeguard: when retrieval returns nothing, the agent is flying blind.
+        // Floor the scope score at 0.9 to prevent routing to cheap models on empty context.
+        // With scope_weight=0.3, this contributes ~0.27 to the final score — enough to push
+        // even a simple semantic message (0.05-0.15) above the fast_threshold (0.3).
+        let scope_override = if request.retrieval_empty && scope < 0.9 {
+            debug!(original_scope = scope, "zero-result retrieval: floored scope to 0.9");
+            0.9
+        } else {
+            scope
+        };
+
+        if request.retrieval_empty && scope < 0.9 {
+            final_score = structural * self.config.structural_weight
+                + semantic * self.config.semantic_weight
+                + scope_override * self.config.scope_weight;
+        }
 
         // Map score to tier — models from ModelsConfig (TASK-018)
         let (tier, model) = if final_score < self.config.fast_threshold {
@@ -114,10 +134,17 @@ impl ModelRouter {
             ("balanced".to_string(), self.models.balanced.clone())
         };
 
-        let reasoning = format!(
-            "Structural: {:.2}, Semantic: {:.2}, Scope: {:.2}, Final: {:.2} → {}",
-            structural, semantic, scope, final_score, tier
-        );
+        let reasoning = if request.retrieval_empty && scope < 0.9 {
+            format!(
+                "Structural: {:.2}, Semantic: {:.2}, Scope: {:.2} (zero-result floor 0.9 applied), Final: {:.2} → {}",
+                structural, semantic, scope_override, final_score, tier
+            )
+        } else {
+            format!(
+                "Structural: {:.2}, Semantic: {:.2}, Scope: {:.2}, Final: {:.2} → {}",
+                structural, semantic, scope, final_score, tier
+            )
+        };
 
         debug!(
             structural = structural,
@@ -225,6 +252,7 @@ impl coderun_core::IModelGateway for ModelRouter {
             skills_matched,
             token_count,
             model_override: model_override.map(|s| s.to_string()),
+            retrieval_empty: false,
         };
         self.select_model(&req)
     }
@@ -300,6 +328,7 @@ mod tests {
             skills_matched: 0,
             token_count: 100,
             model_override: None,
+            retrieval_empty: false,
         };
 
         let decision = router.select_model(&request);
@@ -318,6 +347,7 @@ mod tests {
             skills_matched: 3,
             token_count: 10000,
             model_override: None,
+            retrieval_empty: false,
         };
 
         let decision = router.select_model(&request);
@@ -336,6 +366,7 @@ mod tests {
             skills_matched: 2,
             token_count: 5000,
             model_override: None,
+            retrieval_empty: false,
         };
 
         let decision = router.select_model(&request);
@@ -354,6 +385,7 @@ mod tests {
             skills_matched: 0,
             token_count: 50,
             model_override: Some("custom-model".to_string()),
+            retrieval_empty: false,
         };
 
         let decision = router.select_model(&request);
@@ -411,6 +443,7 @@ mod tests {
             skills_matched: 2,
             token_count: 5000,
             model_override: None,
+            retrieval_empty: false,
         };
 
         let decision = router.select_model(&request);
@@ -441,6 +474,60 @@ mod tests {
         assert_eq!(d.tier, "fast");
         assert_eq!(router.tier_to_model("fast"), "gpt-4o-mini");
         assert_eq!(router.tier_to_model("capable"), "o1");
+    }
+
+    #[test]
+    fn test_zero_result_floor_escalates_tier() {
+        // When retrieval is empty (retrieval_empty=true) and scope is low,
+        // the zero-result floor should escalate the tier from fast to balanced.
+        let router = default_router();
+        // Simple message + zero context → normally fast tier
+        let request_without_floor = RoutingRequest {
+            message: "fix the checkout flow".to_string(),
+            file_count: 0,
+            symbol_count: 0,
+            knowledge_entries: 0,
+            skills_matched: 0,
+            token_count: 0,
+            model_override: None,
+            retrieval_empty: false,
+        };
+        let d1 = router.select_model(&request_without_floor);
+        // With zero context and simple message, this should be fast
+        assert_eq!(d1.tier, "fast", "zero context without floor should be fast");
+
+        // Same request but with retrieval_empty=true → should escalate
+        let request_with_floor = RoutingRequest {
+            message: "fix the checkout flow".to_string(),
+            file_count: 0,
+            symbol_count: 0,
+            knowledge_entries: 0,
+            skills_matched: 0,
+            token_count: 0,
+            model_override: None,
+            retrieval_empty: true,
+        };
+        let d2 = router.select_model(&request_with_floor);
+        assert_eq!(d2.tier, "balanced", "zero-result floor should escalate to balanced");
+        assert!(d2.reasoning.contains("zero-result floor"), "reasoning should document the override");
+    }
+
+    #[test]
+    fn test_zero_result_floor_not_applied_when_results_exist() {
+        // When retrieval has results (retrieval_empty=false), normal scoring applies
+        let router = default_router();
+        let request = RoutingRequest {
+            message: "fix the checkout flow".to_string(),
+            file_count: 0,
+            symbol_count: 0,
+            knowledge_entries: 5,
+            skills_matched: 1,
+            token_count: 2000,
+            model_override: None,
+            retrieval_empty: false,
+        };
+        let d = router.select_model(&request);
+        assert!(!d.reasoning.contains("zero-result floor"), "should not apply floor when results exist");
     }
 
     // ── v0.5.0 first-class tool tests ──────────────────────────────────

@@ -434,6 +434,10 @@ impl ContextEngine {
         skills_context: &str,
         token_count: usize,
     ) -> RoutingDecision {
+        // Zero-result safeguard: when both code and knowledge retrieval are empty,
+        // the agent has insufficient context — signal this to the router so it can
+        // escalate tier instead of defaulting to the cheapest model.
+        let retrieval_empty = code_context.is_empty() && knowledge_context.is_empty();
         let request = RoutingRequest {
             message: message.to_string(),
             file_count: code_context.lines().count(),
@@ -442,6 +446,7 @@ impl ContextEngine {
             skills_matched: skills_context.matches("---").count() + 1,
             token_count,
             model_override: None,
+            retrieval_empty,
         };
 
         self.model_router.select_model(&request)
@@ -792,7 +797,7 @@ mod tests {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let event_bus = EventBus::new();
         let repo_intel = RepositoryIntelligence::new(PathBuf::from("."), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let mut budget = 12000;
         let mut usage = HashMap::new();
@@ -812,7 +817,7 @@ mod tests {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let event_bus = EventBus::new();
         let repo_intel = RepositoryIntelligence::new(PathBuf::from("."), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let a = engine.dedup_content("sess1", "hello world");
         let b = engine.dedup_content("sess1", "hello world");
@@ -863,7 +868,7 @@ mod tests {
         // Index repo so code retrieval has something
         let mut ri = RepositoryIntelligence::new(dir.clone(), Database::open(&db_path).unwrap(), event_bus.clone());
         let _ = ri.index_repository();
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
         let engine = ContextEngine::new(ri, kh, event_bus, ContextConfig::default());
         let task1 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None };
         let task2 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None };

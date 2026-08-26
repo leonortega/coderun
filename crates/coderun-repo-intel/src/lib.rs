@@ -66,6 +66,15 @@ const EXTENSION_MAP: &[(&str, &str)] = &[
     ("scss", "scss"),
     ("md", "markdown"),
     ("txt", "text"),
+    ("vb", "vb"),
+    ("fs", "fsharp"),
+    ("fsx", "fsharp"),
+    ("proto", "protobuf"),
+    ("graphql", "graphql"),
+    ("gql", "graphql"),
+    ("tf", "terraform"),
+    ("vue", "vue"),
+    ("svelte", "svelte"),
 ];
 
 // ── Symbol Extraction Patterns ──────────────────────────────────────────
@@ -86,32 +95,34 @@ impl SymbolPatterns {
     fn new() -> Self {
         Self {
             // Rust: fn name, Python: def name, JS/TS: function name / const name = () =>
+            // C#: public/private/internal [static] void/int/string ReturnType(
+            // Java: public/private [static] ReturnType methodName(
             function_pattern: regex::Regex::new(
-                r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)|^def\s+(\w+)|^(?:export\s+)?(?:async\s+)?function\s+(\w+)|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()"
+                r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)|^def\s+(\w+)|^(?:export\s+)?(?:async\s+)?function\s+(\w+)|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()|^\s*(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:void|bool|int|long|float|double|string|var|IEnumerable|Task|ValueTask|IActionResult|ActionResult|ObjectResult)\s+(\w+)\s*\("
             ).unwrap(),
-            // struct ClassName, class ClassName
+            // struct ClassName, class ClassName, C# public class Name, interface IName
             struct_pattern: regex::Regex::new(
-                r"(?m)^(?:pub\s+)?struct\s+(\w+)|^class\s+(\w+)|^(?:export\s+)?class\s+(\w+)"
+                r"(?m)^(?:pub\s+)?struct\s+(\w+)|^class\s+(\w+)|^(?:export\s+)?class\s+(\w+)|^\s*(?:public|private|protected|internal)\s+(?:static\s+|abstract\s+|sealed\s+)?class\s+(\w+)|^\s*(?:public|private|protected|internal)\s+interface\s+(\w+)"
             ).unwrap(),
-            // enum EnumName
+            // enum EnumName, C# public enum Name
             enum_pattern: regex::Regex::new(
-                r"(?m)^(?:pub\s+)?enum\s+(\w+)"
+                r"(?m)^(?:pub\s+)?enum\s+(\w+)|^\s*(?:public|private|protected|internal)\s+enum\s+(\w+)"
             ).unwrap(),
-            // impl TypeName
+            // impl TypeName (Rust)
             impl_pattern: regex::Regex::new(
                 r"(?m)^impl(?:<[^>]*>)?\s+(\w+)"
             ).unwrap(),
-            // trait TraitName
+            // trait TraitName (Rust)
             trait_pattern: regex::Regex::new(
                 r"(?m)^(?:pub\s+)?trait\s+(\w+)"
             ).unwrap(),
-            // type Alias = Type
+            // type Alias = Type (Rust/TS), C# using alias
             type_pattern: regex::Regex::new(
                 r"(?m)^(?:pub\s+)?type\s+(\w+)"
             ).unwrap(),
-            // import/use/require statements
+            // import/use/require statements (broadened for C# using, Java import)
             import_pattern: regex::Regex::new(
-                r"(?m)^(?:use|import|from|require|require_relative)\s+"
+                r"(?m)^(?:use|import|from|require|require_relative|using)\s+"
             ).unwrap(),
         }
     }
@@ -740,10 +751,15 @@ fn detect_language(ext: &str) -> Option<String> {
 /// Check if a file extension is an indexable text file
 fn is_indexable_text_file(ext: &str) -> bool {
     // Common config and text files that should be indexed
+    // Broadened to cover C#/.NET ecosystem and other common text formats
     matches!(ext,
         "toml" | "yaml" | "yml" | "json" | "xml" | "md" | "txt" |
         "sql" | "sh" | "bash" | "zsh" | "env" | "gitignore" |
-        "dockerfile" | "makefile" | "cmake" | "gradle" | "sbt"
+        "dockerfile" | "makefile" | "cmake" | "gradle" | "sbt" |
+        "cshtml" | "razor" | "csproj" | "sln" | "vb" | "vbproj" |
+        "fs" | "fsx" | "fsproj" | "config" | "props" | "targets" |
+        "ini" | "cfg" | "conf" | "proto" | "graphql" | "gql" |
+        "tf" | "hcl" | "pkl" | "liquid" | "twig" | "vue" | "svelte"
     )
 }
 
@@ -808,11 +824,14 @@ fn compute_hash(content: &str) -> String {
 }
 
 /// Extract symbols from source code (tree-sitter AST + regex fallback)
+/// Tree-sitter is attempted for ALL languages transparently — `get_language()` returns
+/// `None` for unsupported grammars, producing an empty vec, and we fall through to regex.
+/// This decouples lexical indexing (tantivy BM25, always runs) from AST enrichment (best-effort).
 fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&str>) -> Vec<ExtractedSymbol> {
-    // Try tree-sitter first if language is supported
+    // Try tree-sitter first — transparent: returns empty for unsupported grammars
     if let Some(lang) = language {
-        if lang == "rust" || lang == "python" || lang == "javascript" || lang == "typescript" {
-            let ast_symbols = parser::extract_symbols_ast(content, lang);
+        let ast_symbols = parser::extract_symbols_ast(content, lang);
+        if !ast_symbols.is_empty() {
             return ast_symbols.into_iter().map(|s| ExtractedSymbol {
                 name: s.name,
                 kind: s.kind,
@@ -822,7 +841,7 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
         }
     }
 
-    // Fallback to regex patterns
+    // Fallback to regex patterns (works for all languages, broadened for C#/Java/etc.)
     let mut symbols = Vec::new();
 
     // Extract functions
@@ -1065,6 +1084,11 @@ export async function fetchData() {
         assert!(is_indexable_text_file("yaml"));
         assert!(is_indexable_text_file("md"));
         assert!(is_indexable_text_file("sql"));
+        assert!(is_indexable_text_file("cshtml"));
+        assert!(is_indexable_text_file("razor"));
+        assert!(is_indexable_text_file("csproj"));
+        assert!(is_indexable_text_file("proto"));
+        assert!(is_indexable_text_file("vue"));
         assert!(!is_indexable_text_file("rs"));
         assert!(!is_indexable_text_file("py"));
     }

@@ -217,6 +217,19 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
             .join(", ")
     );
 
+    // Write discovered languages to .coderun/config.toml so tree-sitter and other
+    // language-aware components can use the actual tech stack (not hardcoded defaults).
+    if !discovery.languages.is_empty() {
+        match update_config_languages(&config_path, &discovery.languages) {
+            Ok(updated) => {
+                if updated {
+                    println!("      ✓ config.toml languages updated from discovery");
+                }
+            }
+            Err(e) => println!("      (config language update skipped: {})", e),
+        }
+    }
+
     // [2b] Community skills — stack-matched via skills.sh (`npx skills`), installed into
     // .coderun/skills so CODERUN stays the curator (opencode never loads them natively).
     // Best-effort + fail-open: offline/missing npx never fails init.
@@ -227,7 +240,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         match install_community_skills(&project_root, &discovery) {
             Ok(added) => {
                 if added > 0 {
-                    println!("      ✓ {} skill(s) installed into .coderun/skills", added);
+                    println!("      ✓ {} skill(s) installed into ~/.coderun/skills", added);
                 } else {
                     println!("      (no new stack-relevant skills found)");
                 }
@@ -236,7 +249,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         }
     }
 
-    println!("[3/6] Indexing (tree-sitter symbols + tantivy BM25 + dependency graph)");
+    println!("[3/6] Indexing (full-text BM25 + symbol extraction + dependency graph)");
     let event_bus = coderun_events::EventBus::new();
     let mut repo_intel = coderun_repo_intel::RepositoryIntelligence::new(
         project_root.clone(),
@@ -254,11 +267,20 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
 
-    println!("[4/6] Knowledge initialization (README, decision records)");
-    let (knowledge_seeded, readme) = ingest_seed_documents(&project_root, &db);
+    println!("[4/6] Codebase-memory MCP (graph index for agent discovery)");
+    match index_codebase_memory(&project_root) {
+        Ok((nodes, edges)) => {
+            println!("      ✓ {} nodes, {} edges indexed", nodes, edges);
+        }
+        Err(e) => {
+            println!("      (skipped: {})", e);
+        }
+    }
 
-    println!("[5/6] Engram memory initialization");
-    let config = Config::load(&project_root).unwrap_or_default();
+    println!("[5/6] Knowledge initialization (README, decision records)");
+    let (knowledge_seeded, _readme) = ingest_seed_documents(&project_root, &db);
+
+    println!("[6/6] Repository profile");
     let profile = build_profile_json(
         &project_name,
         &discovery,
@@ -268,10 +290,6 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     );
     let profile_json =
         serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string());
-    let engram_status = init_engram(&config, &project_name, &profile_json, readme.as_deref());
-    println!("      {}", engram_status);
-
-    println!("[6/6] Repository profile");
     let profile_path = coderun_dir.join("profile.json");
     std::fs::write(&profile_path, &profile_json)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
@@ -325,12 +343,84 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         Err(e) => println!("  Artifacts:         (skipped: {})", e),
     }
     println!();
-    println!("Next steps:");
-    println!("  1. Run 'coderun serve' to start the daemon");
-    println!("  2. Configure your coding agent to use coderun");
-    println!("  Re-run 'coderun init' anytime — incremental and safe to repeat.");
+    // Next steps — dynamic: probe the daemon instead of suggesting what's already true.
+    if daemon_alive() {
+        println!("Next steps:");
+        println!("  Daemon already running at http://127.0.0.1:9527 — this repo is ready.");
+    } else {
+        println!("Next steps:");
+        println!("  1. Start the daemon: 'coderun serve' (or scripts/install.ps1, which starts it)");
+    }
+    println!("  Agent setup (opencode plugin + MCPs) is global — installed once by scripts/install.ps1.");
+    println!("  Re-run 'coderun init' anytime - incremental and safe to repeat.");
 
     Ok(())
+}
+
+/// Best-effort probe: is the coderun daemon answering on the default HTTP port?
+fn daemon_alive() -> bool {
+    use std::net::TcpStream;
+    let addr = "127.0.0.1:9527";
+    std::net::ToSocketAddrs::to_socket_addrs(addr)
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .map(|ip| TcpStream::connect_timeout(&ip, std::time::Duration::from_millis(300)).is_ok())
+        .unwrap_or(false)
+}
+
+/// Locate the codebase-memory-mcp executable (native binary preferred, npx fallback).
+/// Returns (exe_path, is_npx_flag) so the caller can adjust args accordingly.
+fn discover_cbm_exe() -> Option<(String, bool)> {
+    // 1. npm global install — native exe bundled with the package
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let exe = PathBuf::from(&appdata)
+            .join("npm")
+            .join("node_modules")
+            .join("codebase-memory-mcp")
+            .join("bin")
+            .join("codebase-memory-mcp.exe");
+        if exe.exists() {
+            return Some((exe.to_string_lossy().into_owned(), false));
+        }
+    }
+    // 2. ~/.local/bin — local installer location
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let exe = PathBuf::from(&home)
+            .join(".local")
+            .join("bin")
+            .join("codebase-memory-mcp.exe");
+        if exe.exists() {
+            return Some((exe.to_string_lossy().into_owned(), false));
+        }
+    }
+    // 3. npx fallback — resolves from npm cache on every call
+    Some(("npx".to_string(), true))
+}
+
+/// Best-effort: index the current project into codebase-memory MCP via its CLI.
+/// Returns Ok((nodes, edges)) on success, Err(message) on failure.
+/// The CLI spawns a temporary daemon, indexes the repo, and exits — no conflict
+/// with an opencode-held daemon.
+fn index_codebase_memory(project_root: &Path) -> Result<(u64, u64), String> {
+    let (exe, is_npx) = discover_cbm_exe().ok_or("CBM exe not found")?;
+    let repo_path = project_root.to_string_lossy();
+    let mut args: Vec<&str> = Vec::new();
+    if is_npx {
+        args.extend_from_slice(&["-y", "codebase-memory-mcp"]);
+    }
+    args.extend_from_slice(&["cli", "index_repository", "--repo-path", &repo_path, "--mode", "full"]);
+    let out = run_command_with_timeout(&exe, &args, project_root, std::time::Duration::from_secs(300))?;
+    let out = out.trim();
+    // Parse JSON directly — CLI outputs a single JSON object on stdout
+    let v: serde_json::Value =
+        serde_json::from_str(out).map_err(|e| format!("JSON parse: {} (len={})", e, out.len()))?;
+    let nodes = v["nodes"].as_u64().unwrap_or(0);
+    let edges = v["edges"].as_u64().unwrap_or(0);
+    let status = v["status"].as_str().unwrap_or("unknown");
+    if status == "indexed" || nodes > 0 {
+        return Ok((nodes, edges));
+    }
+    Err(format!("status: {}", status))
 }
 
 #[derive(Default, Debug)]
@@ -604,11 +694,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Search skills.sh for the repo's stack and install top-ranked skills into
-/// `.coderun/skills/`. Stages via `npx skills add … -a universal --copy` (the only
-/// writable target the CLI offers), then RELOCATES each skill so the analyzed repo's
-/// `.coderun/skills/` stays the single source of truth — nothing is left behind for
-/// opencode or other agents to load natively. Fail-open; overall time-budgeted.
+/// Search skills.sh for the repo's stack and install top-ranked skills into the GLOBAL
+/// library `~/.coderun/skills/` — stack knowledge (csharp, react, …) is useful in EVERY
+/// repo of that stack, so it must not be duplicated per analyzed repo. Staging happens in
+/// a temp dir via `npx skills add … -a universal --copy` (the only writable target the
+/// CLI offers), then each skill is RELOCATED into the global library; nothing is left
+/// behind for opencode or other agents to load natively. Fail-open; time-budgeted.
 fn install_community_skills(project_root: &Path, discovery: &Discovery) -> Result<usize, String> {
     #[cfg(windows)]
     let npx = "npx.cmd";
@@ -619,15 +710,21 @@ fn install_community_skills(project_root: &Path, discovery: &Discovery) -> Resul
     run_command_with_timeout(npx, &["--version"], project_root, std::time::Duration::from_secs(20))
         .map_err(|_| "npx not available".to_string())?;
 
-    let skills_dir = project_root.join(".coderun").join("skills");
+    // Destination: global skills library (~/.coderun/skills — same folder the installer seeds)
+    let home = dirs().ok_or("cannot resolve home directory")?;
+    let skills_dir = home.join(".coderun").join("skills");
     std::fs::create_dir_all(&skills_dir).map_err(|e| format!("create skills dir: {}", e))?;
 
     let mut existing: std::collections::HashSet<String> = std::fs::read_dir(&skills_dir)
         .map(|entries| entries.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).collect())
         .unwrap_or_default();
 
-    let stage_root = project_root.join(".agents");
-    let total_budget = Instant::now() + std::time::Duration::from_secs(90);
+    // Staging: transient temp dir — the npx CLI only writes into `<cwd>/.agents/skills`,
+    // so we keep that out of both the analyzed repo and $HOME.
+    let stage_root = std::env::temp_dir().join(format!("coderun_comm_stage_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&stage_root).map_err(|e| format!("create staging dir: {}", e))?;
+    // Generous budgets: `skills add` clones the FULL source repo (some are large)
+    let total_budget = Instant::now() + std::time::Duration::from_secs(180);
     let mut added = 0usize;
 
     'terms: for term in stack_terms(discovery) {
@@ -636,7 +733,7 @@ fn install_community_skills(project_root: &Path, discovery: &Discovery) -> Resul
             break;
         }
         let search_timeout = std::time::Duration::from_secs(25).min(total_budget.saturating_duration_since(Instant::now()));
-        let out = match run_command_with_timeout(npx, &["-y", "skills", "find", &term], project_root, search_timeout) {
+        let out = match run_command_with_timeout(npx, &["-y", "skills", "find", &term], &stage_root, search_timeout) {
             Ok(out) => out,
             Err(_) => continue,
         };
@@ -649,12 +746,13 @@ fn install_community_skills(project_root: &Path, discovery: &Discovery) -> Resul
             if skill_name.is_empty() || existing.contains(&skill_name) || existing.contains(&dir_name) {
                 continue;
             }
-            let install_timeout = std::time::Duration::from_secs(45).min(total_budget.saturating_duration_since(Instant::now()));
-            if run_command_with_timeout(npx, &["-y", "skills", "add", &cand, "--copy", "-y", "-a", "universal"], project_root, install_timeout).is_err() {
+            let install_timeout = std::time::Duration::from_secs(90).min(total_budget.saturating_duration_since(Instant::now()));
+            if run_command_with_timeout(npx, &["-y", "skills", "add", &cand, "--copy", "-y", "-a", "universal"], &stage_root, install_timeout).is_err() {
+                warn_line(&format!("{} install timed out — skipped (re-run 'coderun init' to retry)", cand));
                 continue;
             }
-            // Relocate staged <root>/.agents/skills/<name> → <root>/.coderun/skills/<name>
-            let staged = stage_root.join("skills").join(&skill_name);
+            // Relocate staged <temp>/.agents/skills/<name> → ~/.coderun/skills/<name>
+            let staged = stage_root.join(".agents").join("skills").join(&skill_name);
             let dest = skills_dir.join(&dir_name);
             if staged.exists() && !dest.exists() {
                 let moved = std::fs::rename(&staged, &dest).or_else(|_| copy_dir_recursive(&staged, &dest));
@@ -672,15 +770,63 @@ fn install_community_skills(project_root: &Path, discovery: &Discovery) -> Resul
         }
     }
 
-    // Clean the transient staging tree when empty (never leave agent-visible dirs behind)
-    let _ = std::fs::remove_dir(stage_root.join("skills"));
-    let _ = std::fs::remove_dir(&stage_root);
+    // Clean the transient staging tree entirely
+    let _ = std::fs::remove_dir_all(&stage_root);
 
     Ok(added)
 }
 
 fn warn_line(msg: &str) {
     println!("      (warn: {})", msg);
+}
+
+/// Update `.coderun/config.toml` with discovered languages so tree-sitter and other
+/// language-aware components use the actual tech stack. Only the `[index].languages`
+/// field is modified; all other config is preserved via TOML merge.
+/// Returns Ok(true) if the file was updated, Ok(false) if no change needed.
+fn update_config_languages(
+    config_path: &std::path::Path,
+    languages: &[(String, usize)],
+) -> Result<bool, String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("read config: {}", e))?;
+    let mut doc: toml::Value = toml::from_str(&content)
+        .map_err(|e| format!("parse config: {}", e))?;
+
+    // Build the new languages list from discovery (top 10, already sorted by file count)
+    let new_langs: Vec<String> = languages.iter().map(|(l, _)| l.clone()).collect();
+
+    // Get current languages for comparison
+    let current = doc.get("index")
+        .and_then(|i| i.get("languages"))
+        .and_then(|l| l.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    if current == new_langs {
+        return Ok(false);
+    }
+
+    // Update the [index] section
+    if let Some(index) = doc.get_mut("index") {
+        let langs_val = toml::Value::Array(new_langs.iter().map(|l| toml::Value::String(l.clone())).collect());
+        index.as_table_mut()
+            .ok_or("index is not a table")?
+            .insert("languages".to_string(), langs_val);
+    } else {
+        let mut table = toml::value::Table::new();
+        let langs_val = toml::Value::Array(new_langs.iter().map(|l| toml::Value::String(l.clone())).collect());
+        table.insert("languages".to_string(), langs_val);
+        doc.as_table_mut()
+            .ok_or("config root is not a table")?
+            .insert("index".to_string(), toml::Value::Table(table));
+    }
+
+    let updated_toml = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("serialize config: {}", e))?;
+    std::fs::write(config_path, updated_toml)
+        .map_err(|e| format!("write config: {}", e))?;
+    Ok(true)
 }
 
 fn detect_stack(root: &Path, d: &mut Discovery) {    if root.join("Cargo.toml").exists() {
@@ -828,65 +974,6 @@ fn build_profile_json(
     })
 }
 
-fn init_engram(
-    config: &Config,
-    namespace: &str,
-    profile_json: &str,
-    readme: Option<&str>,
-) -> String {
-    if !config.knowledge.memory_enabled {
-        return "disabled in config (knowledge.memory_enabled=false)".to_string();
-    }
-    let endpoint = config.knowledge.memory_endpoint.clone();
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => return format!("runtime error ({})", e),
-    };
-    rt.block_on(async move {
-        let client = match coderun_knowledge::engram::EngramClient::new(
-            coderun_knowledge::engram::EngramConfig {
-                endpoint: endpoint.clone(),
-                timeout_ms: 3000,
-                ..Default::default()
-            },
-        ) {
-            Ok(c) => c,
-            Err(e) => return format!("client error ({})", e),
-        };
-        if !client.health_check().await {
-            return format!(
-                "endpoint unreachable at {} (seed skipped, fail-open)",
-                endpoint
-            );
-        }
-        let mut saved = 0usize;
-        let profile_entry = coderun_knowledge::engram::MemoryEntry {
-            namespace: namespace.to_string(),
-            key: "repository-profile".to_string(),
-            value: profile_json.to_string(),
-            metadata: Some(serde_json::json!({"source": "bootstrap", "type": "profile"})),
-        };
-        if client.save_memory(&profile_entry).await.is_ok() {
-            saved += 1;
-        }
-        if let Some(r) = readme {
-            let entry = coderun_knowledge::engram::MemoryEntry {
-                namespace: namespace.to_string(),
-                key: "readme".to_string(),
-                value: r.chars().take(4000).collect(),
-                metadata: Some(serde_json::json!({"source": "bootstrap", "type": "doc"})),
-            };
-            if client.save_memory(&entry).await.is_ok() {
-                saved += 1;
-            }
-        }
-        format!(
-            "✓ seeded {} entries at {} (namespace '{}')",
-            saved, endpoint, namespace
-        )
-    })
-}
-
 fn cmd_index(watch: bool) -> Result<(), String> {
     println!("Indexing repository{}...", if watch { " (watch mode — git-change-triggered incremental)" } else { "" });
     
@@ -969,11 +1056,8 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
         let kh = {
             let kdb = coderun_storage::Database::open(&db_path).map_err(|e| e.to_string())?;
             let mut hub = coderun_knowledge::KnowledgeHub::new(kdb, event_bus.clone(), coderun_knowledge::KnowledgeConfig::default());
-            // TASK-037b: prefer repo-local skills, fall back to the global install (~/.coderun/skills)
-            let local_skills = PathBuf::from(".coderun/skills");
-            let global_skills = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("skills");
-            let skills_dir = if local_skills.is_dir() { local_skills } else { global_skills };
-            if skills_dir.exists() { let _ = hub.load_skills(&skills_dir); }
+            // TASK-037b: merged view — repo-local skills first, global library fallback
+            let _ = hub.load_skills_from_dirs(&skill_dirs());
             hub
         };
         let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), coderun_context::ContextConfig::default());
@@ -1055,42 +1139,53 @@ fn cmd_status() -> Result<(), String> {
     Ok(())
 }
 
+/// Skills search path used by EVERY surface (list/validate/preview/daemon): repo-local
+/// `.coderun/skills` first (curated per repo), then the global `~/.coderun/skills`
+/// library. `load_skills_from_dirs` dedupes by name with first occurrence winning.
+fn skill_dirs() -> Vec<PathBuf> {
+    let mut search_dirs = vec![PathBuf::from(".coderun/skills")];
+    if let Some(home) = dirs() {
+        search_dirs.push(home.join(".coderun").join("skills"));
+    }
+    search_dirs
+}
+
 fn cmd_skills(action: SkillsAction) -> Result<(), String> {
     match action {
         SkillsAction::List => {
-            let skills_dir = PathBuf::from(".coderun/skills");
-            if !skills_dir.exists() {
-                println!("No skills directory found. Run 'coderun init' first.");
+            let dirs = skill_dirs();
+            if !dirs.iter().any(|d| d.is_dir()) {
+                println!("No skills directories found (.coderun/skills, ~/.coderun/skills). Run 'coderun init' or scripts/install.ps1.");
                 return Ok(());
             }
-            
-            let mut engine = coderun_skills::SkillEngine::new(skills_dir);
-            let count = engine.load_skills()
+
+            let mut engine = coderun_skills::SkillEngine::new(dirs[0].clone());
+            let count = engine.load_skills_from_dirs(&dirs)
                 .map_err(|e| format!("Failed to load skills: {}", e))?;
-            
+
             if count == 0 {
-                println!("No skills found in .coderun/skills/");
+                println!("No skills found in .coderun/skills/ or ~/.coderun/skills/");
                 return Ok(());
             }
-            
+
             println!("Loaded skills ({}):", count);
             println!();
-            
+
             for skill in engine.get_skills() {
                 println!("  {} (tags: {})", skill.name, skill.tags.join(", "));
             }
         }
         SkillsAction::Validate => {
-            let skills_dir = PathBuf::from(".coderun/skills");
-            if !skills_dir.exists() {
-                println!("No skills directory found. Run 'coderun init' first.");
+            let dirs = skill_dirs();
+            if !dirs.iter().any(|d| d.is_dir()) {
+                println!("No skills directories found (.coderun/skills, ~/.coderun/skills). Run 'coderun init' or scripts/install.ps1.");
                 return Ok(());
             }
-            
-            let mut engine = coderun_skills::SkillEngine::new(skills_dir);
-            match engine.load_skills() {
+
+            let mut engine = coderun_skills::SkillEngine::new(dirs[0].clone());
+            match engine.load_skills_from_dirs(&dirs) {
                 Ok(count) => {
-                    println!("✓ All {} skill files are valid", count);
+                    println!("✓ All {} skills are valid", count);
                 }
                 Err(e) => {
                     println!("✗ Validation failed: {}", e);
@@ -1099,7 +1194,7 @@ fn cmd_skills(action: SkillsAction) -> Result<(), String> {
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -1349,11 +1444,22 @@ fn cmd_doctor() -> Result<(), String> {
     // Check tantivy (new)
     print!("Tantivy:         ");
     {
+        // Global BM25 store (per-repo scoping happens at query time via repository_id)
         let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("index");
         if idx_path.exists() {
-            println!("✓ OK (BM25 index at {})", idx_path.display());
+            let idx_str = idx_path.to_string_lossy().to_string();
+            let doc_count = coderun_storage::tantivy_index::TantivyIndex::open(&idx_str)
+                .ok()
+                .and_then(|idx| {
+                    let reader = idx.reader().ok()?;
+                    idx.stats(&reader).ok().map(|s| s.doc_count)
+                });
+            match doc_count {
+                Some(n) => println!("✓ OK ({} docs, {})", n, idx_path.display()),
+                None => println!("⚠ index dir present but unreadable at {}", idx_path.display()),
+            }
         } else {
-            println!("⚠ Index not yet built (run `coderun index` — will be created as MmapDirectory)");
+            println!("○ global BM25 index not created yet — it is created automatically when the daemon starts (or run 'coderun index' inside a repository)");
         }
     }
 
@@ -1573,6 +1679,34 @@ mod tests {
         assert_eq!(profile["commands"]["test"], "cargo test");
         let json = serde_json::to_string_pretty(&profile).unwrap();
         assert!(json.contains("rust"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_update_config_languages() {
+        let tmp = std::env::temp_dir().join(format!("coderun_cfg_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config_path = tmp.join("config.toml");
+
+        // Write a minimal config with old languages
+        std::fs::write(&config_path, "[index]\nlanguages = [\"rust\", \"typescript\"]\n").unwrap();
+
+        let languages = vec![
+            ("csharp".to_string(), 42),
+            ("rust".to_string(), 10),
+        ];
+
+        let updated = update_config_languages(&config_path, &languages).unwrap();
+        assert!(updated, "should update when languages differ");
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("csharp"), "config should contain csharp");
+        assert!(content.contains("rust"), "config should still contain rust");
+
+        // Re-run should be idempotent (no change)
+        let updated2 = update_config_languages(&config_path, &languages).unwrap();
+        assert!(!updated2, "idempotent: no change when languages match");
 
         std::fs::remove_dir_all(&tmp).ok();
     }
