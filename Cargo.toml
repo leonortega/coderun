@@ -40,7 +40,6 @@ sha2 = "0.10"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
 toml = "0.8"
 
 # Logging
@@ -49,7 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 
 # Errors
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
@@ -58,20 +57,20 @@ regex = "1"
 glob = "0.3"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # IPC
 rmp-serde = "1"
 
 # Token counting (spec §3 — tiktoken-rs, never via model API)
-tiktoken-rs = "0.7"
+tiktoken-rs = "0.12"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
 
 # External tools — first-class (v0.5.0): notify/git2 (ort is per-crate optional)
 notify = "6"
-git2 = "0.19"
+git2 = "0.21"
 
 # Internal crates
 coderun-core = { path = "crates/coderun-core" }

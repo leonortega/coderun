@@ -16,7 +16,7 @@ anyhow.workspace = true
 chrono.workspace = true
 
 # HTTP client for engram communication
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 
 # First-class FlashRank via ort (v0.5.0) — int8 ONNX (rc, stable when published)
 ort = { version = "2.0.0-rc.13", optional = true }

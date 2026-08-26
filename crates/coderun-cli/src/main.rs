@@ -267,6 +267,30 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
 
+    // RET-008: Smoke test — verify the index is searchable
+    {
+        let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("index");
+        let rid = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
+        if let Ok(idx) = coderun_storage::tantivy_index::TantivyIndex::open(&idx_path.to_string_lossy()) {
+            if let Ok(reader) = idx.reader() {
+                let test_queries = ["class", "main", "service"];
+                let mut any_hit = false;
+                for q in &test_queries {
+                    if let Ok(hits) = idx.search(&reader, q, None, 1, Some(&rid)) {
+                        if !hits.is_empty() {
+                            any_hit = true;
+                            break;
+                        }
+                    }
+                }
+                if !any_hit {
+                    println!("      ⚠ search validation failed — index built but no results for probe queries");
+                    println!("        run 'coderun doctor' to diagnose");
+                }
+            }
+        }
+    }
+
     println!("[4/6] Codebase-memory MCP (graph index for agent discovery)");
     match index_codebase_memory(&project_root) {
         Ok((nodes, edges)) => {
@@ -303,19 +327,19 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     println!("  Files indexed:     {}", stats.files_indexed);
     println!("  Symbols extracted: {}", stats.symbols_extracted);
     println!("  Dependency edges:  {}", dep_edges);
-    println!(
-        "  Languages:         {}",
-        if discovery.languages.is_empty() {
-            "-".to_string()
-        } else {
-            discovery
-                .languages
-                .iter()
-                .map(|(l, _)| l.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+
+    // Show languages with parser status
+    if !discovery.languages.is_empty() {
+        println!();
+        println!("  Languages detected:");
+        for (lang_name, count) in &discovery.languages {
+            let has_parser = coderun_repo_intel::registry::LanguageId::from_str(lang_name)
+                .map(|id| id.has_parser())
+                .unwrap_or(false);
+            let status = if has_parser { "READY" } else { "metadata/search" };
+            println!("    {:<20} {:>5} files   {}", lang_name, count, status);
         }
-    );
+    }
     println!(
         "  Frameworks:        {}",
         if discovery.frameworks.is_empty() {
@@ -526,25 +550,8 @@ fn walk_ext_counts(dir: &Path, depth: usize, counts: &mut HashMap<String, usize>
 }
 
 fn ext_language(ext: &str) -> Option<&'static str> {
-    Some(match ext {
-        "rs" => "rust",
-        "py" => "python",
-        "js" | "mjs" | "cjs" | "jsx" => "javascript",
-        "ts" | "mts" | "cts" | "tsx" => "typescript",
-        "go" => "go",
-        "java" => "java",
-        "c" | "h" => "c",
-        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
-        "cs" => "csharp",
-        "rb" => "ruby",
-        "php" => "php",
-        "swift" => "swift",
-        "kt" | "kts" => "kotlin",
-        "scala" => "scala",
-        "sh" | "bash" => "shell",
-        "sql" => "sql",
-        _ => return None,
-    })
+    // Use unified registry — single source of truth
+    coderun_repo_intel::registry::language_by_extension(ext).map(|def| def.id.as_str())
 }
 
 // ── Community skills via `npx skills` (skills.sh) — TASK-038c ────────────
@@ -1060,7 +1067,15 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
             let _ = hub.load_skills_from_dirs(&skill_dirs());
             hub
         };
-        let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), coderun_context::ContextConfig::default());
+        let core_config = coderun_core::Config::load(&project_root)
+            .unwrap_or_default();
+        let ctx_config = coderun_context::ContextConfig {
+            max_tokens: core_config.context.max_tokens,
+            max_files: core_config.context.max_files,
+            max_lines_per_file: core_config.context.max_lines_per_file,
+            cache_order: core_config.context.cache_order,
+        };
+        let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), ctx_config);
         let task = coderun_core::TaskRequest { message: prompt.to_string(), session_id: effective_session.clone(), context_hints: None, repository_id: String::new(), repository_path: None };
         let (pack, routing) = ctx.build_context(&task).map_err(|e| e.to_string())?;
         println!("Skills matched:");
@@ -1070,7 +1085,7 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
         if pack.docs_context.is_empty() { println!("  (none)"); } else { for line in pack.docs_context.lines().take(5) { println!("  {}", line); } }
         println!();
         println!("Code files (code_context):");
-        if pack.code_context.is_empty() { println!("  (none — no index or no match)"); } else { for line in pack.code_context.lines().take(10) { println!("  {}", line); } }
+        if pack.code_context.is_empty() { println!("  (none — no index or no match)"); } else { for line in pack.code_context.lines().take(100) { println!("  {}", line); } }
         println!();
         println!("Token budget:");
         println!("  total: {}, remaining: {}, by_source: {:?}", pack.token_usage.total_tokens, pack.token_usage.budget_remaining, pack.token_usage.by_source);
@@ -1429,15 +1444,25 @@ fn cmd_doctor() -> Result<(), String> {
         println!("⚠ No parent dir for {}", sock.display());
     }
     
-    // Check tree-sitter (informational — now integrated)
+    // Check tree-sitter (now shows per-language parser status)
     print!("Tree-sitter:     ");
-    // Probe by building a dummy repo-intel parser
     {
-        let db_tmp = coderun_storage::Database::open(&PathBuf::from(":memory:")).ok();
-        if db_tmp.is_some() {
-            println!("✓ OK (AST parsing for rust/python/js/ts via tree-sitter crate)");
+        use coderun_repo_intel::registry::{LANGUAGE_REGISTRY, get_ts_language};
+        let mut ready = 0;
+        let mut total = 0;
+        for def in LANGUAGE_REGISTRY {
+            if !def.id.has_parser() {
+                continue;
+            }
+            total += 1;
+            if get_ts_language(def.id).is_some() {
+                ready += 1;
+            }
+        }
+        if ready > 0 {
+            println!("✓ OK ({}/{} parsers ready)", ready, total);
         } else {
-            println!("⚠ No parser (regex fallback)");
+            println!("⚠ No parsers loaded");
         }
     }
     
@@ -1460,6 +1485,36 @@ fn cmd_doctor() -> Result<(), String> {
             }
         } else {
             println!("○ global BM25 index not created yet — it is created automatically when the daemon starts (or run 'coderun index' inside a repository)");
+        }
+    }
+
+    // RET-015: Retrieval probe — verify search works
+    print!("Retrieval:       ");
+    {
+        let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("index");
+        if let Ok(idx) = coderun_storage::tantivy_index::TantivyIndex::open(&idx_path.to_string_lossy()) {
+            if let Ok(reader) = idx.reader() {
+                let rid = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
+                let probe_queries = ["class", "main", "function"];
+                let mut hits = 0;
+                for q in &probe_queries {
+                    if let Ok(results) = idx.search(&reader, q, None, 1, Some(&rid)) {
+                        if !results.is_empty() {
+                            hits += 1;
+                        }
+                    }
+                }
+                if hits > 0 {
+                    println!("✓ OK ({}/{} probe queries returned results)", hits, probe_queries.len());
+                } else {
+                    println!("⚠ Index exists but no results for probe queries — re-run 'coderun init'");
+                    all_ok = false;
+                }
+            } else {
+                println!("⚠ Cannot read index");
+            }
+        } else {
+            println!("○ No index (run 'coderun init')");
         }
     }
 
@@ -1651,7 +1706,8 @@ mod tests {
     #[test]
     fn test_ext_language() {
         assert_eq!(ext_language("rs"), Some("rust"));
-        assert_eq!(ext_language("tsx"), Some("typescript"));
+        assert_eq!(ext_language("tsx"), Some("typescriptreact"));
+        assert_eq!(ext_language("ts"), Some("typescript"));
         assert_eq!(ext_language("hpp"), Some("cpp"));
         assert_eq!(ext_language(""), None);
         assert_eq!(ext_language("png"), None);

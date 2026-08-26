@@ -1,6 +1,7 @@
 mod parser;
 pub mod graph;
 pub mod lsp;
+pub mod registry;
 pub mod watcher;
 
 use std::collections::HashMap;
@@ -18,64 +19,10 @@ use tracing::{debug, info, warn};
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-// Note: Directory walking now uses the `ignore` crate which respects .gitignore patterns
+// Language detection and file classification now live in `registry.rs`.
+// The single source of truth is `registry::LANGUAGE_REGISTRY`.
 
-/// Map of file extensions to language names
-const EXTENSION_MAP: &[(&str, &str)] = &[
-    ("rs", "rust"),
-    ("ts", "typescript"),
-    ("tsx", "typescript"),
-    ("js", "javascript"),
-    ("jsx", "javascript"),
-    ("py", "python"),
-    ("go", "go"),
-    ("java", "java"),
-    ("c", "c"),
-    ("cpp", "cpp"),
-    ("cc", "cpp"),
-    ("cxx", "cpp"),
-    ("h", "c"),
-    ("hpp", "cpp"),
-    ("cs", "csharp"),
-    ("rb", "ruby"),
-    ("php", "php"),
-    ("swift", "swift"),
-    ("kt", "kotlin"),
-    ("scala", "scala"),
-    ("r", "r"),
-    ("lua", "lua"),
-    ("zig", "zig"),
-    ("nim", "nim"),
-    ("ex", "elixir"),
-    ("exs", "elixir"),
-    ("erl", "erlang"),
-    ("hs", "haskell"),
-    ("ml", "ocaml"),
-    ("clj", "clojure"),
-    ("sql", "sql"),
-    ("sh", "shell"),
-    ("bash", "shell"),
-    ("zsh", "shell"),
-    ("yaml", "yaml"),
-    ("yml", "yaml"),
-    ("toml", "toml"),
-    ("json", "json"),
-    ("xml", "xml"),
-    ("html", "html"),
-    ("css", "css"),
-    ("scss", "scss"),
-    ("md", "markdown"),
-    ("txt", "text"),
-    ("vb", "vb"),
-    ("fs", "fsharp"),
-    ("fsx", "fsharp"),
-    ("proto", "protobuf"),
-    ("graphql", "graphql"),
-    ("gql", "graphql"),
-    ("tf", "terraform"),
-    ("vue", "vue"),
-    ("svelte", "svelte"),
-];
+use registry::{detect_language as registry_detect, classify_file, FileClass};
 
 // ── Symbol Extraction Patterns ──────────────────────────────────────────
 
@@ -228,11 +175,24 @@ impl RepositoryIntelligence {
 
             seen_paths.insert(path_str.clone());
 
-            // Check if file should be indexed
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let language = detect_language(ext);
+            // Classify file using unified registry
+            let file_class = classify_file(&path);
 
-            if language.is_none() && !is_indexable_text_file(ext) {
+            // Skip binary, vendor, dependency, and generated files
+            match file_class {
+                FileClass::Binary | FileClass::Vendor | FileClass::Dependency | FileClass::Generated => {
+                    debug!(path = %path_str, class = ?file_class, "Skipping file");
+                    files_skipped += 1;
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Detect language from path (unified registry)
+            let language = detect_language_from_path(&path);
+
+            // Skip files with no recognized language and not indexable text
+            if language.is_none() && !is_indexable_text_file(&path_str) {
                 files_skipped += 1;
                 continue;
             }
@@ -257,42 +217,46 @@ impl RepositoryIntelligence {
             let hash = compute_hash(&content);
 
             // Check if file has changed (incremental)
-            if let Some(&(id, ref existing_hash)) = existing_hashes.get(&path_str) {
+            let file_changed = if let Some(&(id, ref existing_hash)) = existing_hashes.get(&path_str) {
                 if *existing_hash == hash {
-                    debug!(path = %path_str, "File unchanged, skipping");
-                    files_skipped += 1;
-                    continue;
+                    false
+                } else {
+                    // File changed — update
+                    let size = content.len() as i64;
+                    self.db.update_file(id, &hash, size)?;
+                    true
                 }
-                // File changed — update
-                let size = content.len() as i64;
-                self.db.update_file(id, &hash, size)?;
             } else {
                 // New file — insert
                 let size = content.len() as i64;
                 self.db.insert_file(&path_str, &hash, size, language.as_deref())?;
-            }
+                true
+            };
 
-            // Extract symbols
+            // Extract symbols (always, even if unchanged — tantivy needs them)
             let file_id = self.db.get_file(&path_str)?
                 .map(|f| f.id)
                 .unwrap_or(0);
 
             if file_id > 0 {
                 let symbols = extract_symbols(&content, &self.patterns, language.as_deref());
-                for symbol in &symbols {
-                    self.db.insert_symbol(
-                        file_id,
-                        &symbol.name,
-                        &symbol.kind,
-                        symbol.line_start,
-                        symbol.line_end,
-                        None,
-                    )?;
-                    symbols_extracted += 1;
+                if file_changed {
+                    // Only insert symbols into DB if file is new/changed
+                    for symbol in &symbols {
+                        self.db.insert_symbol(
+                            file_id,
+                            &symbol.name,
+                            &symbol.kind,
+                            symbol.line_start,
+                            symbol.line_end,
+                            None,
+                        )?;
+                    }
                 }
+                symbols_extracted += symbols.len();
             }
 
-            // Upsert into tantivy BM25 index (in-process, memory-mapped) — repo-stamped (TASK-030)
+            // Upsert into tantivy BM25 index (ALWAYS — tantivy may have been cleared)
             if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
                 let _ = idx.delete_document(writer, &path_str, &self.repository_id);
                 let lang_str = language.as_deref().unwrap_or("text");
@@ -402,6 +366,23 @@ impl RepositoryIntelligence {
     ) -> Result<SearchResults, String> {
         // Use ripgrep for fast searching
         self.search_text_ripgrep(query, language_filter, max_results)
+    }
+
+    /// Search for symbols by name pattern — returns file paths + line numbers
+    pub fn search_symbols(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
+        let symbols = self.db.find_symbol(query)?;
+        let mut results = Vec::new();
+        for symbol in symbols.into_iter().take(max_results) {
+            if let Ok(Some(file)) = self.db.get_file_by_id(symbol.file_id) {
+                results.push(SearchResult {
+                    path: file.path,
+                    line: symbol.line_start as usize,
+                    content: format!("{} {}", symbol.kind, symbol.name),
+                    score: 1.0,
+                });
+            }
+        }
+        Ok(results)
     }
 
     /// Structural search via ast-grep (first-class, v0.5.0) — sg-core if available, else tree-sitter+regex fallback with WARN.
@@ -540,10 +521,12 @@ impl RepositoryIntelligence {
         language_filter: Option<&str>,
         max_results: usize,
     ) -> Result<SearchResults, String> {
+        // Sanitize query for regex: escape special chars, extract keywords
+        let sanitized = sanitize_ripgrep_query(query);
         let matcher = RegexMatcherBuilder::new()
-            .case_insensitive(false)
-            .build(query)
-            .map_err(|e| format!("Invalid search pattern: {}", e))?;
+            .case_insensitive(true)
+            .build(&sanitized)
+            .map_err(|e| format!("Invalid search pattern '{}' (from '{}'): {}", sanitized, query, e))?;
 
         let mut results = Vec::new();
 
@@ -738,28 +721,80 @@ impl RepositoryIntelligence {
     }
 }
 
-// ── Helper Functions ────────────────────────────────────────────────────
+// ── Query Sanitization ───────────────────────────────────────────────────
 
-/// Detect programming language from file extension
-fn detect_language(ext: &str) -> Option<String> {
-    EXTENSION_MAP
-        .iter()
-        .find(|(e, _)| *e == ext)
-        .map(|(_, lang)| lang.to_string())
+/// Stop words to filter from code search queries
+const RIPGREP_STOP_WORDS: &[&str] = &[
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+    "as", "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "when", "where", "why", "how", "all", "both",
+    "each", "few", "more", "most", "other", "some", "such", "no", "nor",
+    "not", "only", "own", "same", "so", "than", "too", "very", "just",
+    "and", "but", "or", "if", "while", "that", "this", "it", "its",
+    "what", "which", "who", "whom", "implemented", "find", "show",
+    "get", "set", "make", "create", "update", "delete", "remove", "add",
+    "list",
+];
+
+/// Sanitize a natural-language query for ripgrep regex search.
+/// Extracts meaningful code keywords and joins with `|` (OR).
+fn sanitize_ripgrep_query(query: &str) -> String {
+    let keywords: Vec<String> = query
+        .split_whitespace()
+        .map(|w| {
+            // Strip non-alphanumeric chars (except _)
+            let clean: String = w.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            clean.to_lowercase()
+        })
+        .filter(|w| w.len() >= 2 && !RIPGREP_STOP_WORDS.contains(&w.as_str()))
+        .collect();
+
+    if keywords.is_empty() {
+        // Fallback: regex-escape the raw query
+        regex::escape(query)
+    } else {
+        keywords.join("|")
+    }
 }
 
-/// Check if a file extension is an indexable text file
-fn is_indexable_text_file(ext: &str) -> bool {
-    // Common config and text files that should be indexed
-    // Broadened to cover C#/.NET ecosystem and other common text formats
-    matches!(ext,
-        "toml" | "yaml" | "yml" | "json" | "xml" | "md" | "txt" |
-        "sql" | "sh" | "bash" | "zsh" | "env" | "gitignore" |
-        "dockerfile" | "makefile" | "cmake" | "gradle" | "sbt" |
-        "cshtml" | "razor" | "csproj" | "sln" | "vb" | "vbproj" |
-        "fs" | "fsx" | "fsproj" | "config" | "props" | "targets" |
-        "ini" | "cfg" | "conf" | "proto" | "graphql" | "gql" |
-        "tf" | "hcl" | "pkl" | "liquid" | "twig" | "vue" | "svelte"
+// ── Helper Functions ────────────────────────────────────────────────────
+
+/// Detect programming language from file path (uses unified registry)
+fn detect_language_from_path(path: &Path) -> Option<String> {
+    registry_detect(path).map(|def| def.id.as_str().to_string())
+}
+
+/// Detect programming language from file extension (backward-compatible)
+fn detect_language(ext: &str) -> Option<String> {
+    // Try to find by constructing a dummy path with the extension
+    // This is a backward-compatible shim — prefer detect_language_from_path()
+    registry::language_by_extension(ext).map(|def| def.id.as_str().to_string())
+}
+
+/// Check if a file is indexable text (config, docs, etc.)
+fn is_indexable_text_file(path_str: &str) -> bool {
+    // Check extension
+    if let Some(ext) = path_str.rsplit('.').next() {
+        return matches!(ext,
+            "toml" | "yaml" | "yml" | "json" | "xml" | "md" | "txt" |
+            "sql" | "sh" | "bash" | "zsh" | "env" | "gitignore" |
+            "dockerfile" | "makefile" | "cmake" | "gradle" | "sbt" |
+            "cshtml" | "razor" | "csproj" | "sln" | "vb" | "vbproj" |
+            "fs" | "fsx" | "fsproj" | "config" | "props" | "targets" |
+            "ini" | "cfg" | "conf" | "proto" | "graphql" | "gql" |
+            "tf" | "hcl" | "pkl" | "liquid" | "twig" | "vue" | "svelte"
+        );
+    }
+    // Check filename patterns
+    let name = path_str.rsplit(['/', '\\']).next().unwrap_or(path_str);
+    matches!(name.to_lowercase().as_str(),
+        "dockerfile" | "makefile" | "cmakelists.txt" | "justfile" | "procfile"
     )
 }
 
@@ -861,7 +896,7 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
 
     // Extract structs/classes
     for cap in patterns.struct_pattern.captures_iter(content) {
-        if let Some(name) = cap.get(1).or(cap.get(2)).or(cap.get(3)) {
+        if let Some(name) = cap.get(1).or(cap.get(2)).or(cap.get(3)).or(cap.get(4)).or(cap.get(5)) {
             let line_num = content[..cap.get(0).unwrap().start()]
                 .lines()
                 .count();

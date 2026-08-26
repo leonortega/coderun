@@ -29,8 +29,9 @@ coderun-skills.workspace = true
 coderun-context.workspace = true
 coderun-router.workspace = true
 coderun-optimizer.workspace = true
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 tokio.workspace = true
 tiktoken-rs.workspace = true
 sha2.workspace = true
 tracing.workspace = true
+serde_json.workspace = true

@@ -12,6 +12,7 @@ use tracing::info;
 pub struct CodeIndexSchema {
     pub schema: Schema,
     pub path_field: Field,
+    pub filename_field: Field,
     pub content_field: Field,
     pub language_field: Field,
     pub symbols_field: Field,
@@ -30,6 +31,7 @@ impl CodeIndexSchema {
         let mut schema_builder = Schema::builder();
 
         let path_field = schema_builder.add_text_field("path", STRING | STORED);
+        let filename_field = schema_builder.add_text_field("filename", TEXT | STORED);
         let content_field = schema_builder.add_text_field("content", TEXT | STORED);
         let language_field = schema_builder.add_text_field("language", STRING | STORED);
         let symbols_field = schema_builder.add_text_field("symbols", TEXT | STORED);
@@ -38,11 +40,63 @@ impl CodeIndexSchema {
         Self {
             schema: schema_builder.build(),
             path_field,
+            filename_field,
             content_field,
             language_field,
             symbols_field,
             repository_field,
         }
+    }
+}
+
+// ── Query Sanitization ───────────────────────────────────────────────────
+
+/// Stop words to ignore when building code search queries
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+    "as", "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "when", "where", "why", "how", "all", "both",
+    "each", "few", "more", "most", "other", "some", "such", "no", "nor",
+    "not", "only", "own", "same", "so", "than", "too", "very", "just",
+    "and", "but", "or", "if", "while", "that", "this", "it", "its",
+    "what", "which", "who", "whom", "where", "implemented", "find",
+    "show", "get", "set", "make", "create", "update", "delete", "remove",
+    "add", "list", "the", "in", "is", "it",
+];
+
+/// Sanitize a natural-language or code query for Tantivy BM25 search.
+///
+/// 1. Strips Tantivy query syntax characters (`:`, `+`, `-`, `(`, `)`, `"`, `~`, `*`, `?`, `\`, `^`)
+/// 2. Extracts meaningful code-relevant keywords (≥ 2 chars, not stop words)
+/// 3. Joins with OR so any keyword can match
+fn sanitize_code_query(query: &str) -> String {
+    // Strip special Tantivy characters
+    let cleaned: String = query
+        .chars()
+        .map(|c| match c {
+            ':' | '+' | '-' | '(' | ')' | '"' | '~' | '*' | '?' | '\\' | '^' => ' ',
+            _ => c,
+        })
+        .collect();
+
+    // Extract meaningful keywords
+    let keywords: Vec<String> = cleaned
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| c.is_alphanumeric() || c == '_').to_lowercase())
+        .filter(|w| w.len() >= 2 && !STOP_WORDS.contains(&w.as_str()))
+        .collect();
+
+    if keywords.is_empty() {
+        // Fallback: use raw cleaned query
+        let raw = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        if raw.is_empty() { query.to_string() } else { raw }
+    } else {
+        // OR-join so any keyword can match (broadens recall)
+        keywords.join(" OR ")
     }
 }
 
@@ -109,9 +163,15 @@ impl TantivyIndex {
         repository_id: &str,
     ) -> Result<(), String> {
         let symbols_text = symbols.join(" ");
+        // Extract filename without extension for better matching
+        let filename = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
 
         let doc = doc!(
             self.schema.path_field => path,
+            self.schema.filename_field => filename,
             self.schema.content_field => content,
             self.schema.language_field => language,
             self.schema.symbols_field => symbols_text.as_str(),
@@ -167,6 +227,9 @@ impl TantivyIndex {
     ) -> Result<Vec<SearchHit>, String> {
         let searcher = reader.searcher();
 
+        // Sanitize query: escape Tantivy special chars, extract meaningful keywords
+        let sanitized = sanitize_code_query(query);
+
         // Build query
         let query_parser = QueryParser::for_index(
             &self.index,
@@ -174,12 +237,13 @@ impl TantivyIndex {
                 self.schema.content_field,
                 self.schema.symbols_field,
                 self.schema.path_field,
+                self.schema.filename_field,
             ],
         );
 
         let user_query = query_parser
-            .parse_query(query)
-            .map_err(|e| format!("Failed to parse query: {}", e))?;
+            .parse_query(&sanitized)
+            .map_err(|e| format!("Failed to parse query '{}' (sanitized from '{}'): {}", sanitized, query, e))?;
 
         // Repository scope filter (TermQuery AND user query) — TASK-030/F-1
         let full_query: Box<dyn Query> = match repository_id {
@@ -198,7 +262,7 @@ impl TantivyIndex {
         };
 
         let top_docs = searcher
-            .search(&full_query, &TopDocs::with_limit(max_results))
+            .search(&full_query, &TopDocs::with_limit(max_results).order_by_score())
             .map_err(|e| format!("Search failed: {}", e))?;
 
         let mut results = Vec::new();

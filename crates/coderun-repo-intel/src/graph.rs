@@ -74,13 +74,8 @@ impl DependencyGraph {
 }
 
 fn try_codebase_memory_mcp(_repo_root: &Path, _files: &[PathBuf]) -> Option<DependencyGraph> {
-    // v0.5.0 scaffold: MCP stdio/HTTP client to `npx codebase-memory-mcp`
-    // Real impl: spawn `npx codebase-memory-mcp --mcp` and POST {tool:"get_dependency_graph", repo_root}
-    // For now, probe if binary exists and delegate; else None to trigger fallback
-    let prob = std::process::Command::new("npx").arg("codebase-memory-mcp").arg("--help").output();
-    if prob.map(|o| o.status.success()).unwrap_or(false) {
-        tracing::debug!("codebase-memory-mcp binary found — MCP primary would be used here (stub)");
-    }
+    // v0.5.0 scaffold: MCP client to `npx codebase-memory-mcp`
+    // Not implemented — always returns None to trigger local AST+regex fallback
     None
 }
 

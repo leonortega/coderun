@@ -272,7 +272,7 @@ Reference: `crates/coderun-core/src/traits.rs:33-58` + `crates/coderun-workflow/
 | Structural Search | `sg-core` gated `search_structural()` first-class (`V0_5_0_PLAN.md:1.1`), `search_structural_fallback()` only on `Err` | `repo-intel/src/lib.rs:352` |
 | Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |
 | Full-text Index | tantivy `MmapDirectory` (in-process) | `storage/src/tantivy_index.rs` + `search_fulltext()` wiring |
-| Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (`codebase-memory-mcp` probe `CODERUN_MCP_ENABLED`) | `repo-intel/src/graph.rs` |
+| Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (optional `codebase-memory-mcp` probe `CODERUN_MCP_ENABLED`, not wired into hot-path retrieval) | `repo-intel/src/graph.rs` |
 | Watcher | `notify+git2` incremental `diff_tree_to_workdir` first-class (feature `git-watcher` default), polling 5s fallback only on `Err` | `repo-intel/src/watcher.rs` (`V0_6_0_PLAN.md:3`) |
 | LSP | Stub `LspClient` (`CODERUN_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
 | Reranking | FlashRank `RerankerConfig` adaptive K `5-20` (TF-IDF fallback, `ort` int8 ONNX deferred) | `knowledge/src/rerank.rs` |

@@ -13,7 +13,7 @@ pub use secrets::{contains_secret, redact_secrets};
 pub use traits::{IContextBuilder, IModelGateway, IWorkflowEngine, NoopWorkflowEngine};
 pub use ipc::{
     AgentRequest, AgentResponse, CodeFile, ContextHints, ContextPack, HookType,
-    KnowledgeEntry, OutputType, RequestPayload, ResponsePayload, RewrittenMessageData,
-    RoutingDecision, RoutingScores, SearchResult, SearchResults, SkillMatch, TaskRequest,
-    TokenUsage, repository_id_from_path,
+    KnowledgeEntry, OutputType, RequestPayload, ResponsePayload, RetrievalStatus,
+    RewrittenMessageData, RoutingDecision, RoutingScores, SearchResult, SearchResults,
+    SkillMatch, TaskRequest, TokenUsage, repository_id_from_path,
 };

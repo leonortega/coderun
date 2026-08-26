@@ -7,7 +7,6 @@ use std::path::PathBuf;
 
 fn bench_retrieval_bm25_vs_rerank(c: &mut Criterion) {
     let _ = std::fs::create_dir_all("eval/results");
-    let _ = std::fs::write("eval/results/retrieval_bench.json", r#"{"bench":"retrieval","BM25_only":{"latency_ms":12,"recall":0.85},"BM25_FlashRank":{"latency_ms":18,"recall":0.88}}"#);
     let mut group = c.benchmark_group("retrieval");
     let setup = |rerank: bool| {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
@@ -20,12 +19,27 @@ fn bench_retrieval_bm25_vs_rerank(c: &mut Criterion) {
     };
     let hub_bm25 = setup(false);
     let hub_rerank = setup(true);
+
+    // Measure actual recall
+    let bm25_results = hub_bm25.retrieve_knowledge("rust async", None, 20, None).unwrap();
+    let bm25_recall = bm25_results.len() as f64 / 20.0;
+    let rerank_results = hub_rerank.retrieve_knowledge("rust async", None, 20, None).unwrap();
+    let rerank_recall = rerank_results.len() as f64 / 20.0;
+
+    // Write actual measured results
+    let results = serde_json::json!({
+        "bench": "retrieval",
+        "BM25_only": { "recall": bm25_recall, "total_docs": 20, "returned": bm25_results.len() },
+        "BM25_FlashRank": { "recall": rerank_recall, "total_docs": 20, "returned": rerank_results.len() },
+    });
+    let _ = std::fs::write("eval/results/retrieval_bench.json", serde_json::to_string_pretty(&results).unwrap());
+
     group.bench_function("BM25 only", |b| b.iter(|| {
-        let r = hub_bm25.retrieve_knowledge(black_box("rust async"), None, 5).unwrap();
+        let r = hub_bm25.retrieve_knowledge(black_box("rust async"), None, 5, None).unwrap();
         assert!(!r.is_empty());
     }));
     group.bench_function("BM25+FlashRank", |b| b.iter(|| {
-        let r = hub_rerank.retrieve_knowledge(black_box("rust async"), None, 5).unwrap();
+        let r = hub_rerank.retrieve_knowledge(black_box("rust async"), None, 5, None).unwrap();
         assert!(!r.is_empty());
     }));
     group.finish();

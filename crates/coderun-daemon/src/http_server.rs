@@ -107,8 +107,8 @@ pub fn create_router(state: HttpServerState) -> Router {
             .route("/health", axum::routing::get(handle_health))
             .route("/metrics", axum::routing::get(handle_metrics))
             .route("/workflow/start", post(handle_workflow_start))
-            .route("/workflow/:id", axum::routing::get(handle_workflow_status))
-            .route("/workflow/:id/approve", post(handle_workflow_approve))
+            .route("/workflow/{id}", axum::routing::get(handle_workflow_status))
+            .route("/workflow/{id}/approve", post(handle_workflow_approve))
             .with_state(state);
     }
     #[cfg(not(feature = "workflow"))]

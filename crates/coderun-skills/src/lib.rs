@@ -496,7 +496,7 @@ fn parse_yaml_skill(path: &Path) -> Result<Skill, String> {
     }
 
     let skill: YamlSkill =
-        serde_yaml::from_str(&content).map_err(|e| format!("YAML parse error: {}", e))?;
+        serde_saphyr::from_str(&content).map_err(|e| format!("YAML parse error: {}", e))?;
 
     if skill.name.is_empty() {
         return Err("Empty skill name".to_string());

@@ -17,6 +17,11 @@ import pathlib
 import subprocess
 import json
 import sys
+import io
+
+# Force UTF-8 output on Windows
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 def recall_at_k(expected, retrieved, k):
@@ -48,9 +53,10 @@ def count_tokens_heuristic(text: str) -> int:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="eval/datasets/repository_tasks.yaml")
-    ap.add_argument("--k", default="5,10")
+    ap.add_argument("--k", default="5,10", help="Comma-separated k values for recall@k")
     ap.add_argument("--out", default="eval/results/evaluation.json")
-    ap.add_argument("--timeout", type=int, default=10, help="seconds for coderun preview per task")
+    ap.add_argument("--timeout", type=int, default=10, help="Seconds before preview times out")
+    ap.add_argument("--binary", default=None, help="Path to coderun binary (default: target/release/coderun)")
     args = ap.parse_args()
 
     ks = [int(x) for x in args.k.split(",")]
@@ -74,8 +80,16 @@ def main():
         try:
             # Ensure task_str is string even if yaml has None
             task_str = str(task_str or "")
+            # Use pre-built binary for speed (skip cargo build)
+            import os
+            if args.binary:
+                binary = args.binary
+            else:
+                binary = os.path.join("target", "release", "coderun.exe")
+                if not os.path.exists(binary):
+                    binary = os.path.join("target", "release", "coderun")
             proc = subprocess.run(
-                ["cargo", "run", "-p", "coderun-cli", "--quiet", "--", "preview", task_str],
+                [binary, "preview", task_str],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

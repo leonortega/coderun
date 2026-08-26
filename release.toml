@@ -18,11 +18,9 @@ tag-message = "Release {{version}}"
 publish = false
 # Push to remote
 push-remote = "origin"
-# Pre-release hook: run tests
+# Pre-release hooks: run tests, clippy, then audit
 pre-release-hook = ["cargo", "test"]
-# Pre-release hook: run clippy
 pre-release-hook = ["cargo", "clippy", "--", "-D", "warnings"]
-# Pre-release hook: run cargo audit
 pre-release-hook = ["cargo", "audit"]
 # Update changelog
 update-changelog = true
@@ -35,7 +33,7 @@ changelog-path = "CHANGELOG.md"
 
 # Workspace settings
 [workspace]
-# Version to release
-version = "0.7.0"
+# Version to release (must match workspace.package.version in Cargo.toml)
+version = "0.7.5"
 # Release profile
 profile = "release"

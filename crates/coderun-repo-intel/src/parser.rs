@@ -1,30 +1,14 @@
 use tree_sitter::{Language, Parser};
 
-// ── Tree-sitter Languages ────────────────────────────────────────────────
+use crate::registry::{LanguageId, get_ts_language};
 
-/// Get tree-sitter language for a given language name (v0.6.0: extended-languages feature)
+// ── Backward-compatible get_language ──────────────────────────────────────
+
+/// Get tree-sitter language for a given language name string.
+/// Prefer `get_ts_language(LanguageId)` for new code.
 pub fn get_language(language: &str) -> Option<Language> {
-    match language {
-        "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
-        "typescript" | "typescriptreact" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "javascript" | "javascriptreact" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        "python" => Some(tree_sitter_python::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        "go" => Some(tree_sitter_go::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        "java" => Some(tree_sitter_java::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        "c" => Some(tree_sitter_c::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        "cpp" | "c++" => Some(tree_sitter_cpp::LANGUAGE.into()),
-        _ => {
-            #[cfg(not(feature = "extended-languages"))]
-            if matches!(language, "go" | "java" | "c" | "cpp" | "c++") {
-                tracing::warn!(language, "requires --features extended-languages; fallback to regex");
-            }
-            None
-        },
-    }
+    let id = LanguageId::from_str(language)?;
+    get_ts_language(id)
 }
 
 // ── AST Symbol Extraction ────────────────────────────────────────────────
@@ -60,12 +44,34 @@ pub fn extract_symbols_ast(content: &str, language: &str) -> Vec<AstSymbol> {
     symbols
 }
 
+/// Extract symbols using LanguageId directly
+pub fn extract_symbols_by_id(content: &str, id: LanguageId) -> Vec<AstSymbol> {
+    let lang = match get_ts_language(id) {
+        Some(l) => l,
+        None => return Vec::new(),
+    };
+
+    let mut parser = Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return Vec::new();
+    }
+
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut symbols = Vec::new();
+    extract_symbols_recursive(tree.root_node(), content, &mut symbols);
+    symbols
+}
+
 /// Recursively extract symbols from AST nodes
 fn extract_symbols_recursive(node: tree_sitter::Node, content: &str, symbols: &mut Vec<AstSymbol>) {
     let kind = node.kind();
 
     match kind {
-        // Rust
+        // ── Rust ──
         "function_item" | "function_signature_item" => {
             if let Some(name) = get_node_name(node, content) {
                 symbols.push(AstSymbol {
@@ -97,7 +103,6 @@ fn extract_symbols_recursive(node: tree_sitter::Node, content: &str, symbols: &m
             }
         }
         "impl_item" => {
-            // Get the type being implemented
             if let Some(type_node) = node.child_by_field_name("type") {
                 let type_name = type_node
                     .utf8_text(content.as_bytes())
@@ -131,7 +136,7 @@ fn extract_symbols_recursive(node: tree_sitter::Node, content: &str, symbols: &m
                 });
             }
         }
-        // Python
+        // ── Python ──
         "function_definition" => {
             if let Some(name) = get_node_name(node, content) {
                 symbols.push(AstSymbol {
@@ -152,7 +157,7 @@ fn extract_symbols_recursive(node: tree_sitter::Node, content: &str, symbols: &m
                 });
             }
         }
-        // JavaScript/TypeScript
+        // ── JavaScript/TypeScript ──
         "function_declaration" | "arrow_function" | "function" => {
             if let Some(name) = get_node_name(node, content) {
                 symbols.push(AstSymbol {
@@ -193,6 +198,57 @@ fn extract_symbols_recursive(node: tree_sitter::Node, content: &str, symbols: &m
                 });
             }
         }
+        // ── C# ──
+        "struct_declaration" => {
+            if let Some(name) = get_node_name(node, content) {
+                symbols.push(AstSymbol {
+                    name,
+                    kind: "struct".to_string(),
+                    line_start: node.start_position().row as u32 + 1,
+                    line_end: node.end_position().row as u32 + 1,
+                });
+            }
+        }
+        "enum_declaration" => {
+            if let Some(name) = get_node_name(node, content) {
+                symbols.push(AstSymbol {
+                    name,
+                    kind: "enum".to_string(),
+                    line_start: node.start_position().row as u32 + 1,
+                    line_end: node.end_position().row as u32 + 1,
+                });
+            }
+        }
+        "method_declaration" | "constructor_declaration" => {
+            if let Some(name) = get_node_name(node, content) {
+                symbols.push(AstSymbol {
+                    name,
+                    kind: "method".to_string(),
+                    line_start: node.start_position().row as u32 + 1,
+                    line_end: node.end_position().row as u32 + 1,
+                });
+            }
+        }
+        "namespace_declaration" => {
+            if let Some(name) = get_node_name(node, content) {
+                symbols.push(AstSymbol {
+                    name,
+                    kind: "namespace".to_string(),
+                    line_start: node.start_position().row as u32 + 1,
+                    line_end: node.end_position().row as u32 + 1,
+                });
+            }
+        }
+        "property_declaration" => {
+            if let Some(name) = get_node_name(node, content) {
+                symbols.push(AstSymbol {
+                    name,
+                    kind: "property".to_string(),
+                    line_start: node.start_position().row as u32 + 1,
+                    line_end: node.end_position().row as u32 + 1,
+                });
+            }
+        }
         _ => {}
     }
 
@@ -217,7 +273,7 @@ fn get_node_name(node: tree_sitter::Node, content: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         let kind = child.kind();
-        if kind == "identifier" || kind == "type_identifier" {
+        if kind == "identifier" || kind == "type_identifier" || kind == "name" {
             return child
                 .utf8_text(content.as_bytes())
                 .ok()
@@ -345,6 +401,49 @@ function greet(user: User): string {
     }
 
     #[test]
+    fn test_csharp_symbols() {
+        let code = r#"
+namespace MyApp.Models
+{
+    public class Order
+    {
+        public int Id { get; set; }
+        public string CustomerName { get; set; }
+
+        public Order() { }
+
+        public void Process() { }
+    }
+
+    public interface IOrderService
+    {
+        Task<Order> GetOrderAsync(int id);
+    }
+
+    public struct Point
+    {
+        public double X;
+        public double Y;
+    }
+
+    public enum Status
+    {
+        Pending,
+        Completed,
+        Cancelled
+    }
+}
+"#;
+
+        let symbols = extract_symbols_ast(code, "csharp");
+        assert!(symbols.iter().any(|s| s.name == "Order" && s.kind == "class"));
+        assert!(symbols.iter().any(|s| s.name == "IOrderService" && s.kind == "interface"));
+        assert!(symbols.iter().any(|s| s.name == "Point" && s.kind == "struct"));
+        assert!(symbols.iter().any(|s| s.name == "Status" && s.kind == "enum"));
+        assert!(symbols.iter().any(|s| s.name == "MyApp.Models" && s.kind == "namespace"));
+    }
+
+    #[test]
     fn test_unknown_language() {
         let code = "fn main() {}";
         let symbols = extract_symbols_ast(code, "unknown");
@@ -352,19 +451,19 @@ function greet(user: User): string {
     }
 
     #[test]
-    fn test_get_language_default_four() {
+    fn test_get_language_default_five() {
         assert!(get_language("rust").is_some());
         assert!(get_language("typescript").is_some());
         assert!(get_language("javascript").is_some());
         assert!(get_language("python").is_some());
-        // typescriptreact / javascriptreact aliases
+        assert!(get_language("csharp").is_some());
+        // aliases
         assert!(get_language("typescriptreact").is_some());
         assert!(get_language("javascriptreact").is_some());
     }
 
     #[test]
     fn test_get_language_extended_without_feature() {
-        // Without --features extended-languages, go/java/c/cpp should be None (fallback to regex)
         #[cfg(not(feature = "extended-languages"))]
         {
             assert!(get_language("go").is_none());
@@ -395,14 +494,12 @@ function greet(user: User): string {
     #[cfg(feature = "extended-languages")]
     #[test]
     fn test_extract_symbols_go() {
-        // Requires --features extended-languages
         let code = r#"
 package main
 func Hello() {}
 type Config struct { Name string }
 "#;
         let symbols = extract_symbols_ast(code, "go");
-        // Go support via tree-sitter-go should at least not panic; kind coverage may expand
         assert!(symbols.is_empty() || symbols.iter().any(|s| s.name.contains("Hello") || s.name.contains("Config")));
     }
 
@@ -410,5 +507,13 @@ type Config struct { Name string }
     fn test_get_language_none_for_empty() {
         assert!(get_language("").is_none());
         assert!(get_language("v0.6.0").is_none());
+    }
+
+    #[test]
+    fn test_extract_symbols_by_id() {
+        use crate::registry::LanguageId;
+        let code = "fn main() {}";
+        let symbols = extract_symbols_by_id(code, LanguageId::Rust);
+        assert!(symbols.iter().any(|s| s.name == "main" && s.kind == "function"));
     }
 }

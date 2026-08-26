@@ -137,7 +137,7 @@ impl ContextEngine {
         };
 
         // Step 1: Search code via Repository Intelligence (dedup-eligible) — capture SearchResult.score for provenance (TASK-007)
-        let (raw_code, code_scored) = self.search_code_scored(&repo_intel, &repository_id, &request.message, &request.context_hints)?;
+        let (raw_code, code_scored, code_retrieval_status) = self.search_code_scored(&repo_intel, &repository_id, &request.message, &request.context_hints)?;
         let code_context = self.dedup_content(&request.session_id, &raw_code);
 
         // Step 2: Retrieve knowledge via Knowledge Hub — capture BM25 vs engram provenance
@@ -155,6 +155,7 @@ impl ContextEngine {
             &code_context,
             &mut token_budget,
             &mut token_usage_by_source,
+            code_retrieval_status,
         );
         // TASK-007/008/009: stable artifact + provenance (deterministic) — real scores
         {
@@ -290,27 +291,87 @@ impl ContextEngine {
 
     /// Search code via Repository Intelligence (scored variant for provenance TASK-007) —
     /// scoped to the resolved repository (TASK-030/036)
+    /// Returns (content, scored_results, retrieval_status)
     fn search_code_scored(
         &self,
         repo_intel: &Mutex<RepositoryIntelligence>,
         repository_id: &str,
         query: &str,
         context_hints: &Option<ContextHints>,
-    ) -> Result<(String, Vec<coderun_core::SearchResult>), String> {
+    ) -> Result<(String, Vec<coderun_core::SearchResult>, coderun_core::RetrievalStatus), String> {
         let repo_intel = repo_intel.lock().map_err(|e| format!("Lock error: {}", e))?;
         let mut results = Vec::new();
         let mut scored = Vec::new();
         // scored search — try tantivy BM25 first for real scores (repo-scoped), fallback to ripgrep
-        let search_results = repo_intel.search_fulltext(query, None, 10, Some(repository_id)).or_else(|_| repo_intel.search_text(query, None, 10)).unwrap_or(coderun_core::SearchResults { results: vec![], total_count: 0 });
+        let search_results = match repo_intel.search_fulltext(query, None, 10, Some(repository_id)) {
+            Ok(sr) if sr.total_count > 0 => sr,
+            Ok(_) => {
+                // Tantivy returned 0 hits — try ripgrep
+                match repo_intel.search_text(query, None, 10) {
+                    Ok(sr) if sr.total_count > 0 => sr,
+                    Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
+                    Err(e) => {
+                        return Ok((String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e)));
+                    }
+                }
+            }
+            Err(e) => {
+                // Tantivy failed — try ripgrep
+                match repo_intel.search_text(query, None, 10) {
+                    Ok(sr) if sr.total_count > 0 => sr,
+                    Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
+                    Err(_) => {
+                        return Ok((String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e)));
+                    }
+                }
+            }
+        };
+
+        let status = if search_results.total_count > 0 {
+            coderun_core::RetrievalStatus::Found(search_results.total_count)
+        } else {
+            coderun_core::RetrievalStatus::NoMatch
+        };
+
+        let max_files = self.config.max_files;
+        let max_lines = self.config.max_lines_per_file;
+        let mut seen_files = std::collections::HashSet::new();
+
         for result in &search_results.results {
-            scored.push(result.clone());
-            if let Ok(content) = repo_intel.get_file_content(
-                &result.path,
-                Some((result.line.saturating_sub(5), result.line + 10)),
-            ) {
-                results.push(format!("// {}:{}\n{}", result.path, result.line, content));
+            if seen_files.len() >= max_files { break; }
+            if seen_files.insert(result.path.clone()) {
+                scored.push(result.clone());
+                let line_start = result.line.saturating_sub(5);
+                let line_end = result.line + max_lines.min(15);
+                if let Ok(content) = repo_intel.get_file_content(
+                    &result.path,
+                    Some((line_start, line_end)),
+                ) {
+                    results.push(format!("// {}:{}\n{}", result.path, result.line, content));
+                }
             }
         }
+
+        // RET-010: Also search symbols by name — supplements BM25 with structural matches
+        if let Ok(symbol_results) = repo_intel.search_symbols(query, 5) {
+            for sym_result in symbol_results {
+                if seen_files.len() >= max_files { break; }
+                // Dedup by path+line
+                if !scored.iter().any(|s| s.path == sym_result.path && s.line == sym_result.line as usize) {
+                    let line_start = sym_result.line.saturating_sub(5) as usize;
+                    let line_end = sym_result.line as usize + max_lines.min(15);
+                    if let Ok(content) = repo_intel.get_file_content(
+                        &sym_result.path,
+                        Some((line_start, line_end)),
+                    ) {
+                        results.push(format!("// {}:{}\n{}", sym_result.path, sym_result.line, content));
+                        seen_files.insert(sym_result.path.clone());
+                        scored.push(sym_result);
+                    }
+                }
+            }
+        }
+
         // Also search for files mentioned in context hints (score 1.0, symbol match)
         if let Some(hints) = context_hints {
             if let Some(files) = &hints.files_mentioned {
@@ -322,7 +383,7 @@ impl ContextEngine {
                 }
             }
         }
-        Ok((results.join("\n\n"), scored))
+        Ok((results.join("\n\n"), scored, status))
     }
 
     /// Retrieve knowledge via Knowledge Hub (scored variant) — scoped to one repository (TASK-030)
@@ -358,6 +419,7 @@ impl ContextEngine {
         code_context: &str,
         token_budget: &mut usize,
         token_usage_by_source: &mut HashMap<String, usize>,
+        code_retrieval_status: coderun_core::RetrievalStatus,
     ) -> (ContextPack, usize) {
         let mut total_tokens = 0;
 
@@ -420,6 +482,7 @@ impl ContextEngine {
                 repository_state: String::new(),
             },
             repository_state: String::new(),
+            code_retrieval_status,
         };
 
         (context_pack, total_tokens)
@@ -765,6 +828,7 @@ mod tests {
             provenance: vec![],
             metadata: coderun_core::ipc::ContextMetadata::default(),
             repository_state: String::new(),
+            code_retrieval_status: coderun_core::RetrievalStatus::NoMatch,
         };
 
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
@@ -801,7 +865,7 @@ mod tests {
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let mut budget = 12000;
         let mut usage = HashMap::new();
-        let (pack, _) = engine.assemble_context_pack("skill content line", "doc line", "code line", &mut budget, &mut usage);
+        let (pack, _) = engine.assemble_context_pack("skill content line", "doc line", "code line", &mut budget, &mut usage, coderun_core::RetrievalStatus::NoMatch);
         assert!(pack.behavioral_skills.contains("FROZEN PREFIX END"));
         assert_eq!(engine.config.cache_order[0], "behavioral_skills");
     }
@@ -934,6 +998,7 @@ mod tests {
             provenance: vec![],
             metadata: coderun_core::ipc::ContextMetadata::default(),
             repository_state: String::new(),
+            code_retrieval_status: coderun_core::RetrievalStatus::NoMatch,
         };
         assert_eq!(ContextEngine::to_yaml(&pack).unwrap(), "");
     }
@@ -950,6 +1015,7 @@ mod tests {
             provenance: vec![ContextProvenance { path: "src/Checkout.cs".into(), source: "code".into(), retriever: "tantivy".into(), score: 3.2, reason: "bm25".into() }],
             metadata: coderun_core::ipc::ContextMetadata::default(),
             repository_state: String::new(),
+            code_retrieval_status: coderun_core::RetrievalStatus::Found(1),
         };
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
         assert!(yaml.contains("code_context"));

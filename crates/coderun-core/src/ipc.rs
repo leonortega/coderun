@@ -113,6 +113,23 @@ pub enum OutputType {
     Other,
 }
 
+/// Status of a retrieval operation — distinguishes "no match" from "retrieval failed"
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalStatus {
+    /// Results were found
+    Found(usize),
+    /// Search ran successfully but found nothing
+    #[default]
+    NoMatch,
+    /// No index exists for this repository
+    IndexUnavailable,
+    /// Search threw an error (e.g. query parse failure)
+    RetrievalFailed(String),
+    /// Used a fallback method (e.g. ripgrep after Tantivy miss)
+    FallbackUsed(String),
+}
+
 /// The assembled context pack returned to agents — stable artifact (TASK-008)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextPack {
@@ -129,6 +146,9 @@ pub struct ContextPack {
     /// Repository state (git HEAD hash) for determinism/stability (TASK-008)
     #[serde(default)]
     pub repository_state: String,
+    /// Retrieval status for code search — tells callers WHY results are empty
+    #[serde(default)]
+    pub code_retrieval_status: RetrievalStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -372,6 +392,7 @@ mod tests {
             provenance: vec![],
             metadata: ContextMetadata::default(),
             repository_state: String::new(),
+            code_retrieval_status: RetrievalStatus::Found(5),
         };
         let json = serde_json::to_string(&pack).unwrap();
         let parsed: ContextPack = serde_json::from_str(&json).unwrap();

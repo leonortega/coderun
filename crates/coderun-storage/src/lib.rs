@@ -189,10 +189,37 @@ impl Database {
         }
     }
 
+    /// Get a file record by ID
+    pub fn get_file_by_id(&self, id: i64) -> Result<Option<FileRecord>, String> {
+        let start = Instant::now();
+        let result = self.conn.query_row(
+            "SELECT id, path, hash, size, language, last_indexed_at FROM files WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(FileRecord {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    hash: row.get(2)?,
+                    size: row.get(3)?,
+                    language: row.get(4)?,
+                    last_indexed_at: row.get(5)?,
+                })
+            },
+        );
+
+        log_slow("get_file_by_id", start);
+        match result {
+            Ok(record) => Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to get file by id: {}", e)),
+        }
+    }
+
     /// Get the count of indexed files
     pub fn get_file_count(&self) -> Result<usize, String> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
+            .map(|v| v as usize)
             .map_err(|e| format!("Failed to count files: {}", e))
     }
 
@@ -280,7 +307,8 @@ impl Database {
     /// Get the count of symbols
     pub fn get_symbol_count(&self) -> Result<usize, String> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get::<_, i64>(0))
+            .map(|v| v as usize)
             .map_err(|e| format!("Failed to count symbols: {}", e))
     }
 
@@ -487,9 +515,9 @@ impl Database {
                 })
             };
             let rows = if let Some(repo) = repository_filter {
-                stmt.query_map(params![pattern, cat, min_confidence, repo, max_results], map_row)
+                stmt.query_map(params![pattern, cat, min_confidence, repo, max_results as i64], map_row)
             } else {
-                stmt.query_map(params![pattern, cat, min_confidence, max_results], map_row)
+                stmt.query_map(params![pattern, cat, min_confidence, max_results as i64], map_row)
             }.map_err(|e| format!("Failed to query knowledge: {}", e))?;
             for row in rows {
                 records.push(row.map_err(|e| format!("Failed to read row: {}", e))?);
@@ -513,9 +541,9 @@ impl Database {
                 })
             };
             let rows = if let Some(repo) = repository_filter {
-                stmt.query_map(params![pattern, min_confidence, repo, max_results], map_row)
+                stmt.query_map(params![pattern, min_confidence, repo, max_results as i64], map_row)
             } else {
-                stmt.query_map(params![pattern, min_confidence, max_results], map_row)
+                stmt.query_map(params![pattern, min_confidence, max_results as i64], map_row)
             }.map_err(|e| format!("Failed to query knowledge: {}", e))?;
             for row in rows {
                 records.push(row.map_err(|e| format!("Failed to read row: {}", e))?);
@@ -589,7 +617,7 @@ impl Database {
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let records = stmt
-            .query_map(params![namespace, pattern, max_results], |row| {
+            .query_map(params![namespace, pattern, max_results as i64], |row| {
                 Ok(MemoryRecord {
                     id: row.get(0)?,
                     namespace: row.get(1)?,
