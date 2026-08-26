@@ -37,6 +37,14 @@ function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
 Info "Coderun installer (DBOS/workflow future-only)"
 
+# 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~\.coderun\bin)
+# and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
+foreach ($procName in @("coderun-daemon", "coderun")) {
+  Get-Process -Name $procName -ErrorAction SilentlyContinue | ForEach-Object {
+    try { Stop-Process -Id $_.Id -Force -ErrorAction Stop; Info "stopped $procName PID $($_.Id)" } catch {}
+  }
+}
+
 # 0. Prereqs - Rust 1.85+ required for RTK (edition2024)
 $needRustInstall = $false
 $rustVerStr = ""
@@ -152,6 +160,21 @@ else {
   # codebase-memory-mcp
   if (Test-Cmd npx) {
     try { npm list -g codebase-memory-mcp 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { npm i -g codebase-memory-mcp 2>&1 | Out-Null }; Ok "codebase-memory-mcp $(npm list -g codebase-memory-mcp 2>&1 | Select-String codebase-memory-mcp)" } catch { Warn "codebase-memory-mcp npm install failed" }
+    # Enable auto-indexing so repos are indexed automatically (persisted MCP config)
+    # NOTE: judged via $LASTEXITCODE with EAP=Continue — under EAP=Stop, native stderr
+    # (npm notices) redirected through 2>&1 becomes a terminating error even on success.
+    $autoPrevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try {
+      $cfgOut = (& npx -y codebase-memory-mcp config set auto_index true 2>&1 | Out-String)
+      if ($LASTEXITCODE -eq 0) { Ok "codebase-memory auto_index enabled" }
+      else {
+        $firstLine = ($cfgOut.Trim() -split "`r?`n" | Select-Object -First 1)
+        Warn ("codebase-memory auto_index failed (exit {0}): {1}" -f $LASTEXITCODE, $firstLine)
+      }
+    } catch {
+      Warn ("codebase-memory auto_index failed: " + $_.Exception.Message.Split("`n")[0])
+    }
+    $ErrorActionPreference = $autoPrevEap
   }
 
   # LiteLLM proxy
@@ -282,23 +305,6 @@ else {
   # if (Test-Path "$Root\workflow\dbos\package.json") { Warn "legacy workflow/dbos/package.json found -- v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)" }
 }
 
-# 0b. v1: workflow NOT part of hot path -- preserved in future/workflow/ (TASK-001)
-# No workflow config required for `coderun serve`/`doctor`. Future opt-in via --features workflow.
-$cfgPath = Join-Path $Root ".coderun/config.toml"
-try {
-  New-Item -ItemType Directory -Force -Path (Split-Path $cfgPath -Parent) | Out-Null
-  if (Test-Path $cfgPath) {
-    $content = Get-Content -LiteralPath $cfgPath -Raw -ErrorAction SilentlyContinue
-    if ($content -match '^\[workflow\]' -or $content -match 'dbos_shared_secret') {
-      Info "  workflow config found in $cfgPath -- v1 ignores it (future/workflow only)"
-      if ($content -match 'dbos_shared_secret') {
-        try { $cleaned = $content -replace '(?m)^\s*dbos_shared_secret\s*=.*\r?\n', ""; [System.IO.File]::WriteAllText($cfgPath, $cleaned, [System.Text.Encoding]::UTF8); Info "  Removed legacy dbos_shared_secret" } catch {}
-      }
-    } else { Ok "v1 config at $cfgPath -- no [workflow] required (future/workflow opt-in)" }
-  } else { Ok "v1 config -- no [workflow] required (future/workflow opt-in)" }
-} catch { Info "  workflow config check skipped: $_" }
-# v1: DBOS sidecar NOT started -- future/workflow only (TASK-001: serve works without DBOS)
-
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
 if ($SkipBuild) { Info "Skipping build check (--SkipBuild)" }
 Info "Checking prebuilt coderun..."
@@ -355,11 +361,12 @@ if (Test-Path $srcSkills) {
   } catch { Warn "failed to copy skills folder to ${dstSkills}: $_" }
 } else { Warn "no skills folder found at $srcSkills - skipped" }
 
-# 2. init + index + doctor
-Info "Initializing repo..."
+# 2. Verify installation (doctor)
+# NOTE: `coderun init` / `coderun index` are NOT run here on purpose - they bootstrap the
+# repository they run IN (per-repo .coderun/ + index), which is meaningless for the coderun
+# source checkout itself. Run them inside each repo you want analyzed.
+Info "Verifying installation (doctor)..."
 $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-try { & $installedCli init 2>&1 | Out-Null } catch {}
-try { & $installedCli index 2>&1 | Out-Null } catch { Info "  index warning (non-fatal, see doctor)" }
 try { & $installedCli doctor } catch {}
 $ErrorActionPreference = $prevEA2
 

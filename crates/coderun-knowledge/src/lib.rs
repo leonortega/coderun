@@ -61,6 +61,16 @@ impl KnowledgeHub {
         Ok(count)
     }
 
+    /// Load skills from multiple directories in priority order (first occurrence of a skill
+    /// name wins) — repo-local `.coderun/skills` merged with the global `~/.coderun/skills`
+    /// library. Non-existent directories are skipped.
+    pub fn load_skills_from_dirs(&mut self, dirs: &[std::path::PathBuf]) -> Result<usize, String> {
+        let mut engine = coderun_skills::SkillEngine::from_skills(Vec::new());
+        let count = engine.load_skills_from_dirs(dirs)?;
+        self.skills = engine.get_skills().to_vec();
+        Ok(count)
+    }
+
     /// Match skills — delegates to canonical SkillEngine scorer (v0.6.0 single impl)
     pub fn match_skills(&self, task_description: &str, max_skills: usize) -> Vec<SkillMatch> {
         let engine = coderun_skills::SkillEngine::from_skills(self.skills.clone());
@@ -486,10 +496,12 @@ mod tests {
         Database::open(&path).expect("Failed to create in-memory database")
     }
 
+    /// Hermetic test hub — memory_enabled=false so NOTHING depends on an external
+    /// engram server being alive (compile-time test runs must never touch network)
     fn test_hub() -> KnowledgeHub {
         let db = test_db();
         let event_bus = EventBus::new();
-        let config = KnowledgeConfig::default();
+        let config = KnowledgeConfig { memory_enabled: false, ..Default::default() };
         KnowledgeHub::new(db, event_bus, config)
     }
 

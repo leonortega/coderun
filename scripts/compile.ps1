@@ -72,6 +72,8 @@ if ($NoRelease) {
 }
 
 # Tests
+# NOTE: the suite is fully HERMETIC - no test requires a live daemon, engram server,
+# LiteLLM, or any network service. `cargo test --workspace` passes on a cold machine.
 if ($SkipTests) {
   Info "Skipping tests (--SkipTests)"
 } else {

@@ -92,21 +92,27 @@ describe("callCoderunDaemon", () => {
   });
 
   it("returns null on non-ok response", async () => {
+    // Failure is the expected scenario — silence the plugin's operational console.error
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 } as any);
     const res = await callCoderunDaemon(
       { hook_type: "PreGeneration", payload: { type: "MessageRewrite", message: "hi" } },
       { fetchImpl: mockFetch as any },
     );
     expect(res).toBeNull();
+    expect(errSpy).toHaveBeenCalled(); // fail-open logging still exercised
+    errSpy.mockRestore();
   });
 
   it("returns null on fetch throw (fail-open)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const mockFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
     const res = await callCoderunDaemon(
       { hook_type: "PreGeneration", payload: { type: "MessageRewrite", message: "hi" } },
       { fetchImpl: mockFetch as any },
     );
     expect(res).toBeNull();
+    errSpy.mockRestore();
   });
 
   it("sends correct body for tool compression", async () => {

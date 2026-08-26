@@ -11,6 +11,13 @@ for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-extern
 info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
 info "Coderun installer (DBOS/workflow future-only)"
+
+# 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~/.coderun/bin)
+# and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
+for p in coderun-daemon coderun; do
+  if pgrep -x "$p" >/dev/null 2>&1; then pkill -x "$p" 2>/dev/null || true; ok "stopped $p"; fi
+done
+
 # Rust 1.85+ required for RTK (edition2024)
 NEED_RUST=false
 if ! command -v rustc >/dev/null 2>&1; then NEED_RUST=true
@@ -69,6 +76,8 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
   else warn "FlashRank model missing at $MODEL_DIR/flashrank.onnx - TF-IDF fallback (expected at .coderun/models/flashrank.onnx)"
   fi
   command -v npx >/dev/null && { npm list -g codebase-memory-mcp >/dev/null 2>&1 || npm i -g codebase-memory-mcp 2>/dev/null; ok "codebase-memory-mcp"; } || true
+  # Enable auto-indexing so repos are indexed automatically (persisted MCP config)
+  npx -y codebase-memory-mcp config set auto_index true >/dev/null 2>&1 && ok "codebase-memory auto_index enabled" || warn "codebase-memory auto_index config failed"
   pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm"
    # RTK - PREBUILT binary from .coderun/rtk/rtk(.exe) -> ~/bin/rtk (NO COMPILE). Cargo only as last resort.
    RTK_BIN="$HOME/bin/rtk"
@@ -89,30 +98,8 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
      # v1: DBOS sidecar NOT built — future/workflow only, gated behind CODERUN_WORKFLOW_ENABLED=true (TASK-001)
      if [ "${CODERUN_WORKFLOW_ENABLED:-false}" = "true" ] && [ -f "$ROOT/future/workflow/dbos/package.json" ]; then (cd "$ROOT/future/workflow/dbos" && npm install >/dev/null 2>&1 && npx tsc >/dev/null 2>&1 && npx tsc --noEmit >/dev/null 2>&1 && [ -f dist/main.js ] && ok "future/workflow DBOS built" || warn "future DBOS build failed"); fi
      # legacy workflow/dbos never built in v1 (TASK-001 purge)
-     if [ -f "$ROOT/workflow/dbos/package.json" ]; then warn "legacy workflow/dbos/package.json found — v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)"; fi
+      if [ -f "$ROOT/workflow/dbos/package.json" ]; then warn "legacy workflow/dbos/package.json found — v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)"; fi
 fi
-
-# 0b. v1: workflow NOT part of hot path — preserved in future/workflow/ (TASK-001)
-# No workflow config required for `coderun serve`/`doctor`. Future opt-in via --features workflow.
-CFG_PATH="$ROOT/.coderun/config.toml"
-mkdir -p "$(dirname "$CFG_PATH")"
-if grep -q "^\[workflow\]" "$CFG_PATH" 2>/dev/null; then
-  info "  workflow config found in $CFG_PATH — v1 ignores it (future/workflow only)"
-  # Remove legacy workflow section for clean v1 (optional, keep if user wants future)
-  if grep -q "dbos_shared_secret" "$CFG_PATH" 2>/dev/null; then
-    python3 -c "
-import pathlib, re
-p=pathlib.Path('$CFG_PATH')
-raw=p.read_text()
-raw=re.sub(r'(?m)^\s*dbos_shared_secret\s*=.*\n', '', raw)
-p.write_text(raw)
-" 2>/dev/null || sed -i '/dbos_shared_secret/d' "$CFG_PATH" 2>/dev/null || true
-    info "  Removed legacy dbos_shared_secret from $CFG_PATH"
-  fi
-else
-  ok "v1 config at $CFG_PATH — no [workflow] required (future/workflow opt-in)"
-fi
-# v1: DBOS sidecar NOT started — future/workflow only (TASK-001: serve works without DBOS)
 
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
 if [ "$SKIP_BUILD" = true ]; then info "Skipping build check (--skip-build)"; fi
@@ -151,9 +138,11 @@ if [ -d "$SRC_SKILLS" ]; then
   else warn "skills copy to $DST_SKILLS failed"; fi
 else warn "no skills folder found at $SRC_SKILLS - skipped"; fi
 
-info "Initializing repo..."
-"$INSTALLED_CLI" init 2>/dev/null || true
-"$INSTALLED_CLI" index 2>/dev/null || true
+# 2. Verify installation (doctor)
+# NOTE: `coderun init` / `coderun index` are NOT run here on purpose - they bootstrap the
+# repository they run IN (per-repo .coderun/ + index), which is meaningless for the coderun
+# source checkout itself. Run them inside each repo you want analyzed.
+info "Verifying installation (doctor)..."
 "$INSTALLED_CLI" doctor
 
 # 3. opencode MCPs + plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)

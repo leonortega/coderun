@@ -83,17 +83,17 @@ impl DaemonState {
             knowledge_config,
         );
 
-        // TASK-037b: prefer repo-local skills (.coderun/skills), fall back to the bundled
-        // global library installed at ~/.coderun/skills — best-effort, never fatal.
+        // TASK-037b: merged skills view — repo-local `.coderun/skills` first, then the
+        // global `~/.coderun/skills` library. Best-effort, never fatal.
         {
-            let local_skills = std::path::PathBuf::from(".coderun/skills");
-            let global_skills = expand_path("~/.coderun/skills");
-            let skills_dir = if local_skills.is_dir() { local_skills } else { global_skills };
-            if skills_dir.is_dir() {
-                match knowledge_hub.load_skills(&skills_dir) {
-                    Ok(count) => info!(path = %skills_dir.display(), skills = count, "loaded skills library"),
-                    Err(e) => warn!(path = %skills_dir.display(), error = %e, "failed to load skills (continuing without)"),
+            let mut skill_dirs = vec![std::path::PathBuf::from(".coderun/skills")];
+            skill_dirs.push(expand_path("~/.coderun/skills"));
+            match knowledge_hub.load_skills_from_dirs(&skill_dirs) {
+                Ok(count) => {
+                    let loaded: Vec<String> = skill_dirs.iter().filter(|d| d.is_dir()).map(|d| d.display().to_string()).collect();
+                    info!(skills = count, dirs = ?loaded, "loaded skills library (repo + global)")
                 }
+                Err(e) => warn!(error = %e, "failed to load skills (continuing without)"),
             }
         }
 

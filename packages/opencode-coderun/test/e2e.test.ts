@@ -65,12 +65,15 @@ describe("E2E: OpenCode → Coderun → BuildContext → Router → LiteLLM", ()
   });
 
   it("fail-open when daemon unreachable (never breaks agent)", async () => {
+    // Failure is the expected scenario — silence the plugin's operational console.error
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const mockFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
     const resp = await callCoderunDaemon(
       { hook_type: "PreGeneration", payload: { type: "MessageRewrite", message: "hi" } },
       { fetchImpl: mockFetch as any },
     );
     expect(resp).toBeNull(); // caller does passthrough
+    errSpy.mockRestore();
   });
 
   it("TIER2 flag gates other adapters", async () => {
