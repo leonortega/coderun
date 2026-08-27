@@ -149,40 +149,66 @@ else {
 
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
 
-  # codebase-memory-mcp
-  if (Test-Cmd npx) {
-    try { npm list -g codebase-memory-mcp 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { npm i -g codebase-memory-mcp 2>&1 | Out-Null }; Ok "codebase-memory-mcp $(npm list -g codebase-memory-mcp 2>&1 | Select-String codebase-memory-mcp)" } catch { Warn "codebase-memory-mcp npm install failed" }
-    # Enable auto-indexing so repos are indexed automatically (persisted MCP config)
-    # NOTE: judged via $LASTEXITCODE with EAP=Continue — under EAP=Stop, native stderr
-    # (npm notices) redirected through 2>&1 becomes a terminating error even on success.
-    $autoPrevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try {
-      $cfgOut = (& npx -y codebase-memory-mcp config set auto_index true 2>&1 | Out-String)
-      if ($LASTEXITCODE -eq 0) { Ok "codebase-memory auto_index enabled" }
-      else {
-        $firstLine = ($cfgOut.Trim() -split "`r?`n" | Select-Object -First 1)
-        Warn ("codebase-memory auto_index failed (exit {0}): {1}" -f $LASTEXITCODE, $firstLine)
-      }
-    } catch {
-      Warn ("codebase-memory auto_index failed: " + $_.Exception.Message.Split("`n")[0])
+  # codebase-memory-mcp - install via bundled installer (CLI mode only, no MCP server)
+  $cbmBinPath = "$env:USERPROFILE\bin\codebase-memory-mcp.exe"
+  $cbmBinNoExt = "$env:USERPROFILE\bin\codebase-memory-mcp"
+  $cbmInstalled = $false
+  if (Test-Cmd codebase-memory-mcp) { Ok "codebase-memory-mcp $(codebase-memory-mcp --version 2>&1 | Select-Object -First 1)"; $cbmInstalled = $true }
+  elseif (Test-Path $cbmBinPath) { Ok "codebase-memory-mcp binary at $cbmBinPath"; $cbmInstalled = $true }
+  if (-not $cbmInstalled) {
+    # Use bundled installer with --skip-config (installs binary without agent configuration)
+    $cbmInstaller = Join-Path $Root ".coderun\codebase-memory\install.ps1"
+    $cbmInstallerBin = Join-Path $Root ".coderun\codebase-memory\codebase-memory-mcp.exe"
+    if (Test-Path $cbmInstaller) {
+      try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
+        $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        & powershell -ExecutionPolicy Bypass -File $cbmInstaller "--dir=$(Split-Path $cbmBinPath -Parent)" "--skip-config" 2>&1 | Out-Null
+        $ErrorActionPreference = $prevEA
+        if (Test-Path $cbmBinPath) {
+          # Also copy without .exe extension for PATH compatibility
+          Copy-Item -LiteralPath $cbmBinPath -Destination $cbmBinNoExt -Force -ErrorAction SilentlyContinue
+          Ok "codebase-memory-mcp installed (CLI mode, no agent config)"
+          $cbmInstalled = $true
+        }
+      } catch { Warn "codebase-memory-mcp installer failed: $_" }
+    } elseif (Test-Path $cbmInstallerBin) {
+      # Fallback: copy prebuilt binary directly
+      try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
+        Copy-Item -LiteralPath $cbmInstallerBin -Destination $cbmBinPath -Force
+        Copy-Item -LiteralPath $cbmInstallerBin -Destination $cbmBinNoExt -Force
+        Ok "codebase-memory-mcp installed (from .coderun\codebase-memory binary)"
+        $cbmInstalled = $true
+      } catch { Warn "codebase-memory-mcp copy failed: $_" }
     }
-    $ErrorActionPreference = $autoPrevEap
+    if (-not $cbmInstalled) { Warn "codebase-memory-mcp not found - npx fallback" }
   }
 
   # LiteLLM proxy
   if (Test-Cmd pip) { try { pip show litellm 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { pip install "litellm[proxy]" 2>&1 | Out-Null }; Ok "litellm pip" } catch { Warn "litellm pip install failed" } }
 
-  # RTK - PREBUILT binary from .coderun\rtk\rtk.exe -> ~\bin\rtk.exe (NO COMPILE). Cargo source build only as last resort.
+  # RTK - extract from .coderun\rtk\*.zip (Windows) -> ~\bin\rtk.exe (NO COMPILE). Cargo source build only as last resort.
   $rtkBinPath = "$env:USERPROFILE\bin\rtk.exe"
   if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
   elseif (Test-Path $rtkBinPath) { $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; Ok "rtk binary at $rtkBinPath" }
-  elseif (Test-Path "$Root\.coderun\rtk\rtk.exe") {
-    try {
-      New-Item -ItemType Directory -Force -Path (Split-Path $rtkBinPath -Parent) | Out-Null
-      Copy-Item -LiteralPath "$Root\.coderun\rtk\rtk.exe" -Destination $rtkBinPath -Force -ErrorAction Stop
-      $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"
-      Ok "rtk installed to $rtkBinPath (from .coderun\rtk\rtk.exe - no compile)"
-    } catch { Warn "rtk copy from .coderun\rtk failed: $_" }
+  else {
+    $repoZip = Get-ChildItem -LiteralPath "$Root\.coderun\rtk" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($repoZip -and (Test-Path $repoZip.FullName)) {
+      try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $rtkBinPath -Parent) | Out-Null
+        $tmpExtract = Join-Path $env:TEMP "rtk_extract"
+        if (Test-Path $tmpExtract) { Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue }
+        Expand-Archive -LiteralPath $repoZip.FullName -DestinationPath $tmpExtract -Force
+        $srcExe = Get-ChildItem -LiteralPath $tmpExtract -Recurse -Filter "rtk.exe" | Select-Object -First 1
+        if ($srcExe) {
+          Copy-Item -LiteralPath $srcExe.FullName -Destination $rtkBinPath -Force
+          $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"
+          Ok "rtk installed to $rtkBinPath (from $($repoZip.Name))"
+        } else { Warn "rtk zip did not contain rtk.exe" }
+        Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+      } catch { Warn "rtk extraction failed: $_" }
+    }
   }
   if (-not ((Test-Cmd rtk) -or (Test-Path $rtkBinPath))) {
     $rtkOk = $false
@@ -362,8 +388,8 @@ $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try { & $installedCli doctor } catch {}
 $ErrorActionPreference = $prevEA2
 
-# 3. opencode MCPs + plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
-Info "Configuring opencode MCPs and plugin (global ~\.config\opencode)..."
+# 3. opencode plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
+Info "Configuring opencode plugin (global ~\.config\opencode)..."
 $opencodeDir = Join-Path $Root ".opencode"   # legacy project dir - cleaned below
 $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
 $ocGlobalCfg = Join-Path $ocGlobalDir "opencode.jsonc"
@@ -416,27 +442,14 @@ if ($engramSrc -and (Test-Path $engramSrc)) {
     } catch { Warn "failed to copy engram to global opencode dir from zip: $_" }
   }
 }
-# Global config: ABSOLUTE engram path (project-relative .opencode paths only resolve inside this repo)
-$ocEngramAbs = $opencodeEngramBin -replace '\\','/'
+# Global config: plugin only (MCPs are NOT exposed to the agent — engram/codebase used directly by daemon)
 $opencodeJsonc = @"
 {
     "`$schema": "https://opencode.ai/config.json",
-    "plugin": ["opencode-coderun"],
-    "mcp": {
-        "codebase-memory": {
-            "command": ["npx", "-y", "codebase-memory-mcp"],
-            "type": "local",
-            "enabled": true
-        },
-        "engram": {
-            "command": ["$ocEngramAbs", "mcp", "--tools=agent"],
-            "type": "local",
-            "enabled": true
-        }
-    }
+    "plugin": ["opencode-coderun"]
 }
 "@
-try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode MCPs + plugin GLOBAL at $ocGlobalCfg (codebase-memory + engram -> $ocEngramAbs, plugin: opencode-coderun)" } catch { Warn "failed to write $ocGlobalCfg : $_" }
+try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode plugin GLOBAL at $ocGlobalCfg (plugin: opencode-coderun, MCPs used internally by daemon)" } catch { Warn "failed to write $ocGlobalCfg : $_" }
 
 # Remove legacy global path plugin (now npm) and local path plugin
 $globalPlugin = "$env:USERPROFILE\.config\opencode\plugins\coderun.ts"
@@ -444,7 +457,7 @@ if (Test-Path $globalPlugin) { try { Remove-Item -LiteralPath $globalPlugin -For
 $localPlugin = Join-Path $opencodeDir "plugins\coderun.ts"
 if (Test-Path $localPlugin) { try { Remove-Item -LiteralPath $localPlugin -Force; Info "Removed legacy local path plugin .opencode/plugins/coderun.ts" } catch {} }
 
-# Migrate: remove per-project opencode config/deps (MCPs + plugin are global now)
+# Migrate: remove per-project opencode config/deps (plugin is global now)
 foreach ($lc in @((Join-Path $opencodeDir "opencode.jsonc"), (Join-Path $opencodeDir "opencode.json"))) {
   if (Test-Path $lc) { try { Remove-Item -LiteralPath $lc -Force; Info "Removed legacy project config $(Split-Path $lc -Leaf) (MCPs/plugin are global now)" } catch {} }
 }
@@ -500,7 +513,7 @@ if (Test-Path $pluginDir) {
     Pop-Location
   } else { Warn "npm not found - skipping global opencode plugin install (install Node.js 18+)" }
 } else { Warn "packages/opencode-coderun not found - skipping npm plugin install" }
-Info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open). MCPs+plugin now load in EVERY project (global ~\.config\opencode)."
+Info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open). Plugin loads in EVERY project (global ~\.config\opencode). MCPs (engram, codebase-memory) used internally by daemon as fallback tools."
 
 # 4. Start daemon - coderun must be in RUNNING state after installation
 # TASK-037: launch the daemon from ~\.coderun\bin (installed copy) so the runtime keeps

@@ -50,6 +50,9 @@ pub struct IndexConfig {
 #[serde(default)]
 pub struct KnowledgeConfig {
     pub memory_enabled: bool,
+    /// Path to engram binary (CLI mode, no server needed). If empty, uses default discovery.
+    pub engram_binary_path: Option<String>,
+    /// DEPRECATED: Use engram_binary_path instead. Kept for config compat.
     pub memory_endpoint: String,
     pub max_knowledge_entries: usize,
 }
@@ -165,7 +168,8 @@ impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
             memory_enabled: true,
-            memory_endpoint: "http://localhost:9090".to_string(),
+            engram_binary_path: None, // auto-discover
+            memory_endpoint: "http://localhost:9090".to_string(), // deprecated
             max_knowledge_entries: 10000,
         }
     }

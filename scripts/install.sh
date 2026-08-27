@@ -44,44 +44,60 @@ command -v git >/dev/null || { echo "git not found"; exit 1; }; ok "$(git --vers
 if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-external)"; else
   info "Installing first-class external tools..."
   command -v ast-grep >/dev/null && ok "ast-grep $(ast-grep --version)" || { info "  ast-grep via npm (@ast-grep/cli, prebuilt)..."; npm i -g @ast-grep/cli 2>/dev/null && ok "ast-grep installed" || warn "ast-grep npm install failed - fallback WARN"; }
-  # engram - local binary from .coderun/engram/*.zip or .coderun/engram/engram (no git clone)
+  # engram - extract from .coderun/engram/*.tar.gz (Linux)
   ENGRAM_BIN="$HOME/bin/engram"
   if command -v engram >/dev/null 2>&1; then ok "engram $(engram --version 2>/dev/null | head -1)"
   elif [ -f "$ENGRAM_BIN" ]; then ok "engram binary at $ENGRAM_BIN"
   else
-    REPO_ZIP=$(ls "$ROOT/.coderun/engram/"*.zip 2>/dev/null | head -1 || true)
-    REPO_EXE="$ROOT/.coderun/engram/engram"
-    [ -f "$ROOT/.coderun/engram/engram.exe" ] && REPO_EXE="$ROOT/.coderun/engram/engram.exe"
-    if [ -f "$REPO_EXE" ]; then
-      mkdir -p "$(dirname "$ENGRAM_BIN")"
-      cp -f "$REPO_EXE" "$ENGRAM_BIN" 2>/dev/null && chmod +x "$ENGRAM_BIN" 2>/dev/null && ok "engram installed to $ENGRAM_BIN (from .coderun/engram)" || warn "engram copy failed - local LIKE fallback"
-    elif [ -n "$REPO_ZIP" ] && [ -f "$REPO_ZIP" ]; then
+    REPO_TAR=$(ls "$ROOT/.coderun/engram/"*.tar.gz 2>/dev/null | head -1 || true)
+    if [ -n "$REPO_TAR" ] && [ -f "$REPO_TAR" ]; then
       mkdir -p "$(dirname "$ENGRAM_BIN")" "$HOME/.cache/tmp/engram_extract"
-      if command -v unzip >/dev/null 2>&1; then
-        unzip -o "$REPO_ZIP" -d "$HOME/.cache/tmp/engram_extract" 2>/dev/null
-        SRC=$(find "$HOME/.cache/tmp/engram_extract" -name "engram*" -type f 2>/dev/null | head -1 || true)
-        if [ -n "$SRC" ] && [ -f "$SRC" ]; then cp -f "$SRC" "$ENGRAM_BIN" 2>/dev/null && chmod +x "$ENGRAM_BIN" 2>/dev/null && ok "engram installed to $ENGRAM_BIN (from $(basename "$REPO_ZIP"))" || warn "engram copy failed - local LIKE fallback"
-        else warn "engram zip did not contain binary - local LIKE fallback"
-        fi
-      else warn "unzip not found - cannot extract engram; local LIKE fallback"
+      tar -xzf "$REPO_TAR" -C "$HOME/.cache/tmp/engram_extract" 2>/dev/null
+      SRC=$(find "$HOME/.cache/tmp/engram_extract" -name "engram" -type f 2>/dev/null | head -1 || true)
+      if [ -n "$SRC" ] && [ -f "$SRC" ]; then
+        cp -f "$SRC" "$ENGRAM_BIN" 2>/dev/null && chmod +x "$ENGRAM_BIN" 2>/dev/null && ok "engram installed to $ENGRAM_BIN (from $(basename "$REPO_TAR"))" || warn "engram copy failed"
+      else warn "engram tar.gz did not contain binary"
       fi
-    else warn "engram zip not found at .coderun/engram/*.zip - local LIKE fallback"
+      rm -rf "$HOME/.cache/tmp/engram_extract" 2>/dev/null
+    else warn "engram tar.gz not found at .coderun/engram/*.tar.gz"
     fi
   fi
-  if [ -d "$ROOT/../engram" ]; then ok "legacy engram clone at ../engram (unused, local binary preferred)"; fi
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
-  command -v npx >/dev/null && { npm list -g codebase-memory-mcp >/dev/null 2>&1 || npm i -g codebase-memory-mcp 2>/dev/null; ok "codebase-memory-mcp"; } || true
-  # Enable auto-indexing so repos are indexed automatically (persisted MCP config)
-  npx -y codebase-memory-mcp config set auto_index true >/dev/null 2>&1 && ok "codebase-memory auto_index enabled" || warn "codebase-memory auto_index config failed"
+  # codebase-memory-mcp - extract from .coderun/codebase-memory/*.tar.gz (Linux, CLI mode)
+  CBM_BIN="$HOME/bin/codebase-memory-mcp"
+  if command -v codebase-memory-mcp >/dev/null 2>&1; then ok "codebase-memory-mcp $(codebase-memory-mcp --version 2>/dev/null | head -1)"
+  elif [ -f "$CBM_BIN" ]; then ok "codebase-memory-mcp binary at $CBM_BIN"
+  else
+    REPO_TAR=$(ls "$ROOT/.coderun/codebase-memory/"*.tar.gz 2>/dev/null | head -1 || true)
+    if [ -n "$REPO_TAR" ] && [ -f "$REPO_TAR" ]; then
+      mkdir -p "$(dirname "$CBM_BIN")" "$HOME/.cache/tmp/cbm_extract"
+      tar -xzf "$REPO_TAR" -C "$HOME/.cache/tmp/cbm_extract" 2>/dev/null
+      SRC=$(find "$HOME/.cache/tmp/cbm_extract" -name "codebase-memory-mcp" -type f 2>/dev/null | head -1 || true)
+      if [ -n "$SRC" ] && [ -f "$SRC" ]; then
+        cp -f "$SRC" "$CBM_BIN" 2>/dev/null && chmod +x "$CBM_BIN" 2>/dev/null && ok "codebase-memory-mcp installed to $CBM_BIN (from $(basename "$REPO_TAR"))" || warn "codebase-memory-mcp copy failed"
+      else warn "codebase-memory-mcp tar.gz did not contain binary"
+      fi
+      rm -rf "$HOME/.cache/tmp/cbm_extract" 2>/dev/null
+    else warn "codebase-memory-mcp tar.gz not found at .coderun/codebase-memory/*.tar.gz"
+    fi
+  fi
   pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm"
-   # RTK - PREBUILT binary from .coderun/rtk/rtk(.exe) -> ~/bin/rtk (NO COMPILE). Cargo only as last resort.
+   # RTK - extract from .coderun/rtk/*.tar.gz (Linux) -> ~/bin/rtk (NO COMPILE). Cargo only as last resort.
    RTK_BIN="$HOME/bin/rtk"
-   REPO_RTK="$ROOT/.coderun/rtk/rtk"; [ -f "$REPO_RTK" ] || REPO_RTK="$ROOT/.coderun/rtk/rtk.exe"
    if command -v rtk >/dev/null 2>&1; then ok "rtk $(rtk --version 2>/dev/null | head -1)"
    elif [ -f "$RTK_BIN" ]; then ok "rtk binary at $RTK_BIN"
-   elif [ -f "$REPO_RTK" ]; then
-     mkdir -p "$(dirname "$RTK_BIN")"
-     cp -f "$REPO_RTK" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "rtk installed to $RTK_BIN (from .coderun/rtk - no compile)" || warn "rtk copy failed - cargo fallback"
+   else
+     REPO_TAR=$(ls "$ROOT/.coderun/rtk/"*.tar.gz 2>/dev/null | head -1 || true)
+     if [ -n "$REPO_TAR" ] && [ -f "$REPO_TAR" ]; then
+       mkdir -p "$(dirname "$RTK_BIN")" "$HOME/.cache/tmp/rtk_extract"
+       tar -xzf "$REPO_TAR" -C "$HOME/.cache/tmp/rtk_extract" 2>/dev/null
+       SRC=$(find "$HOME/.cache/tmp/rtk_extract" -name "rtk" -type f 2>/dev/null | head -1 || true)
+       if [ -n "$SRC" ] && [ -f "$SRC" ]; then
+         cp -f "$SRC" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "rtk installed to $RTK_BIN (from $(basename "$REPO_TAR"))" || warn "rtk copy failed"
+       else warn "rtk tar.gz did not contain binary"
+       fi
+       rm -rf "$HOME/.cache/tmp/rtk_extract" 2>/dev/null
+     fi
    fi
    if ! command -v rtk >/dev/null 2>&1 && [ ! -f "$RTK_BIN" ]; then
      info "  No prebuilt rtk found - building via cargo... FIRST BUILD TAKES SEVERAL MINUTES"
@@ -140,11 +156,11 @@ else warn "no skills folder found at $SRC_SKILLS - skipped"; fi
 info "Verifying installation (doctor)..."
 "$INSTALLED_CLI" doctor
 
-# 3. opencode MCPs + plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
+# 3. opencode plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
 OC_GLOBAL="$HOME/.config/opencode"
 OC_GLOBAL_CFG="$OC_GLOBAL/opencode.jsonc"
 ROOT_OPENCODE="$ROOT/.opencode"   # legacy project dir - cleaned below
-info "Configuring opencode MCPs and plugin (global ~/.config/opencode)..."
+info "Configuring opencode plugin (global ~/.config/opencode)..."
 mkdir -p "$OC_GLOBAL" "$OC_GLOBAL/engram"
 # Copy engram binary into global opencode dir (ABSOLUTE path reference - must resolve from any project)
 ENGRAM_SRC=""
@@ -165,32 +181,20 @@ else
     if [ -n "$SRC" ] && [ -f "$SRC" ]; then cp -f "$SRC" "$OC_GLOBAL/engram/engram" 2>/dev/null && chmod +x "$OC_GLOBAL/engram/engram" 2>/dev/null && ok "engram copied to $OC_GLOBAL/engram/engram (from zip)"; fi
   fi
 fi
-# Global config: ABSOLUTE engram path (project-relative .opencode paths only resolve inside this repo)
+# Global config: plugin only (MCPs are NOT exposed to the agent — engram/codebase used directly by daemon)
 cat > "$OC_GLOBAL_CFG" <<EOF
 {
     "\$schema": "https://opencode.ai/config.json",
-    "plugin": ["opencode-coderun"],
-    "mcp": {
-        "codebase-memory": {
-            "command": ["npx", "-y", "codebase-memory-mcp"],
-            "type": "local",
-            "enabled": true
-        },
-        "engram": {
-            "command": ["$OC_GLOBAL/engram/engram", "mcp", "--tools=agent"],
-            "type": "local",
-            "enabled": true
-        }
-    }
+    "plugin": ["opencode-coderun"]
 }
 EOF
-ok "opencode MCPs + plugin GLOBAL at $OC_GLOBAL_CFG (codebase-memory + engram -> $OC_GLOBAL/engram/engram, plugin: opencode-coderun)"
+ok "opencode plugin GLOBAL at $OC_GLOBAL_CFG (plugin: opencode-coderun, MCPs used internally by daemon)"
 # Remove legacy global path plugin (now npm)
 GLOBAL_PLUGIN="$HOME/.config/opencode/plugins/coderun.ts"
 if [ -f "$GLOBAL_PLUGIN" ]; then rm -f "$GLOBAL_PLUGIN" 2>/dev/null && info "Removed legacy global path plugin coderun.ts" || true; fi
 LOCAL_PLUGIN="$ROOT/.opencode/plugins/coderun.ts"
 if [ -f "$LOCAL_PLUGIN" ]; then rm -f "$LOCAL_PLUGIN" 2>/dev/null && info "Removed legacy local path plugin .opencode/plugins/coderun.ts" || true; fi
-# Migrate: remove per-project opencode config/deps (MCPs + plugin are global now)
+# Migrate: remove per-project opencode config/deps (plugin is global now)
 for f in "$ROOT_OPENCODE/opencode.jsonc" "$ROOT_OPENCODE/opencode.json" "$ROOT_OPENCODE/package.json" "$ROOT_OPENCODE/package-lock.json"; do
   if [ -f "$f" ]; then rm -f "$f" 2>/dev/null && info "Removed legacy project $(basename "$f") (MCPs/plugin are global now)" || true; fi
 done
@@ -224,7 +228,7 @@ if [ -d "$ROOT/packages/opencode-coderun" ]; then
 else
   warn "packages/opencode-coderun not found - skipping npm plugin install"
 fi
-info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). MCPs+plugin now load in EVERY project (global ~/.config/opencode)."
+info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode). MCPs (engram, codebase-memory) used internally by daemon as fallback tools."
 
 # 4. Start daemon - coderun must be in RUNNING state after installation
 # TASK-037: launch from ~/.coderun/bin (installed copy), repo-independent working dir.

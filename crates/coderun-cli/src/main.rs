@@ -435,7 +435,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         println!("Next steps:");
         println!("  1. Start the daemon: 'coderun serve' (or scripts/install.ps1, which starts it)");
     }
-    println!("  Agent setup (opencode plugin + MCPs) is global — installed once by scripts/install.ps1.");
+    println!("  Agent setup (opencode plugin) is global — installed once by scripts/install.ps1.");
     println!("  Re-run 'coderun init' anytime - incremental and safe to repeat.");
 
     Ok(())

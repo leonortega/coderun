@@ -15,6 +15,9 @@ use tracing::{debug, info};
 pub struct KnowledgeConfig {
     pub rerank_enabled: bool,
     pub memory_enabled: bool,
+    /// Path to engram binary (CLI mode, no server needed). If empty, uses default discovery.
+    pub engram_binary_path: String,
+    /// DEPRECATED: Use engram_binary_path instead. Kept for config compat.
     pub memory_endpoint: String,
     pub max_knowledge_entries: usize,
 }
@@ -24,7 +27,8 @@ impl Default for KnowledgeConfig {
         Self {
             rerank_enabled: false, // v1: FlashRank removed per benchmark; reranker is passthrough
             memory_enabled: true,
-            memory_endpoint: "http://localhost:9090".to_string(),
+            engram_binary_path: String::new(), // auto-discover
+            memory_endpoint: "http://localhost:9090".to_string(), // deprecated
             max_knowledge_entries: 10000,
         }
     }
@@ -204,38 +208,47 @@ impl KnowledgeHub {
         self.db.count_knowledge(repository_id).unwrap_or(0) > 0
     }
 
-    /// Try engram HTTP search with 2s timeout, fail-open to local only (spec §3) — FIRST-CLASS v0.5.0
-    /// Primary: `EngramClient::search_memory()` via HTTP `POST /api/memory/search` with 2s timeout.
+    /// Try engram CLI search with 2s timeout, fail-open to local only (spec §3)
+    /// Primary: `EngramClient::search_memory()` via CLI `engram search` command.
     /// Fallback: `db.search_memory()` LIKE only on Err/timeout with WARN.
     pub(crate) fn try_engram_search(&self, query: &str, _category: Option<&str>, max: usize) -> Result<Vec<(String,String)>, String> {
-        let endpoint = self.config.memory_endpoint.clone();
-        // FIRST-CLASS: attempt engram HTTP via EngramClient (MCP-native, SQLite+FTS5)
-        let engram_cfg = crate::engram::EngramConfig { endpoint: endpoint.clone(), timeout_ms: 2000, max_retries: 0 };
+        if !self.config.memory_enabled {
+            return self.db.search_memory("default", query, max)
+                .map(|recs| recs.into_iter().map(|r| (r.key, r.value)).collect());
+        }
+        // FIRST-CLASS: attempt engram CLI (no server needed, direct binary call)
+        let engram_cfg = if !self.config.engram_binary_path.is_empty() {
+            crate::engram::EngramConfig {
+                binary_path: self.config.engram_binary_path.clone(),
+                ..Default::default()
+            }
+        } else {
+            crate::engram::EngramConfig::default()
+        };
         if let Ok(client) = crate::engram::EngramClient::new(engram_cfg) {
-            // Offload async to new thread to avoid nested runtime panic (same as workflow/src/dbos.rs block_on_in_thread)
             let query_owned = query.to_string();
             let max_owned = max;
-            let endpoint_clone = endpoint.clone();
-            let http_result: Result<Vec<(String,String)>, String> = std::thread::spawn(move || {
+            let binary_path = client.binary_path().to_string();
+            let cli_result: Result<Vec<(String,String)>, String> = std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 rt.block_on(async {
                     let q = crate::engram::MemoryQuery { namespace: "default".to_string(), query: query_owned, max_results: Some(max_owned) };
                     match tokio::time::timeout(std::time::Duration::from_millis(2000), client.search_memory(&q)).await {
                         Ok(Ok(res)) => Ok(res.entries.into_iter().map(|e| (e.key, e.value)).collect()),
                         Ok(Err(e)) => Err(e),
-                        Err(_) => Err("engram timeout 2s".to_string()),
+                        Err(_) => Err("engram CLI timeout 2s".to_string()),
                     }
                 })
             }).join().unwrap_or(Err("engram thread join failed".to_string()));
-            match http_result {
+            match cli_result {
                 Ok(hits) => {
                     if !hits.is_empty() {
-                        tracing::debug!(endpoint=%endpoint_clone, hits=%hits.len(), "Engram MCP primary hit");
+                        tracing::debug!(binary=%binary_path, hits=%hits.len(), "Engram CLI primary hit");
                     }
                     return Ok(hits);
                 }
                 Err(e) => {
-                    tracing::warn!(endpoint=%endpoint_clone, error=%e, "Engram MCP primary failed, fail-open to local LIKE");
+                    tracing::warn!(binary=%binary_path, error=%e, "Engram CLI primary failed, fail-open to local LIKE");
                 }
             }
         }
@@ -707,7 +720,7 @@ mod tests {
     fn test_engram_config_driven_timeout() {
         let db = test_db();
         let event_bus = EventBus::new();
-        let config = KnowledgeConfig { rerank_enabled: false, memory_enabled: true, memory_endpoint: "http://127.0.0.1:59999".to_string(), max_knowledge_entries: 10000 };
+        let config = KnowledgeConfig { rerank_enabled: false, memory_enabled: true, engram_binary_path: String::new(), memory_endpoint: "http://127.0.0.1:59999".to_string(), max_knowledge_entries: 10000 };
         let hub = KnowledgeHub::new(db, event_bus, config);
         hub.memory_save("default", "timeout_test", "timeout value").unwrap();
         let hits = hub.try_engram_search("timeout_test", None, 5).unwrap();

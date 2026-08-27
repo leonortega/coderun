@@ -115,6 +115,10 @@ done
 if [ -d "$ROOT/.opencode/engram" ] && [ -z "$(ls -A "$ROOT/.opencode/engram" 2>/dev/null)" ]; then
   if $DRY_RUN; then skip "would rmdir .opencode/engram"; else rmdir "$ROOT/.opencode/engram" 2>/dev/null && ok "removed empty .opencode/engram/"; fi
 fi
+# Also clean engram, codebase-memory-mcp, and rtk binaries from user bin
+for pp in "$HOME/bin/engram" "$HOME/bin/engram.exe" "$HOME/bin/codebase-memory-mcp" "$HOME/bin/codebase-memory-mcp.exe" "$HOME/bin/rtk" "$HOME/bin/rtk.exe"; do
+  if [ -e "$pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$pp" && ok "removed $pp"; fi; fi
+done
 
 # 3b. Opencode npm plugin — installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
 info "Removing opencode npm plugin (opencode-coderun)..."

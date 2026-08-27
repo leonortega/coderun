@@ -264,87 +264,139 @@ fn find_function_definition(definitions: &HashMap<String, Vec<(String, usize, us
     None
 }
 
-/// Attempt to build dependency graph via codebase-memory-mcp direct call.
+/// Discover the codebase-memory-mcp executable (native binary preferred, npx fallback).
+/// Returns (exe_path, is_npx_flag) so the caller can adjust args accordingly.
+fn discover_cbm_exe() -> Option<(String, bool)> {
+    // 1. ~/.coderun/bin — installed by our installer (preferred)
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let exe = std::path::PathBuf::from(&home)
+            .join(".coderun")
+            .join("bin")
+            .join("codebase-memory-mcp.exe");
+        if exe.exists() {
+            return Some((exe.to_string_lossy().into_owned(), false));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        let exe = std::path::PathBuf::from(&home)
+            .join(".coderun")
+            .join("bin")
+            .join("codebase-memory-mcp");
+        if exe.exists() {
+            return Some((exe.to_string_lossy().into_owned(), false));
+        }
+    }
+    // 2. npm global install — native exe bundled with the package
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let exe = std::path::PathBuf::from(&appdata)
+            .join("npm")
+            .join("node_modules")
+            .join("codebase-memory-mcp")
+            .join("bin")
+            .join("codebase-memory-mcp.exe");
+        if exe.exists() {
+            return Some((exe.to_string_lossy().into_owned(), false));
+        }
+    }
+    // 3. ~/.local/bin — local installer location
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        let exe = std::path::PathBuf::from(&home)
+            .join(".local")
+            .join("bin")
+            .join("codebase-memory-mcp");
+        if exe.exists() {
+            return Some((exe.to_string_lossy().into_owned(), false));
+        }
+    }
+    // 4. npx fallback — resolves from npm cache on every call
+    Some(("npx".to_string(), true))
+}
+
+/// Attempt to build dependency graph via codebase-memory-mcp CLI.
 /// Returns `Some(DependencyGraph)` on success, `None` to trigger local AST+regex fallback.
 ///
-/// Calls codebase-memory-mcp directly via npx subprocess (no MCP protocol required).
-pub fn try_codebase_memory_mcp_public(repo_root: &Path, files: &[PathBuf]) -> Option<DependencyGraph> {
-    // Build the request payload for codebase-memory-mcp
-    let file_paths: Vec<String> = files.iter()
-        .filter_map(|f| f.strip_prefix(repo_root).ok())
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
+/// Uses CLI mode: `codebase-memory-mcp cli search_graph --project <name> --json`
+/// This runs one tool and exits — no MCP server process required.
+pub fn try_codebase_memory_mcp_public(repo_root: &Path, _files: &[PathBuf]) -> Option<DependencyGraph> {
+    let (exe, is_npx) = discover_cbm_exe()?;
 
-    if file_paths.is_empty() {
-        return None;
+    // Derive project name from repo_root (matches codebase-memory-mcp naming convention)
+    let project_name = repo_root.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Build CLI args for search_graph tool
+    let mut args: Vec<&str> = Vec::new();
+    if is_npx {
+        args.extend_from_slice(&["-y", "codebase-memory-mcp"]);
     }
-
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "get_dependency_graph",
-            "arguments": {
-                "repo_root": repo_root.to_string_lossy(),
-                "files": file_paths
-            }
-        }
-    });
-
-    // Spawn MCP server process and communicate via stdio
-    let mut child = std::process::Command::new("npx")
-        .args(["codebase-memory-mcp"])
-        .stdin(std::process::Stdio::piped())
+    args.extend_from_slice(&["cli", "search_graph"]);
+    
+    // We need to pass project name - convert to static str
+    let project_static: &'static str = Box::leak(project_name.into_boxed_str());
+    args.extend_from_slice(&["--project", project_static]);
+    args.extend_from_slice(&["--json"]);
+    // Search for all dependency relationships
+    args.extend_from_slice(&["--relationship", "imports"]);
+    
+    // Run CLI command with timeout
+    let timeout = std::time::Duration::from_secs(10);
+    let output = std::process::Command::new(&exe)
+        .args(&args)
+        .current_dir(repo_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .ok()?;
 
-    // Write request to stdin
-    if let Some(ref mut stdin) = child.stdin {
-        use std::io::Write;
-        let request_str = serde_json::to_string(&request).ok()?;
-        stdin.write_all(request_str.as_bytes()).ok()?;
-        stdin.write_all(b"\n").ok()?;
-        stdin.flush().ok()?;
-    }
-
-    // Read response with timeout (5 seconds)
-    let response = {
-        let stdout = child.stdout.take()?;
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut response_str = String::new();
-        std::io::BufReader::read_line(&mut reader, &mut response_str).ok()?;
-
-        // Parse JSON-RPC response
-        let response: serde_json::Value = serde_json::from_str(&response_str).ok()?;
-
-        // Check for error
-        if let Some(error) = response.get("error") {
-            tracing::warn!(error = %error, "MCP server returned error");
-            let _ = child.kill();
-            return None;
+    // Wait for output with timeout
+    let start = std::time::Instant::now();
+    let mut child = output;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                let stdout = child.stdout.take()?;
+                let mut reader = std::io::BufReader::new(stdout);
+                let mut response_str = String::new();
+                std::io::BufRead::read_line(&mut reader, &mut response_str).ok()?;
+                
+                // Parse JSON response
+                let response: serde_json::Value = serde_json::from_str(&response_str).ok()?;
+                
+                // Check for error
+                if response.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    tracing::debug!("codebase-memory-mcp CLI returned error");
+                    return None;
+                }
+                
+                // Extract structured content
+                let structured = response.get("structuredContent")?;
+                let results = structured.get("results")?.as_array()?;
+                
+                let mut graph = DependencyGraph::new();
+                for item in results {
+                    let from = item.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                    let to = item.get("target_file").and_then(|v| v.as_str()).unwrap_or("");
+                    if !from.is_empty() && !to.is_empty() {
+                        graph.add_edge(from.to_string(), to.to_string());
+                    }
+                }
+                
+                return if graph.edge_count() > 0 { Some(graph) } else { None };
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    tracing::debug!("codebase-memory-mcp CLI timed out");
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
         }
-
-        // Extract result
-        response.get("result")?.clone()
-    };
-
-    // Parse the dependency graph from MCP response
-    let edges = response.get("edges")?.as_array()?;
-    let mut graph = DependencyGraph::new();
-
-    for edge in edges {
-        let from = edge.get("from")?.as_str()?;
-        let to = edge.get("to")?.as_str()?;
-        graph.add_edge(from.to_string(), to.to_string());
     }
-
-    // Wait for child process
-    let _ = child.kill();
-
-    Some(graph)
 }
 
 /// Extract imports via simple regex (fallback when tree-sitter grammar not loaded — kept ONLY inside Err branch above)

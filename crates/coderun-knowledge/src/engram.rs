@@ -6,22 +6,70 @@ use tracing::{debug, warn};
 /// Engram client configuration
 #[derive(Debug, Clone)]
 pub struct EngramConfig {
-    /// Engram server endpoint (e.g., "http://localhost:9090")
-    pub endpoint: String,
+    /// Path to engram binary (e.g., "~/.coderun/bin/engram")
+    pub binary_path: String,
     /// Request timeout in milliseconds
     pub timeout_ms: u64,
-    /// Maximum number of retries
+    /// Maximum number of retries (for CLI calls)
     pub max_retries: u32,
 }
 
 impl Default for EngramConfig {
     fn default() -> Self {
+        // Try to find engram binary in common locations
+        let binary_path = discover_engram_exe();
         Self {
-            endpoint: "http://localhost:9090".to_string(),
+            binary_path,
             timeout_ms: 5000,
-            max_retries: 2,
+            max_retries: 1,
         }
     }
+}
+
+/// Discover the engram executable (binary preferred, npx fallback).
+fn discover_engram_exe() -> String {
+    // 1. ~/.coderun/bin — installed by our installer (preferred)
+    #[cfg(target_os = "windows")]
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let exe = std::path::PathBuf::from(&home)
+            .join(".coderun")
+            .join("bin")
+            .join("engram.exe");
+        if exe.exists() {
+            return exe.to_string_lossy().into_owned();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        let exe = std::path::PathBuf::from(&home)
+            .join(".coderun")
+            .join("bin")
+            .join("engram");
+        if exe.exists() {
+            return exe.to_string_lossy().into_owned();
+        }
+    }
+    // 2. User bin directory
+    #[cfg(target_os = "windows")]
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let exe = std::path::PathBuf::from(&home)
+            .join("bin")
+            .join("engram.exe");
+        if exe.exists() {
+            return exe.to_string_lossy().into_owned();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        let exe = std::path::PathBuf::from(&home)
+            .join("bin")
+            .join("engram");
+        if exe.exists() {
+            return exe.to_string_lossy().into_owned();
+        }
+    }
+    // 3. System PATH
+    "engram".to_string()
 }
 
 // ── Data Types ───────────────────────────────────────────────────────────
@@ -50,185 +98,175 @@ pub struct MemoryResult {
     pub total_count: usize,
 }
 
-/// Engram API response
+/// Engram CLI search result (from JSON output)
 #[derive(Debug, Deserialize)]
-struct EngramResponse<T> {
-    success: bool,
-    data: Option<T>,
-    error: Option<String>,
+struct EngramCliSearchResult {
+    #[serde(default)]
+    memories: Vec<EngramCliMemory>,
+    #[serde(default)]
+    total: usize,
+}
+
+/// Engram CLI memory entry
+#[derive(Debug, Deserialize)]
+struct EngramCliMemory {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    #[serde(rename = "type")]
+    memory_type: String,
+    #[serde(default)]
+    project: String,
 }
 
 // ── Engram Client ────────────────────────────────────────────────────────
 
-/// HTTP client for engram memory storage
+/// CLI-based client for engram memory storage
 pub struct EngramClient {
     config: EngramConfig,
-    http_client: reqwest::Client,
 }
 
 impl EngramClient {
     /// Create a new engram client
     pub fn new(config: EngramConfig) -> Result<Self, String> {
-        let endpoint_host = config.endpoint
-            .replace("http://", "")
-            .replace("https://", "")
-            .split('/')
-            .next()
-            .unwrap_or("localhost")
-            .to_string();
-        let retry_policy = reqwest::retry::for_host(endpoint_host)
-            .max_retries_per_request(config.max_retries)
-            .classify_fn(|req_rep| {
-                match req_rep.status() {
-                    Some(status) if status.is_server_error() => req_rep.retryable(),
-                    _ => req_rep.success(),
-                }
-            });
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(config.timeout_ms))
-            .retry(retry_policy)
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        // Verify binary exists (best-effort)
+        let binary = std::path::Path::new(&config.binary_path);
+        if !binary.exists() && config.binary_path != "engram" {
+            tracing::debug!(binary = %config.binary_path, "engram binary not found, CLI calls may fail");
+        }
+        Ok(Self { config })
+    }
 
-        Ok(Self {
-            config,
-            http_client,
-        })
+    /// Get the binary path
+    pub fn binary_path(&self) -> &str {
+        &self.config.binary_path
     }
 
     /// Check if engram is available
     pub async fn health_check(&self) -> bool {
-        let url = format!("{}/health", self.config.endpoint);
-        match self.http_client.get(&url).send().await {
-            Ok(response) => response.status().is_success(),
+        let output = std::process::Command::new(&self.config.binary_path)
+            .arg("version")
+            .output();
+        match output {
+            Ok(out) => out.status.success(),
             Err(_) => false,
         }
     }
 
-    /// Save a memory entry — retries are handled automatically by reqwest
+    /// Save a memory entry via CLI
     pub async fn save_memory(&self, entry: &MemoryEntry) -> Result<(), String> {
-        let url = format!("{}/api/memory/save", self.config.endpoint);
+        let output = std::process::Command::new(&self.config.binary_path)
+            .args(["save", &entry.key, &entry.value])
+            .args(["--type", "observation"])
+            .args(["--project", &entry.namespace])
+            .output()
+            .map_err(|e| format!("Failed to run engram save: {}", e))?;
 
-        let response = self.http_client
-            .post(&url)
-            .json(entry)
-            .send()
-            .await
-            .map_err(|e| format!("Engram save request failed: {}", e))?;
-
-        if response.status().is_success() {
+        if output.status.success() {
             debug!(
                 namespace = %entry.namespace,
                 key = %entry.key,
-                "Memory saved to engram"
+                "Memory saved to engram via CLI"
             );
             Ok(())
         } else {
-            let status = response.status().as_u16();
-            let error = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let error = String::from_utf8_lossy(&output.stderr).to_string();
             warn!(
-                status = status,
                 error = %error,
-                "Engram save failed"
+                "Engram CLI save failed"
             );
-            Err(format!("Engram save failed: {} {}", status, error))
+            Err(format!("Engram CLI save failed: {}", error))
         }
     }
 
-    /// Search memory entries
+    /// Search memory entries via CLI
     pub async fn search_memory(&self, query: &MemoryQuery) -> Result<MemoryResult, String> {
-        let url = format!("{}/api/memory/search", self.config.endpoint);
-
-        match self.http_client.post(&url).json(query).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    let result: EngramResponse<MemoryResult> = response
-                        .json()
-                        .await
-                        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-                    if result.success {
-                        Ok(result.data.unwrap_or(MemoryResult {
-                            entries: Vec::new(),
-                            total_count: 0,
-                        }))
-                    } else {
-                        Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
-                    }
-                } else {
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    Err(format!("Engram search failed: {}", error))
-                }
-            }
-            Err(e) => Err(format!("Engram search request failed: {}", e)),
+        let mut args = vec!["search".to_string(), query.query.clone()];
+        if let Some(max) = query.max_results {
+            args.push("--limit".to_string());
+            args.push(max.to_string());
         }
+        args.push("--json".to_string());
+
+        let output = std::process::Command::new(&self.config.binary_path)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("Failed to run engram search: {}", e))?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("Engram CLI search failed: {}", error));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let result: EngramCliSearchResult = serde_json::from_str(&stdout)
+            .map_err(|e| format!("Failed to parse engram CLI output: {}", e))?;
+
+        let entries = result.memories.into_iter().map(|m| MemoryEntry {
+            namespace: m.project,
+            key: m.title,
+            value: m.content,
+            metadata: Some(serde_json::json!({
+                "id": m.id,
+                "type": m.memory_type,
+            })),
+        }).collect();
+
+        Ok(MemoryResult {
+            entries,
+            total_count: result.total,
+        })
     }
 
-    /// Get a specific memory entry
+    /// Get a specific memory entry via CLI
     pub async fn get_memory(&self, namespace: &str, key: &str) -> Result<Option<MemoryEntry>, String> {
-        let url = format!("{}/api/memory/get", self.config.endpoint);
-        let query = serde_json::json!({
-            "namespace": namespace,
-            "key": key,
-        });
-
-        match self.http_client.post(&url).json(&query).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    let result: EngramResponse<MemoryEntry> = response
-                        .json()
-                        .await
-                        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-                    if result.success {
-                        Ok(result.data)
-                    } else {
-                        Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
-                    }
-                } else {
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    Err(format!("Engram get failed: {}", error))
-                }
-            }
-            Err(e) => Err(format!("Engram get request failed: {}", e)),
-        }
+        // Use search with specific query to find the entry
+        let query = MemoryQuery {
+            namespace: namespace.to_string(),
+            query: key.to_string(),
+            max_results: Some(1),
+        };
+        let result = self.search_memory(&query).await?;
+        Ok(result.entries.into_iter().next())
     }
 
-    /// Delete a memory entry
+    /// Delete a memory entry via CLI
     pub async fn delete_memory(&self, namespace: &str, key: &str) -> Result<(), String> {
-        let url = format!("{}/api/memory/delete", self.config.endpoint);
-        let query = serde_json::json!({
-            "namespace": namespace,
-            "key": key,
-        });
+        // First search to find the ID
+        let query = MemoryQuery {
+            namespace: namespace.to_string(),
+            query: key.to_string(),
+            max_results: Some(1),
+        };
+        let result = self.search_memory(&query).await?;
 
-        match self.http_client.post(&url).json(&query).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
+        if let Some(entry) = result.entries.first() {
+            if let Some(id) = entry.metadata.as_ref().and_then(|m| m.get("id")).and_then(|id| id.as_str()) {
+                let output = std::process::Command::new(&self.config.binary_path)
+                    .args(["delete", id])
+                    .output()
+                    .map_err(|e| format!("Failed to run engram delete: {}", e))?;
+
+                if output.status.success() {
                     debug!(
                         namespace = namespace,
                         key = key,
-                        "Memory deleted from engram"
+                        "Memory deleted from engram via CLI"
                     );
                     Ok(())
                 } else {
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    Err(format!("Engram delete failed: {}", error))
+                    let error = String::from_utf8_lossy(&output.stderr).to_string();
+                    Err(format!("Engram CLI delete failed: {}", error))
                 }
+            } else {
+                Err("Memory entry has no ID".to_string())
             }
-            Err(e) => Err(format!("Engram delete request failed: {}", e)),
+        } else {
+            Err(format!("Memory entry not found: {}", key))
         }
     }
 }
@@ -242,9 +280,10 @@ mod tests {
     #[test]
     fn test_engram_config_default() {
         let config = EngramConfig::default();
-        assert_eq!(config.endpoint, "http://localhost:9090");
+        // Binary path should be discovered or default to "engram"
+        assert!(!config.binary_path.is_empty());
         assert_eq!(config.timeout_ms, 5000);
-        assert_eq!(config.max_retries, 2);
+        assert_eq!(config.max_retries, 1);
     }
 
     #[test]

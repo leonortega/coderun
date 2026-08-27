@@ -10,7 +10,7 @@ fn bench_retrieval_bm25_vs_rerank(c: &mut Criterion) {
     let mut group = c.benchmark_group("retrieval");
     let setup = |rerank: bool| {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let cfg = KnowledgeConfig { rerank_enabled: rerank, memory_enabled: false, memory_endpoint: "http://localhost:9090".to_string(), max_knowledge_entries: 10000 };
+        let cfg = KnowledgeConfig { rerank_enabled: rerank, memory_enabled: false, engram_binary_path: String::new(), memory_endpoint: "http://localhost:9090".to_string(), max_knowledge_entries: 10000 };
         let hub = KnowledgeHub::new(db, EventBus::new(), cfg);
         for i in 0..20 {
             hub.store_knowledge(&KnowledgeEntry { id: None, category: "docs".to_string(), key: format!("k{i}"), value: format!("rust async tokio benchmark retrieval doc {i} contains framework"), confidence: 0.7, source: "test".to_string(), relevance_score: None }).unwrap();

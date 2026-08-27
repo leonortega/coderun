@@ -17,6 +17,7 @@ fn bench_retrieval_bm25(c: &mut Criterion) {
     let cfg = KnowledgeConfig {
         rerank_enabled: false,
         memory_enabled: false,
+        engram_binary_path: String::new(),
         memory_endpoint: "http://localhost:9090".to_string(),
         max_knowledge_entries: 10000,
     };

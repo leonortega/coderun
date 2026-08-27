@@ -74,6 +74,7 @@ impl DaemonState {
         let knowledge_config = KnowledgeConfig {
             rerank_enabled: false,
             memory_enabled: config.knowledge.memory_enabled,
+            engram_binary_path: config.knowledge.engram_binary_path.clone().unwrap_or_default(),
             memory_endpoint: config.knowledge.memory_endpoint.clone(),
             max_knowledge_entries: config.knowledge.max_knowledge_entries,
         };

@@ -420,6 +420,17 @@ if (-not $doRemoveExternal) {
       } else { Skip "keeping $($engramLoc.Label)/ (contains other files)" }
     } else { Skip "not found $($engramLoc.Label)/" }
   }
+  # Remove codebase-memory-mcp binary from user bin
+  $cbmUserBin = "$env:USERPROFILE\bin\codebase-memory-mcp.exe"
+  $cbmUserBinNoExt = "$env:USERPROFILE\bin\codebase-memory-mcp"
+  foreach ($cbmBin in @($cbmUserBin, $cbmUserBinNoExt)) {
+    if (Test-Path $cbmBin) {
+      $display = $cbmBin -replace [regex]::Escape($env:USERPROFILE + "\"), "~\" }
+      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
+        try { Remove-Item -LiteralPath $cbmBin -Force -ErrorAction Stop; Ok "removed $display (codebase-memory-mcp binary)" } catch { Warn "failed to remove $display : $_" }
+      } else { Skip "would remove $display" }
+    }
+  }
   # 3c. Opencode npm plugin -- installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
   Info "Removing opencode npm plugin (opencode-coderun)..."
   $opencodeNodeModules = @(
