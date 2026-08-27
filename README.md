@@ -6,7 +6,7 @@ An AI Runtime that enhances coding agents with contextual intelligence. Coderun 
 
 - **Context Engine** — Assembles contextual information from your codebase for better AI responses (`BuildContext` — `skills → docs → code` + `FROZEN PREFIX END` + dedup, requires 30s budget, fail-open)
 - **Repository Intelligence** — Incremental indexing: tree-sitter AST (4 default, +4 behind `--features extended-languages`: `go,java,c,cpp`) + ripgrep + tantivy BM25 + `sg-core` ast-grep structural + dependency graph (`graph.rs`)
-- **Knowledge Hub** — Unified surface: SQLite+tantivy+FlashRank (TF-IDF fallback on model miss) + engram (HTTP 2s timeout, fail-open to `memory`) + BM25→rerank adaptive `K 5-20`
+- **Knowledge Hub** — Unified surface: SQLite+tantivy BM25 + engram (HTTP 2s timeout, fail-open to `memory`). FlashRank removed from v1 per benchmark evaluation.
 - **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io) — canonical `Skill {priority,specificity}` + `max_skills_per_request=5` + conflict detection
 - **Model Router** — Heuristic complexity scoring (structural/semantic/scope `0.3/0.4/0.3`) + LiteLLM gateway with `capable→balanced→fast` fallback + `cost_usd` (`[models]` separate from `[routing]`)
 - **Execution Optimizer** — RTK adoption (`RtkAdapter` if binary present) + built-in compressors + tee-on-failure `~/.coderun/logs/tool-failures/` + `tiktoken-rs` honest savings reporting
@@ -423,7 +423,7 @@ rate limit, throttle, request limit, API limit, middleware, security
 └──────┬──────┘  └─────────────┘  └─────────────┘
         │
         ├──► Repository Intelligence (tree-sitter/ast-grep/ripgrep/tantivy/graph/watcher/lsp)
-        ├──► Knowledge Hub (tantivy→FlashRank→engram deterministic reads)
+        ├──► Knowledge Hub (tantivy→engram deterministic reads)
         ├──► Skill Engine (tag-based, full-instruction injection)
         └──► Model Router (heuristic + LiteLLM fallback chain)
                            │
@@ -543,7 +543,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | tantivy | BM25 in-process MmapDirectory + `tantivy_index.rs` wiring | ✅ Integrated (repo-intel `search_fulltext` + storage `005`) |
 | ast-grep | Structural search `search_structural()` `sg-core` gated | ✅ Integrated `sg-core` first-class (`search_structural_fallback` only on Err) |
 | engram | Cross-session memory HTTP `2s` timeout, fail-open local `LIKE` | ✅ Integrated `knowledge/src/engram.rs`+`try_engram_search` |
-| FlashRank (`ort`) | Reranking `RerankerConfig` adaptive `K 5-20`, TF-IDF fallback (int8 ONNX `~/.coderun/models/flashrank.onnx` when present) | ✅ Integrated `knowledge/src/rerank.rs` `ort` optional |
+| FlashRank (`ort`) | Removed from v1 runtime per benchmark evaluation — see `docs/01-architecture/FLASHRANK_REMOVAL.md` | ❌ Removed (offline eval only) |
 | LiteLLM | Gateway `select_model` + `fallback_chain()` `capable→balanced→fast` + `cost_usd` | ✅ Integrated `router/src/litellm.rs` |
 | RTK | Tool-output compression `RtkAdapter::detect()` + tee-on-failure `~/.coderun/logs/tool-failures/` | ✅ Integrated `optimizer/src/rtk.rs` (binary optional, built-ins on Err) |
 | tiktoken-rs | `cl100k_base` local token counting, `heuristic` fallback | ✅ Integrated `context/src/lib.rs` `optimizer/src/lib.rs` |

@@ -8,7 +8,7 @@
 
 .DESCRIPTION
   Tools: Rust 1.75, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
-         ast-grep, engram (local .coderun/engram/*.zip), FlashRank (local .coderun/models/flashrank.onnx), codebase-memory-mcp, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo, DBOS sidecar (future/workflow only)
+         ast-grep, engram (local .coderun/engram/*.zip), codebase-memory-mcp, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo, DBOS sidecar (future/workflow only)
   Prebuilt: target/release/coderun.exe + coderun-daemon.exe are used directly (no cargo build/test).
 
 .PARAMETER SkipBuild
@@ -147,15 +147,7 @@ else {
   }
   if (Test-Path "$Root\..\engram") { Ok "legacy engram clone at ..\engram (unused, local binary preferred - can be removed)" }
 
-  # FlashRank ort model - local from .coderun/models/flashrank.onnx -> user profile
-  $repoModel = "$Root\.coderun\models\flashrank.onnx"
-  $modelDir = "$env:USERPROFILE\.coderun\models"
-  New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
-  $modelPath = "$modelDir\flashrank.onnx"
-  if (Test-Path $modelPath) { Ok "FlashRank model $modelPath" }
-  elseif (Test-Path $repoModel) {
-    try { Copy-Item -LiteralPath $repoModel -Destination $modelPath -Force; Ok "FlashRank model installed to $modelPath (from .coderun\models)" } catch { Warn "FlashRank copy failed: $_ - TF-IDF fallback until then" }
-  } else { Warn "FlashRank model not found at $modelPath - TF-IDF fallback until then (expected at .coderun\models\flashrank.onnx)" }
+  # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
 
   # codebase-memory-mcp
   if (Test-Cmd npx) {

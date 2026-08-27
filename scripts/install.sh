@@ -69,12 +69,7 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
     fi
   fi
   if [ -d "$ROOT/../engram" ]; then ok "legacy engram clone at ../engram (unused, local binary preferred)"; fi
-  # FlashRank - local from .coderun/models/flashrank.onnx -> user profile
-  REPO_MODEL="$ROOT/.coderun/models/flashrank.onnx"; MODEL_DIR="$HOME/.coderun/models"; mkdir -p "$MODEL_DIR"
-  if [ -f "$MODEL_DIR/flashrank.onnx" ]; then ok "FlashRank $MODEL_DIR/flashrank.onnx"
-  elif [ -f "$REPO_MODEL" ]; then cp -f "$REPO_MODEL" "$MODEL_DIR/flashrank.onnx" 2>/dev/null && ok "FlashRank installed to $MODEL_DIR/flashrank.onnx (from .coderun/models)" || warn "FlashRank copy failed - TF-IDF fallback"
-  else warn "FlashRank model missing at $MODEL_DIR/flashrank.onnx - TF-IDF fallback (expected at .coderun/models/flashrank.onnx)"
-  fi
+  # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
   command -v npx >/dev/null && { npm list -g codebase-memory-mcp >/dev/null 2>&1 || npm i -g codebase-memory-mcp 2>/dev/null; ok "codebase-memory-mcp"; } || true
   # Enable auto-indexing so repos are indexed automatically (persisted MCP config)
   npx -y codebase-memory-mcp config set auto_index true >/dev/null 2>&1 && ok "codebase-memory auto_index enabled" || warn "codebase-memory auto_index config failed"

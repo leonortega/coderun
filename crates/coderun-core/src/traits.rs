@@ -79,6 +79,7 @@ mod tests {
                         context_hints: None,
                         repository_id: String::new(),
                         repository_path: None,
+                        expected_files: None,
                     },
                     &crate::config::Config::default()
                 )

@@ -7,14 +7,14 @@
 .DESCRIPTION
   Default (no flags): stops daemon, removes project build artifacts (target/release/coderun*.exe),
   DBOS sidecar node_modules, opencode plugins (project-local + global), ALL first-class external tools
-  (ast-grep, rtk, codebase-memory-mcp, litellm, mkdocs, promptfoo, eslint, engram, FlashRank ONNX),
+  (ast-grep, rtk, codebase-memory-mcp, litellm, mkdocs, promptfoo, eslint, engram),
   and ALL user/project data (%USERPROFILE%\.coderun, .coderun/, sockets). Idempotent - safe to re-run.
 
   This is strict mode: no fallbacks. Default uninstalls everything. Use -KeepExternal / -KeepData
   to preserve tools or data. -KeepBuild preserves target/.
 
 .PARAMETER KeepExternal
-  Keep first-class external tools (do not uninstall ast-grep, rtk, npm/pip packages, engram, FlashRank).
+  Keep first-class external tools (do not uninstall ast-grep, rtk, npm/pip packages, engram).
 
 .PARAMETER KeepData
   Keep user and project data (do not delete %USERPROFILE%\.coderun or .coderun/).
@@ -480,16 +480,7 @@ if (-not $doRemoveExternal) {
     Skip "keeping legacy engram clone at ../engram (repository folder - not deleted per policy)"
   }
 
-  $modelPath = "$env:USERPROFILE\.coderun\models\flashrank.onnx"
-  if (Test-Path $modelPath) {
-    if ($PSCmdlet.ShouldProcess($modelPath, "Remove-Item")) {
-      try { Remove-Item -LiteralPath $modelPath -Force -ErrorAction Stop; Ok "removed FlashRank model $modelPath" } catch { Warn "failed to remove $modelPath : $_" }
-      $modelDir = Split-Path $modelPath -Parent
-      if ((Test-Path $modelDir) -and -not (Get-ChildItem -LiteralPath $modelDir -Force -ErrorAction SilentlyContinue)) {
-        try { Remove-Item -LiteralPath $modelDir -Force -ErrorAction SilentlyContinue } catch {}
-      }
-    } else { Skip "would remove FlashRank model $modelPath" }
-  } else { Skip "FlashRank model not found at $modelPath" }
+  # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
 
   if (Test-Cmd pip) {
     foreach ($pipPkg in @("litellm","mkdocs","mkdocs-material","pymdown-extensions","markdown")) {

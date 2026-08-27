@@ -56,6 +56,12 @@ enum Commands {
         /// Do not use session dedup
         #[arg(long)]
         no_cache: bool,
+        /// Enable retrieval diagnostic (classify misses per expected file)
+        #[arg(long)]
+        diag: bool,
+        /// Expected files for diagnostic classification (comma-separated paths)
+        #[arg(long, value_delimiter = ',')]
+        expected_files: Option<Vec<String>>,
     },
     
     /// Show daemon status and metrics
@@ -140,7 +146,7 @@ fn main() {
         Commands::Serve { port, socket } => cmd_serve(port, socket),
         Commands::Init { wizard, no_community_skills } => cmd_init(wizard, no_community_skills),
         Commands::Index { watch } => cmd_index(watch),
-        Commands::Preview { prompt, session, no_cache } => cmd_preview(&prompt, &session, no_cache),
+        Commands::Preview { prompt, session, no_cache, diag, expected_files } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref()),
         Commands::Status => cmd_status(),
         Commands::Skills { action } => cmd_skills(action),
         Commands::Config { action } => cmd_config(action),
@@ -1097,7 +1103,7 @@ fn cmd_index(watch: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String> {
+fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected_files: Option<&[String]>) -> Result<(), String> {
     // Try daemon first (UDS then HTTP), fallback to local BuildContext
     // For v0.3.0 we implement real preview: build context locally if daemon not running.
     let effective_session = if no_cache { String::new() } else { session.to_string() };
@@ -1113,7 +1119,10 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
     let db_path = get_db_path();
     let local_preview = (|| -> Result<(), String> {
         let event_bus = coderun_events::EventBus::new();
+        let _t0 = Instant::now();
         let repo_intel = coderun_repo_intel::RepositoryIntelligence::new(project_root.clone(), coderun_storage::Database::open(&db_path).map_err(|e| e.to_string())?, event_bus.clone());
+        if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.db_open_and_repo_intel_new: {}ms", _t0.elapsed().as_millis()); }
+        let _t1 = Instant::now();
         let kh = {
             let kdb = coderun_storage::Database::open(&db_path).map_err(|e| e.to_string())?;
             let mut hub = coderun_knowledge::KnowledgeHub::new(kdb, event_bus.clone(), coderun_knowledge::KnowledgeConfig::default());
@@ -1121,6 +1130,7 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
             let _ = hub.load_skills_from_dirs(&skill_dirs());
             hub
         };
+        if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.kh_db_skills: {}ms", _t1.elapsed().as_millis()); }
         let core_config = coderun_core::Config::load(&project_root)
             .unwrap_or_default();
         let ctx_config = coderun_context::ContextConfig {
@@ -1128,13 +1138,22 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
             max_files: core_config.context.max_files,
             max_lines_per_file: core_config.context.max_lines_per_file,
             cache_order: core_config.context.cache_order,
-            reranker_enabled: std::env::var("CODERUN_RERANKER_DISABLED").is_err(),
-            reranker_max_candidates: 50,
         };
+        let _t2 = Instant::now();
         let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), ctx_config);
-        let task = coderun_core::TaskRequest { message: prompt.to_string(), session_id: effective_session.clone(), context_hints: None, repository_id: String::new(), repository_path: None };
+        if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.engine_new: {}ms", _t2.elapsed().as_millis()); }
+        let task = coderun_core::TaskRequest {
+            message: prompt.to_string(),
+            session_id: effective_session.clone(),
+            context_hints: None,
+            repository_id: String::new(),
+            repository_path: None,
+            expected_files: expected_files.map(|f| f.to_vec()),
+        };
         let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+        let _t3 = Instant::now();
         let (pack, routing) = rt.block_on(ctx.build_context(&task)).map_err(|e| e.to_string())?;
+        if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.build_context: {}ms", _t3.elapsed().as_millis()); }
         println!("Skills matched:");
         if pack.behavioral_skills.is_empty() { println!("  (none — deduped or no match)"); } else { println!("  {}", pack.behavioral_skills.lines().next().unwrap_or("").trim()); if pack.behavioral_skills.contains("FROZEN PREFIX END") { println!("  [frozen-prefix boundary present ✓]"); } }
         println!();
@@ -1152,6 +1171,19 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
         println!("  fallback chain: {:?}", coderun_router::fallback_chain(&routing.tier));
         println!();
         println!("Daemon URL probed: {} (if daemon running, this local preview matches daemon's BuildContext)", url);
+        // Retrieval diagnostic
+        if diag || expected_files.is_some() {
+            if let Some(ref diagnostic) = pack.retrieval_diagnostic {
+                diagnostic.print();
+            } else if diag {
+                eprintln!("\n[diag] No retrieval diagnostic available (expected_files not provided or no code results)\n");
+            }
+        } else if let Some(ref diagnostic) = pack.retrieval_diagnostic {
+            // Auto-print when env var is set
+            if std::env::var("CODERUN_RETRIEVAL_DIAG").is_ok() {
+                diagnostic.print();
+            }
+        }
         Ok(())
     })();
 
@@ -1352,7 +1384,7 @@ fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
     };
     match action {
         WorkflowAction::Start { prompt, require_approval } => {
-            let task = coderun_core::TaskRequest { message: prompt.clone(), session_id: format!("cli-{}", uuid::Uuid::new_v4()), context_hints: None, repository_id: String::new(), repository_path: None };
+            let task = coderun_core::TaskRequest { message: prompt.clone(), session_id: format!("cli-{}", uuid::Uuid::new_v4()), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
             if require_approval { println!("Starting workflow with approval gate..."); }
             let res = rt.block_on(engine.start_workflow(&task, &config));
             match res {

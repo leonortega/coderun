@@ -39,7 +39,7 @@ sequenceDiagram
     rect rgb(255, 240, 230)
     Note over CE,KH: Stage 3: Knowledge Retrieval
     CE->>KH: retrieve_knowledge(query)
-    KH->>KH: BM25 + FlashRank rerank
+    KH->>KH: BM25 search
     KH-->>CE: Vec<KnowledgeEntry>
     end
 
@@ -225,16 +225,10 @@ Context Engine needs repository-specific knowledge to enrich the context.
 2. Search BM25/tantivy knowledge index:
    - Query: task description
    - Max results: 20
-3. Filter by confidence >= 0.3
-4. If FlashRank available:
-   - Rerank results using query as input
-   - Take top 10
-5. If FlashRank unavailable:
-   - Use BM25 ranking as-is
-   - Take top 10
-6. Search engram for relevant memory entries
-7. Merge knowledge entries with memory entries
-8. Log: `DEBUG knowledge_retrieved entries={count}`
+3. Filter by confidence >= 0.3, take top 10
+4. Search engram for relevant memory entries
+5. Merge knowledge entries with memory entries
+6. Log: `DEBUG knowledge_retrieved entries={count}`
 
 ### Output
 
@@ -257,7 +251,7 @@ KnowledgeEntry {
 | Error | Behavior |
 |-------|----------|
 | BM25/tantivy search failure | Return empty list, log warning |
-| FlashRank failure | Fall back to BM25 ranking |
+| engram unreachable | Continue without memory |
 | engram unreachable | Continue without memory |
 | No knowledge found | Empty list, continue |
 
@@ -811,7 +805,7 @@ The following rules are **mandatory** for any coding AI implementing this specif
 
 22. **Embed native Rust crates.** tree-sitter, ast-grep, and ripgrep are embedded as native Rust crates, not shelled out to per call.
 
-23. **Use in-process reranking.** FlashRank runs in-process via `ort`, not as a separate service.
+23. **Deterministic retrieval.** No neural rerankers in v1 — retrieval quality comes from index representation (PascalCase splitting, symbol fields, path tokenization).
 
 24. **Implement tee-on-failure for RTK.** On compression failure, save full output to log and return original.
 

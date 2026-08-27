@@ -433,6 +433,7 @@ async fn handle_pre_generation(
             _ => String::new(),
         },
         repository_path,
+        expected_files: None,
     };
 
     // Metrics + rate-limit + audit (best-effort, off-hot-path)

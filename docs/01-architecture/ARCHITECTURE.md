@@ -322,7 +322,7 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 | Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (optional `codebase-memory-mcp` probe `CODERUN_MCP_ENABLED`, not wired into hot-path retrieval) | `repo-intel/src/graph.rs` |
 | Watcher | `notify+git2` incremental `diff_tree_to_workdir` first-class (feature `git-watcher` default), polling 5s fallback only on `Err` | `repo-intel/src/watcher.rs` (`V0_6_0_PLAN.md:3`) |
 | LSP | Stub `LspClient` (`CODERUN_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
-| Reranking | FlashRank `RerankerConfig` adaptive K `5-20` (TF-IDF fallback, `ort` int8 ONNX deferred) | `knowledge/src/rerank.rs` |
+| Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see `FLASHRANK_REMOVAL.md` | `knowledge/src/rerank.rs` |
 | Memory | engram HTTP `2s timeout` deterministic reads, fail-open local `LIKE` | `knowledge/src/engram.rs` + `try_engram_search` |
 | Model Gateway | LiteLLM HTTP + heuristic `capable→balanced→fast` `fallback_chain()` + `cost_usd` | `router/src/litellm.rs` + `src/lib.rs:223` |
 | Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.coderun/logs/tool-failures/` | `optimizer/src/rtk.rs` |

@@ -15,5 +15,6 @@ pub use ipc::{
     AgentRequest, AgentResponse, CodeFile, ContextHints, ContextPack, HookType,
     KnowledgeEntry, OutputType, RequestPayload, ResponsePayload, RetrievalStatus,
     RewrittenMessageData, RoutingDecision, RoutingScores, SearchResult, SearchResults,
-    SkillMatch, TaskRequest, TokenUsage, repository_id_from_path,
+    SkillMatch, TaskRequest, TokenUsage, FileDiagnostic, MissType, RetrievalDiagnostic,
+    repository_id_from_path,
 };

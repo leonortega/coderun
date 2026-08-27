@@ -103,8 +103,6 @@ impl DaemonState {
             max_files: config.context.max_files,
             max_lines_per_file: config.context.max_lines_per_file,
             cache_order: config.context.cache_order.clone(),
-            reranker_enabled: true,
-            reranker_max_candidates: 50,
         };
         let context_engine = coderun_context::ContextEngine::new(
             repo_intel,
@@ -267,6 +265,7 @@ impl DaemonState {
                                         _ => String::new(),
                                     },
                                     repository_path,
+                                    expected_files: None,
                                 };
                                 let _timer = crate::metrics::Timer::start();
                                 let eng = engine.lock().await;

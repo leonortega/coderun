@@ -113,6 +113,112 @@ pub enum OutputType {
     Other,
 }
 
+// ── Retrieval Diagnostic ─────────────────────────────────────────────────
+
+/// Why a specific expected file was not retrieved — enables per-query diagnosis
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MissType {
+    /// File was never indexed (not in Tantivy or SQLite)
+    NotIndexed,
+    /// File text doesn't contain any query keywords (BM25 miss)
+    LexicalMiss,
+    /// File symbols don't match query terms (symbol index miss)
+    SymbolMiss,
+    /// Tree-sitter couldn't parse the file's language
+    LanguageParserMiss,
+    /// File isn't connected to any retrieved file via dependency graph
+    GraphMiss,
+    /// Query analysis produced wrong keywords for this file
+    QueryExpansionMiss,
+    /// File was retrieved but ranked too low (below top-k)
+    RankedTooLow,
+    /// Unknown / not yet classified
+    Unclassified,
+}
+
+/// Per-file diagnostic entry: why was this expected file missed?
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiagnostic {
+    /// The expected file path
+    pub path: String,
+    /// Whether this file was actually retrieved
+    pub retrieved: bool,
+    /// If retrieved, at what rank (1-indexed)
+    pub rank: Option<usize>,
+    /// If missed, the classified reason
+    pub miss_type: Option<MissType>,
+    /// Human-readable explanation
+    pub explanation: String,
+}
+
+/// Diagnostic report for a single retrieval query — emitted when CODERUN_RETRIEVAL_DIAG=1
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RetrievalDiagnostic {
+    /// The query string
+    pub query: String,
+    /// Total number of results returned by the pipeline
+    pub results_returned: usize,
+    /// Number of expected files that were retrieved
+    pub expected_found: usize,
+    /// Total expected files
+    pub expected_total: usize,
+    /// Per-file diagnostics
+    pub files: Vec<FileDiagnostic>,
+    /// Stage-level metrics (all durations in ms)
+    pub bm25_duration_ms: u64,
+    pub symbol_duration_ms: u64,
+    pub graph_duration_ms: u64,
+    pub merge_duration_ms: u64,
+    /// Number of files indexed in the repo
+    pub files_indexed: usize,
+    /// Number of symbols in the index
+    pub symbols_indexed: usize,
+}
+
+impl RetrievalDiagnostic {
+    /// Pretty-print the diagnostic to stderr
+    pub fn print(&self) {
+        eprintln!("\n══ Retrieval Diagnostic ══");
+        eprintln!("Query: \"{}\"", self.query);
+        eprintln!("Results returned: {}", self.results_returned);
+        eprintln!("Expected files: {}/{} found", self.expected_found, self.expected_total);
+        eprintln!("Index: {} files, {} symbols", self.files_indexed, self.symbols_indexed);
+        eprintln!("Timing: BM25={}ms, Symbols={}ms, Graph={}ms, Merge={}ms",
+            self.bm25_duration_ms, self.symbol_duration_ms,
+            self.graph_duration_ms, self.merge_duration_ms);
+        eprintln!();
+        // Group by status
+        let mut found: Vec<&FileDiagnostic> = self.files.iter().filter(|f| f.retrieved).collect();
+        let mut missed: Vec<&FileDiagnostic> = self.files.iter().filter(|f| !f.retrieved).collect();
+        found.sort_by_key(|f| f.rank.unwrap_or(usize::MAX));
+        missed.sort_by_key(|f| format!("{:?}", f.miss_type));
+        if !found.is_empty() {
+            eprintln!("  ✓ Retrieved:");
+            for f in &found {
+                eprintln!("    #{} {}", f.rank.unwrap_or(0), f.path);
+            }
+        }
+        if !missed.is_empty() {
+            eprintln!("  ✗ Missed:");
+            for f in &missed {
+                let tag = match &f.miss_type {
+                    Some(MissType::NotIndexed) => "NOT_INDEXED",
+                    Some(MissType::LexicalMiss) => "LEXICAL_MISS",
+                    Some(MissType::SymbolMiss) => "SYMBOL_MISS",
+                    Some(MissType::LanguageParserMiss) => "LANGUAGE_PARSER_MISS",
+                    Some(MissType::GraphMiss) => "GRAPH_MISS",
+                    Some(MissType::QueryExpansionMiss) => "QUERY_EXPANSION_MISS",
+                    Some(MissType::RankedTooLow) => "RANKED_TOO_LOW",
+                    Some(MissType::Unclassified) | None => "UNCLASSIFIED",
+                };
+                eprintln!("    [{}] {} — {}", tag, f.path, f.explanation);
+            }
+        }
+        eprintln!("══════════════════════════════════\n");
+    }
+}
+
 /// Status of a retrieval operation — distinguishes "no match" from "retrieval failed"
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -155,6 +261,9 @@ pub struct ContextPack {
     /// Retrieval status for code search — tells callers WHY results are empty
     #[serde(default)]
     pub code_retrieval_status: RetrievalStatus,
+    /// Per-query retrieval diagnostic (when CODERUN_RETRIEVAL_DIAG=1)
+    #[serde(default)]
+    pub retrieval_diagnostic: Option<RetrievalDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -214,6 +323,8 @@ pub struct TaskRequest {
     pub repository_id: String,
     /// Agent workspace root path — TASK-036 (daemon may serve multiple repos)
     pub repository_path: Option<String>,
+    /// Expected files for diagnostic classification (benchmarks only, not sent over the wire)
+    pub expected_files: Option<Vec<String>>,
 }
 
 impl TaskRequest {
@@ -225,6 +336,7 @@ impl TaskRequest {
             context_hints: None,
             repository_id: String::new(),
             repository_path: None,
+            expected_files: None,
         }
     }
 }
@@ -399,6 +511,7 @@ mod tests {
             metadata: ContextMetadata::default(),
             repository_state: String::new(),
             code_retrieval_status: RetrievalStatus::Found(5),
+            retrieval_diagnostic: None,
         };
         let json = serde_json::to_string(&pack).unwrap();
         let parsed: ContextPack = serde_json::from_str(&json).unwrap();

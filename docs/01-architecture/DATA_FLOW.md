@@ -101,7 +101,6 @@ sequenceDiagram
     CE->>KH: retrieve_knowledge(query)
     KH->>TV: BM25 search
     TV-->>KH: candidates
-    KH->>KH: FlashRank rerank
     KH-->>CE: Vec<KnowledgeEntry>
 
     CE->>SE: match_skills(task)
@@ -198,7 +197,6 @@ sequenceDiagram
     participant CE as Context Engine
     participant KH as Knowledge Hub
     participant TV as BM25/Tantivy
-    participant FR as FlashRank
     participant DB as SQLite
     participant ENG as engram
 
@@ -210,12 +208,7 @@ sequenceDiagram
     DB-->>KH: confidence_scores
 
     KH->>KH: filter_by_confidence(min=0.3)
-
-    alt Results exist
-        KH->>FR: rerank(query, filtered_results)
-        FR-->>KH: reranked_results
-        KH->>KH: take(top_10)
-    end
+    KH->>KH: take(top_10)
 
     KH->>ENG: search(query)
     ENG-->>KH: memory_entries

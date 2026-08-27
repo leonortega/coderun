@@ -10,7 +10,7 @@ pub struct AnalyzerConfig {
 }
 
 impl Default for AnalyzerConfig {
-    fn default() -> Self { Self { clippy: true, eslint: false, ruff: false } }
+    fn default() -> Self { Self { clippy: true, eslint: true, ruff: false } }
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +34,41 @@ pub fn run_gate(path: &std::path::Path, config: &AnalyzerConfig) -> Vec<GateResu
             Err(e) => { warn!(error=%e, "clippy not available, gate skipped"); }
         }
     }
+    if config.eslint && has_js_files(path) {
+        let out = std::process::Command::new("eslint")
+            .arg(".")
+            .arg("--max-warnings")
+            .arg("0")
+            .arg("--format")
+            .arg("stylish")
+            .current_dir(path)
+            .output();
+        match out {
+            Ok(o) => {
+                let passed = o.status.success();
+                let output = if !passed {
+                    String::from_utf8_lossy(&o.stdout).chars().take(500).collect()
+                } else {
+                    String::new()
+                };
+                if !passed { warn!(tool="eslint", output=%output, "Analyzer gate failed"); } else { debug!("eslint gate passed"); }
+                results.push(GateResult { passed, tool: "eslint".to_string(), output });
+            }
+            Err(e) => { warn!(error=%e, "eslint not available, gate skipped"); }
+        }
+    }
     results
+}
+
+fn has_js_files(path: &std::path::Path) -> bool {
+    // Check for package.json or common JS/TS config files as indicators
+    let indicators = ["package.json", "tsconfig.json", ".eslintrc.js", ".eslintrc.json", "webpack.config.js"];
+    for indicator in &indicators {
+        if path.join(indicator).exists() {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

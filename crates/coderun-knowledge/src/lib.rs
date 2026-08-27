@@ -10,8 +10,7 @@ use tracing::{debug, info};
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-/// KnowledgeConfig — rerank_enabled gates FlashRank (default false, BM25 primary), memory_enabled gates engram
-// TASK-013/014: simplify retrieval pipeline — Tantivy BM25 primary, FlashRank optional, engram optional enrichment
+/// KnowledgeConfig — rerank_enabled (kept for compat, always passthrough), memory_enabled gates engram
 #[derive(Debug, Clone)]
 pub struct KnowledgeConfig {
     pub rerank_enabled: bool,
@@ -23,7 +22,7 @@ pub struct KnowledgeConfig {
 impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
-            rerank_enabled: false, // TASK-013: BM25 primary, FlashRank opt-in (documented, bench compares)
+            rerank_enabled: false, // v1: FlashRank removed per benchmark; reranker is passthrough
             memory_enabled: true,
             memory_endpoint: "http://localhost:9090".to_string(),
             max_knowledge_entries: 10000,
@@ -140,10 +139,9 @@ impl KnowledgeHub {
         self.db.decay_knowledge_confidence(min_age_days, decay_amount)
     }
 
-    // ── Knowledge Retrieval (BM25 → FlashRank, adaptive K, spec §3) ───────
+    // ── Knowledge Retrieval (BM25 + engram, spec §3) ───────
 
-    /// Retrieve knowledge matching a query — lexical BM25/tantivy + FlashRank reranking
-    /// `K` adaptive to token budget: `K = clamp(remaining_budget / avg_doc_tokens, 5, 20)`; expensive rerank bounded.
+    /// Retrieve knowledge matching a query — lexical BM25/tantivy + engram memory.
     /// `repository_id: Some(id)` scopes results to one repository (TASK-030/F-1).
     pub fn retrieve_knowledge(
         &self,
@@ -156,54 +154,26 @@ impl KnowledgeHub {
         let lexical_limit = 20usize;
         let records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit, repository_id)?;
 
-        // Step 2: adaptive K for reranker (bound expensive step, not cheap lexical pass)
-        // Assume avg doc ~80 tokens, remaining budget heuristic: max_results * 200 tokens
-        let avg_doc_tokens = 80usize;
-        let remaining_budget = max_results * 200;
-        let adaptive_k = ((remaining_budget / avg_doc_tokens).clamp(5, 20)).min(records.len()).max(1);
-        let to_rerank = records.len().min(adaptive_k.max(max_results));
-
-        // Step 3: in-process reranking via FlashRank (TF-IDF fallback when ort int8 not loaded) — gated behind rerank_enabled (TASK-013, BM25 primary)
-        let reranker = crate::rerank::Reranker::new(crate::rerank::RerankerConfig { enabled: self.config.rerank_enabled, ..Default::default() });
-        let candidates: Vec<crate::rerank::RerankCandidate> = records
-            .into_iter()
-            .take(to_rerank)
-            .map(|r| crate::rerank::RerankCandidate {
-                id: r.id.to_string(),
-                content: format!("{} {}", r.key, r.value),
-                path: r.key.clone(),
-                language: r.category.clone(),
-                symbols: vec![r.key.clone()],
-                original_score: r.confidence as f32,
-            })
-            // keep original records for mapping
-            .collect();
-
-        // Preserve original records for lookup after rerank
-        // Re-run records fetch to map ids → entries after reranking
-        let original_records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit, repository_id)?;
-        let reranked = reranker.rerank(query, candidates);
-
-        // Step 4: map reranked candidates back to KnowledgeEntry, filter by confidence ≥0.3, take max_results
+        // Step 2: map records to KnowledgeEntry, filter by confidence ≥0.3, take max_results
+        // v1: FlashRank removed — reranker is passthrough (see rerank.rs module docs)
         let mut entries: Vec<KnowledgeEntry> = Vec::new();
-        for cand in reranked.iter().take(max_results) {
-            if let Some(rec) = original_records.iter().find(|r| r.id.to_string() == cand.id) {
-                if rec.confidence >= 0.3 {
-                    entries.push(KnowledgeEntry {
-                        id: Some(rec.id),
-                        category: rec.category.clone(),
-                        key: rec.key.clone(),
-                        value: rec.value.clone(),
-                        confidence: rec.confidence,
-                        source: rec.source.clone(),
-                        relevance_score: Some(cand.original_score as f64),
-                    });
-                }
+        for rec in records.into_iter().take(max_results) {
+            if rec.confidence >= 0.3 {
+                entries.push(KnowledgeEntry {
+                    id: Some(rec.id),
+                    category: rec.category.clone(),
+                    key: rec.key.clone(),
+                    value: rec.value.clone(),
+                    confidence: rec.confidence,
+                    source: rec.source.clone(),
+                    relevance_score: None,
+                });
             }
         }
 
-        // Step 5: deterministic engram read (hot path via HTTP, 2s timeout, fail-open)
+        // Step 3: deterministic engram read (hot path via HTTP, 2s timeout, fail-open)
         // Spec: reads happen deterministically inside pre-generation hook, not MCP tool-choice
+        // Calls Engram HTTP directly (no MCP required) — gated only by memory_enabled config
         if self.config.memory_enabled {
             if let Ok(engram_hits) = self.try_engram_search(query, category_filter, 3) {
                 for (key, value) in engram_hits {
@@ -224,7 +194,7 @@ impl KnowledgeHub {
             }
         }
 
-        debug!(query = query, results = entries.len(), adaptive_k = adaptive_k, "Knowledge retrieval (BM25→rerank+engram)");
+        debug!(query = query, results = entries.len(), "Knowledge retrieval (BM25+engram)");
 
         Ok(entries)
     }
@@ -725,7 +695,7 @@ mod tests {
     fn test_retrieve_knowledge_bm25_rerank_engram_pipeline() {
         let hub = test_hub();
         for i in 0..5 {
-            hub.store_knowledge(&KnowledgeEntry { id: None, category: "docs".to_string(), key: format!("k{i}"), value: format!("FlashRank ort rerank test doc {i} contains rust"), confidence: 0.6, source: "test".to_string(), relevance_score: None }).unwrap();
+            hub.store_knowledge(&KnowledgeEntry { id: None, category: "docs".to_string(), key: format!("k{i}"), value: format!("rerank test doc {i} contains rust"), confidence: 0.6, source: "test".to_string(), relevance_score: None }).unwrap();
         }
         let res = hub.retrieve_knowledge("rust", Some("docs"), 3, None).unwrap();
         assert!(!res.is_empty());

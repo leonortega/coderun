@@ -277,7 +277,9 @@ impl RepositoryIntelligence {
             if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
                 let _ = idx.delete_document(writer, &path_str, &self.repository_id);
                 let lang_str = language.as_deref().unwrap_or("text");
-                let sym_names: Vec<String> = extract_symbols(&content, &self.patterns, language.as_deref()).iter().map(|s| s.name.clone()).collect();
+                let ast_syms = extract_symbols(&content, &self.patterns, language.as_deref());
+                let sym_names: Vec<String> = ast_syms.iter().map(|s| s.name.clone()).collect();
+                let sym_kinds: Vec<String> = ast_syms.iter().map(|s| s.kind.clone()).collect();
                 let file_class_str = match &file_class {
                     FileClass::Source => "Source",
                     FileClass::Test => "Test",
@@ -290,7 +292,7 @@ impl RepositoryIntelligence {
                     FileClass::Stylesheet => "Stylesheet",
                     FileClass::Unknown => "Unknown",
                 };
-                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names, &self.repository_id, file_class_str);
+                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names, &sym_kinds, &self.repository_id, file_class_str);
             }
 
             files_indexed += 1;
@@ -348,7 +350,7 @@ impl RepositoryIntelligence {
                     if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
                         let doc_key = format!("docs:{}", rel);
                         let _ = idx.delete_document(writer, &doc_key, &self.repository_id);
-                        let _ = idx.add_document(writer, &doc_key, &content, "markdown", &[rel.clone()], &self.repository_id, "Documentation");
+                        let _ = idx.add_document(writer, &doc_key, &content, "markdown", &[rel.clone()], &[], &self.repository_id, "Documentation");
                     }
                 }
             }
@@ -414,21 +416,75 @@ impl RepositoryIntelligence {
         Ok(results)
     }
 
-    /// Structural search via ast-grep (first-class, v0.5.0) — sg-core if available, else tree-sitter+regex fallback with WARN.
+    /// Structural search via ast-grep CLI — primary method, falls back to tree-sitter+regex.
     /// Pattern examples: `function $NAME($$$) { $$$ }`, `class $C { $$$ }`, `fn $FUNC($$$) { $$$ }`
-    /// First-class: try `sg-core`/`ast-grep-core` parse via feature `ast-grep`; on Err fallback to tree-sitter+regex (kept only inside Err branch).
     pub fn search_structural(
         &self,
         pattern: &str,
         language_filter: Option<&str>,
         max_results: usize,
     ) -> Result<SearchResults, String> {
-        // v0.5.0 FIRST-CLASS: attempt sg-core/ast-grep parse if feature enabled; for now the tree-sitter+regex path below
-        // is kept as fallback but is now gated behind Err. When sg-core is added, insert:
-        //   if let Ok(sg_results) = sg_core::search(pattern, &self.repo_path, language_filter, max_results) { return Ok(sg_results); }
-        //   warn!(pattern, error=%e, "ast-grep primary failed, TF fallback");
-        // The heuristic below remains ONLY as fallback — do not delete until sg-core lands; it is no longer primary.
-        return self.search_structural_fallback(pattern, language_filter, max_results); }
+        // Try ast-grep CLI first
+        if let Ok(results) = self.search_structural_ast_grep(pattern, language_filter, max_results) {
+            if !results.results.is_empty() {
+                return Ok(results);
+            }
+        }
+        // Fallback to tree-sitter+regex
+        self.search_structural_fallback(pattern, language_filter, max_results)
+    }
+
+    fn search_structural_ast_grep(
+        &self,
+        pattern: &str,
+        language_filter: Option<&str>,
+        max_results: usize,
+    ) -> Result<SearchResults, String> {
+        use std::process::Command;
+
+        let mut cmd = Command::new("ast-grep");
+        cmd.arg("-p").arg(pattern);
+        cmd.arg("--json");
+        if let Some(lang) = language_filter {
+            cmd.arg("-l").arg(lang);
+        }
+        cmd.arg("--max-results").arg(max_results.to_string());
+        cmd.current_dir(&self.repo_path);
+
+        let output = cmd.output().map_err(|e| format!("ast-grep execution failed: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("ast-grep failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut results = Vec::new();
+
+        // Parse ast-grep JSON output: {"file": "...", "range": {"start": {"line": N}}, "text": "..."}
+        for line in stdout.lines() {
+            if line.trim().is_empty() { continue; }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                let file = val["file"].as_str().unwrap_or("").to_string();
+                let line_num = val["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+                let text = val["text"].as_str().unwrap_or("").to_string();
+                let path = std::path::Path::new(&file);
+                let path_str = path.strip_prefix(&self.repo_path)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
+                results.push(SearchResult {
+                    path: path_str,
+                    line: line_num,
+                    content: text,
+                    score: 1.0,
+                });
+                if results.len() >= max_results { break; }
+            }
+        }
+
+        let total = results.len();
+        Ok(SearchResults { results, total_count: total })
+    }
 
     fn search_structural_fallback(
         &self,
@@ -512,8 +568,12 @@ impl RepositoryIntelligence {
     ) -> Result<SearchResults, String> {
         // Try tantivy index at default location; fallback to ripgrep if index missing
         let index_path = default_index_path();
+        let _st = Instant::now();
         match coderun_storage::tantivy_index::TantivyIndex::open(&index_path) {
             Ok(idx) => {
+                if std::env::var("CODERUN_PROFILE").is_ok() {
+                    eprintln!("[profile] code_search.tantivy_open: {}ms", _st.elapsed().as_millis());
+                }
                 let reader = idx.reader().map_err(|e| format!("tantivy reader: {e}"))?;
                 match idx.search(&reader, query, language_filter, max_results, repository_id) {
                     Ok(hits) => {
@@ -706,8 +766,13 @@ impl RepositoryIntelligence {
 
     /// Build dependency graph for the current repo (spec §3, ROADMAP.md:81)
     pub fn build_dependency_graph(&self) -> Result<graph::DependencyGraph, String> {
+        let _t = Instant::now();
         let files = self.walk_directory(&self.repo_path)?;
-        Ok(graph::DependencyGraph::build_from_files(&self.repo_path, &files))
+        let graph = graph::DependencyGraph::build_from_files(&self.repo_path, &files);
+        if std::env::var("CODERUN_PROFILE").is_ok() {
+            eprintln!("[profile] code_search.build_dependency_graph: {}ms ({} files)", _t.elapsed().as_millis(), files.len());
+        }
+        Ok(graph)
     }
 
     /// LSP client accessor (optional enrichment, never hard dep)

@@ -213,7 +213,6 @@ else
     done
   fi
   if [ -d "$ROOT/../engram" ]; then if $DRY_RUN; then skip "would rm -rf ../engram"; else rm -rf "$ROOT/../engram" && ok "removed engram clone at ../engram"; fi; else skip "engram clone not found at ../engram"; fi
-  if [ -f "$HOME/.coderun/models/flashrank.onnx" ]; then if $DRY_RUN; then skip "would rm ~/.coderun/models/flashrank.onnx"; else rm -f "$HOME/.coderun/models/flashrank.onnx" && ok "removed FlashRank model at ~/.coderun/models/flashrank.onnx"; fi; else skip "FlashRank model not found"; fi
   if command -v pip3 >/dev/null 2>&1; then
     for pkg in litellm mkdocs mkdocs-material pymdown-extensions; do
       if pip3 show "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would pip3 uninstall -y $pkg"; else pip3 uninstall -y "$pkg" 2>/dev/null && ok "uninstalled $pkg (pip)"; fi; else skip "$pkg not installed"; fi

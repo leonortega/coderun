@@ -422,7 +422,7 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 
 - **SQLite** for knowledge storage with LIKE-based search
 - **engram** HTTP client for cross-session memory
-- **FlashRank** reranker with TF-IDF fallback
+- **Reranker** passthrough (FlashRank removed from v1 per benchmark — see `FLASHRANK_REMOVAL.md`)
 - **Pattern detection** for knowledge extraction (naming, architectural, domain)
 
 ### Responsibilities
@@ -430,7 +430,6 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 - Store and retrieve knowledge entries across all categories
 - Manage skill registry and tag-based matching
 - Perform lexical search for docs and code
-- Rerank results with FlashRank
 - Store and retrieve memory via engram
 - Detect and extract knowledge from indexed code
 - Decay confidence of unused knowledge
@@ -458,7 +457,6 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 
 - SQLite (knowledge storage)
 - BM25/tantivy (knowledge and docs search index)
-- FlashRank via `ort` (reranking, in-process)
 - engram (memory storage and retrieval)
 
 ### Persistent Data
@@ -476,8 +474,7 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 1. Receive query string and optional category filter
 2. Search BM25/tantivy index for matching entries
 3. Retrieve top 20 candidates
-4. Rerank with FlashRank using query as input
-5. Filter by minimum confidence threshold (0.3)
+4. Filter by minimum confidence threshold (0.3)
 6. Return top 10 results
 
 #### Skill Matching
@@ -518,7 +515,7 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 |-------|----------|
 | SQLite write failure | Log warning, continue without storing |
 | BM25/tantivy write failure | Log warning, continue without indexing |
-| FlashRank load failure | Fall back to BM25 ranking only |
+| engram unreachable | Continue without memory, log warning |
 | engram unreachable | Continue without memory, log warning |
 | Duplicate key | Merge with existing entry |
 
@@ -534,7 +531,6 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 
 - Use SQLite for knowledge storage
 - Use BM25/tantivy for knowledge search
-- Use FlashRank via `ort` for reranking (load model once, cache in memory, int8 quantized ONNX)
 - Use engram HTTP API for memory operations
 - Knowledge categories: `convention`, `pattern`, `domain`, `decision`
 - Each knowledge entry has: id, category, key, value, confidence, source, created_at, updated_at

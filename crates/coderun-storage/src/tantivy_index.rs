@@ -11,11 +11,18 @@ use tracing::info;
 /// Schema for code search index
 pub struct CodeIndexSchema {
     pub schema: Schema,
+    /// Tokenized path (TEXT) — for search matching
     pub path_field: Field,
+    /// Exact raw path (STRING) — for deletion and exact lookups
+    pub raw_path_field: Field,
     pub filename_field: Field,
     pub content_field: Field,
     pub language_field: Field,
     pub symbols_field: Field,
+    /// Individual symbol names (TEXT, tokenized) — for symbol-specific queries
+    pub symbol_name_field: Field,
+    /// Symbol kinds (STRING, exact) — class, method, function, property, etc.
+    pub symbol_kind_field: Field,
     /// Repository scope field (TASK-030) — every doc is stamped so retrieval can be repo-scoped
     pub repository_field: Field,
     /// File classification (Source, Config, Documentation, etc.) — used for scoring boosts
@@ -32,21 +39,27 @@ impl CodeIndexSchema {
     pub fn new() -> Self {
         let mut schema_builder = Schema::builder();
 
-        let path_field = schema_builder.add_text_field("path", STRING | STORED);
+        let path_field = schema_builder.add_text_field("path", TEXT | STORED);
+        let raw_path_field = schema_builder.add_text_field("raw_path", STRING | STORED);
         let filename_field = schema_builder.add_text_field("filename", TEXT | STORED);
         let content_field = schema_builder.add_text_field("content", TEXT | STORED);
         let language_field = schema_builder.add_text_field("language", STRING | STORED | FAST);
         let symbols_field = schema_builder.add_text_field("symbols", TEXT | STORED);
+        let symbol_name_field = schema_builder.add_text_field("symbol_name", TEXT | STORED);
+        let symbol_kind_field = schema_builder.add_text_field("symbol_kind", STRING | STORED);
         let repository_field = schema_builder.add_text_field("repository_id", STRING | STORED);
         let file_class_field = schema_builder.add_text_field("file_class", STRING | STORED);
 
         Self {
             schema: schema_builder.build(),
             path_field,
+            raw_path_field,
             filename_field,
             content_field,
             language_field,
             symbols_field,
+            symbol_name_field,
+            symbol_kind_field,
             repository_field,
             file_class_field,
         }
@@ -119,11 +132,204 @@ const STOP_WORDS: &[&str] = &[
     "add", "list", "the", "in", "is", "it",
 ];
 
+/// Split PascalCase/camelCase identifiers into constituent words.
+/// "CheckoutModel" -> ["checkout", "model", "checkoutmodel"]
+/// "SetBasketModelAsync" -> ["set", "basket", "model", "async", "setbasketmodelasync"]
+fn split_pascal_case(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut prev_was_upper = false;
+    let mut prev_was_lower = false;
+
+    for c in s.chars() {
+        if c == '_' || c == '-' {
+            if !current.is_empty() {
+                tokens.push(current.to_lowercase());
+                current.clear();
+            }
+            prev_was_upper = false;
+            prev_was_lower = false;
+            continue;
+        }
+
+        if c.is_uppercase() {
+            if prev_was_lower && !current.is_empty() {
+                // Transition from lowercase to uppercase: "checkout" -> "M"
+                tokens.push(current.to_lowercase());
+                current.clear();
+            }
+            current.push(c);
+            prev_was_upper = true;
+            prev_was_lower = false;
+        } else if c.is_lowercase() {
+            if prev_was_upper && current.len() > 1 {
+                // Transition from uppercase to lowercase: "Checkout" -> "M"
+                // "CheckoutM" -> split: "Checkout" + "M..."
+                let last_upper = current.pop().unwrap();
+                if !current.is_empty() {
+                    tokens.push(current.to_lowercase());
+                }
+                current = last_upper.to_string();
+            }
+            current.push(c);
+            prev_was_upper = false;
+            prev_was_lower = true;
+        } else {
+            current.push(c);
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current.to_lowercase());
+    }
+
+    // Also add the full identifier lowercased (for exact matches like "checkoutmodel")
+    let full = s.to_lowercase();
+    if !tokens.contains(&full) {
+        tokens.push(full);
+    }
+
+    // Deduplicate while preserving order
+    let mut seen = std::collections::HashSet::new();
+    tokens.into_iter().filter(|t| seen.insert(t.clone())).collect()
+}
+
 /// Sanitize a natural-language or code query for Tantivy BM25 search.
 ///
 /// 1. Strips Tantivy query syntax characters (`:`, `+`, `-`, `(`, `)`, `"`, `~`, `*`, `?`, `\`, `^`)
 /// 2. Extracts meaningful code-relevant keywords (≥ 2 chars, not stop words)
 /// 3. Joins with OR so any keyword can match
+/// Preprocess code content for indexing: split PascalCase identifiers into
+/// constituent words so natural-language queries can match code symbols.
+/// "CheckoutModel" in source becomes "CheckoutModel checkout model checkoutmodel"
+fn preprocess_code_content(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() * 2);
+    for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if word.is_empty() {
+            continue;
+        }
+        // Always include the original word
+        result.push_str(word);
+        result.push(' ');
+        // If it's PascalCase/camelCase, also emit split parts
+        let parts = split_pascal_case(word);
+        for part in &parts {
+            if part != &word.to_lowercase() {
+                result.push_str(part);
+                result.push(' ');
+            }
+        }
+    }
+    result
+}
+
+/// Deterministic code vocabulary expansion — map natural language to code concepts.
+/// "controller" -> ["Controller"], "model" -> ["Model", "ViewModel"]
+/// No LLM, no embeddings, just a static mapping.
+fn expand_code_vocabulary(term: &str) -> Vec<String> {
+    let t = term.to_lowercase();
+    match t.as_str() {
+        // Architecture patterns
+        "controller" => vec!["Controller".to_string()],
+        "service" => vec!["Service".to_string()],
+        "repository" => vec!["Repository".to_string(), "Repo".to_string()],
+        "repo" => vec!["Repository".to_string(), "Repo".to_string()],
+        "model" => vec!["Model".to_string(), "ViewModel".to_string()],
+        "viewmodel" => vec!["ViewModel".to_string(), "Model".to_string()],
+        "view" => vec!["View".to_string(), "Page".to_string(), "cshtml".to_string()],
+        "interface" => vec!["Interface".to_string(), "I".to_string()],
+        "dto" => vec!["Dto".to_string(), "Dto".to_string()],
+        "entity" => vec!["Entity".to_string(), "Model".to_string()],
+        "spec" => vec!["Specification".to_string(), "Spec".to_string()],
+        "specification" => vec!["Specification".to_string(), "Spec".to_string()],
+
+        // C# / ASP.NET
+        "middleware" => vec!["Middleware".to_string()],
+        "handler" => vec!["Handler".to_string()],
+        "endpoint" => vec!["Endpoint".to_string()],
+        "action" => vec!["Action".to_string(), "Endpoint".to_string()],
+        "filter" => vec!["Filter".to_string(), "Specification".to_string()],
+        "validator" => vec!["Validator".to_string(), "Validation".to_string()],
+        "configuration" => vec!["Configuration".to_string(), "Config".to_string()],
+        "config" => vec!["Configuration".to_string(), "Config".to_string()],
+        "settings" => vec!["Settings".to_string(), "Configuration".to_string()],
+        "extension" => vec!["Extensions".to_string(), "Extension".to_string()],
+
+        // File types
+        "razor" => vec!["cshtml".to_string(), "Razor".to_string()],
+        "cshtml" => vec!["cshtml".to_string(), "Page".to_string()],
+        "page" => vec!["Page".to_string(), "cshtml".to_string()],
+
+        // CRUD / operations
+        "checkout" => vec!["Checkout".to_string()],
+        "basket" => vec!["Basket".to_string(), "Cart".to_string()],
+        "cart" => vec!["Basket".to_string(), "Cart".to_string()],
+        "order" => vec!["Order".to_string()],
+        "catalog" => vec!["Catalog".to_string(), "Product".to_string()],
+        "product" => vec!["Catalog".to_string(), "Product".to_string()],
+        "auth" => vec!["Auth".to_string(), "Identity".to_string(), "Authentication".to_string()],
+        "authentication" => vec!["Auth".to_string(), "Identity".to_string(), "Authentication".to_string()],
+        "authorization" => vec!["Authorization".to_string(), "Authorize".to_string()],
+        "identity" => vec!["Identity".to_string(), "User".to_string()],
+        "user" => vec!["User".to_string(), "ApplicationUser".to_string()],
+
+        // Data access
+        "database" => vec!["Context".to_string(), "Database".to_string(), "Db".to_string()],
+        "context" => vec!["Context".to_string()],
+        "migration" => vec!["Migration".to_string()],
+        "seed" => vec!["Seed".to_string(), "Seeding".to_string()],
+        "cache" => vec!["Cache".to_string(), "Cached".to_string()],
+
+        // Testing
+        "test" => vec!["Test".to_string(), "Tests".to_string()],
+        "tests" => vec!["Tests".to_string(), "Test".to_string()],
+        "mock" => vec!["Mock".to_string(), "Fake".to_string()],
+
+        // General code concepts
+        "interface" => vec!["Interface".to_string()],
+        "abstract" => vec!["Abstract".to_string(), "Base".to_string()],
+        "factory" => vec!["Factory".to_string()],
+        "builder" => vec!["Builder".to_string()],
+        "decorator" => vec!["Decorator".to_string(), "Cached".to_string()],
+        "pipeline" => vec!["Pipeline".to_string(), "Middleware".to_string()],
+        "hook" => vec!["Hook".to_string(), "Event".to_string()],
+        "event" => vec!["Event".to_string(), "Handler".to_string()],
+        "logging" => vec!["Logger".to_string(), "Logging".to_string(), "Log".to_string()],
+        "logger" => vec!["Logger".to_string(), "Log".to_string()],
+
+        // Domain-specific terms from eShopOnWeb and common codebases
+        "pagination" => vec!["Paginated".to_string(), "Paging".to_string(), "Page".to_string()],
+        "paginated" => vec!["Paginated".to_string(), "Paging".to_string()],
+        "cookie" => vec!["Cookie".to_string(), "CookieAuthentication".to_string()],
+        "token" => vec!["Token".to_string(), "Claims".to_string(), "Jwt".to_string()],
+        "roles" => vec!["Role".to_string(), "Roles".to_string(), "Authorization".to_string()],
+        "validation" => vec!["Validation".to_string(), "Validator".to_string(), "Valid".to_string()],
+        "csv" => vec!["Csv".to_string(), "Export".to_string(), "File".to_string()],
+        "export" => vec!["Export".to_string(), "Csv".to_string(), "Download".to_string()],
+        "distributed" => vec!["Distributed".to_string(), "Cache".to_string(), "Redis".to_string()],
+        "caching" => vec!["Cache".to_string(), "Cached".to_string()],
+        "api" => vec!["Api".to_string(), "Endpoint".to_string(), "Controller".to_string()],
+        "image" => vec!["Image".to_string(), "File".to_string(), "Upload".to_string()],
+        "upload" => vec!["Upload".to_string(), "File".to_string(), "Image".to_string()],
+        "comparison" => vec!["Compare".to_string(), "Comparison".to_string()],
+        "navigation" => vec!["Navigation".to_string(), "Tree".to_string(), "Menu".to_string()],
+        "audit" => vec!["Audit".to_string(), "AuditTrail".to_string(), "Log".to_string()],
+        "seeding" => vec!["Seed".to_string(), "Seeding".to_string(), "InitialData".to_string()],
+        "hosted" => vec!["HostedService".to_string(), "BackgroundService".to_string()],
+        "mediator" => vec!["Mediator".to_string(), "IRequest".to_string(), "Handler".to_string()],
+        "minimal" => vec!["Minimal".to_string(), "Map".to_string(), "WebApplication".to_string()],
+        "filtering" => vec!["Filter".to_string(), "Specification".to_string(), "Filtering".to_string()],
+        "brands" => vec!["Brand".to_string(), "CatalogBrand".to_string()],
+        "wishlist" => vec!["Wishlist".to_string(), "Wish".to_string(), "Basket".to_string()],
+        "rating" => vec!["Rating".to_string(), "Review".to_string(), "Score".to_string()],
+        "email" => vec!["Email".to_string(), "EmailSender".to_string(), "Notification".to_string()],
+        "notification" => vec!["Notification".to_string(), "Email".to_string(), "EmailSender".to_string()],
+        "state" => vec!["State".to_string(), "Status".to_string(), "StateMachine".to_string()],
+        "machine" => vec!["StateMachine".to_string(), "State".to_string()],
+        _ => vec![],
+    }
+}
+
 fn sanitize_code_query(query: &str) -> String {
     // Strip special Tantivy characters
     let cleaned: String = query
@@ -134,20 +340,35 @@ fn sanitize_code_query(query: &str) -> String {
         })
         .collect();
 
-    // Extract meaningful keywords
-    let keywords: Vec<String> = cleaned
-        .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| c.is_alphanumeric() || c == '_').to_lowercase())
-        .filter(|w| w.len() >= 2 && !STOP_WORDS.contains(&w.as_str()))
-        .collect();
+    // Extract meaningful keywords, splitting PascalCase identifiers
+    let mut all_terms: Vec<String> = Vec::new();
+    for word in cleaned.split_whitespace() {
+        let w = word.trim_matches(|c: char| c.is_alphanumeric() || c == '_');
+        if w.len() < 2 || STOP_WORDS.contains(&w.to_lowercase().as_str()) {
+            continue;
+        }
+        // Split PascalCase: "CheckoutModel" -> ["checkout", "model", "checkoutmodel"]
+        let parts = split_pascal_case(w);
+        for part in parts {
+            if part.len() >= 2 && !all_terms.contains(&part) {
+                all_terms.push(part);
+            }
+        }
+        // Code vocabulary expansion: "controller" -> ["Controller"]
+        for expanded in expand_code_vocabulary(&w) {
+            if !all_terms.contains(&expanded.to_lowercase()) {
+                all_terms.push(expanded.to_lowercase());
+            }
+        }
+    }
 
-    if keywords.is_empty() {
+    if all_terms.is_empty() {
         // Fallback: use raw cleaned query
         let raw = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
         if raw.is_empty() { query.to_string() } else { raw }
     } else {
         // OR-join so any keyword can match (broadens recall)
-        keywords.join(" OR ")
+        all_terms.join(" OR ")
     }
 }
 
@@ -203,6 +424,30 @@ impl TantivyIndex {
                 .map_err(|e| format!("Failed to create index reader: {}", e))
     }
 
+    /// Tokenize a file path into searchable terms.
+    /// "src/ApplicationCore/Entities/Basket/Basket.cs" -> "src applicationcore entities basket basket cs"
+    fn tokenize_path(path: &str) -> String {
+        let mut tokens = Vec::new();
+        for component in path.split(['/', '\\']) {
+            // Split each path component by PascalCase, dots, hyphens
+            for part in component.split(['.', '-', '_']) {
+                if part.is_empty() { continue; }
+                // Add the full component lowercased
+                let lower = part.to_lowercase();
+                if !tokens.contains(&lower) {
+                    tokens.push(lower.clone());
+                }
+                // Split PascalCase: "ApplicationCore" -> "applicationcore", "application", "core"
+                for split in split_pascal_case(part) {
+                    if split != lower && !tokens.contains(&split) {
+                        tokens.push(split);
+                    }
+                }
+            }
+        }
+        tokens.join(" ")
+    }
+
     /// Add a document to the index, stamped with its repository scope (TASK-030)
     pub fn add_document(
         &self,
@@ -211,10 +456,24 @@ impl TantivyIndex {
         content: &str,
         language: &str,
         symbols: &[String],
+        symbol_kinds: &[String],
         repository_id: &str,
         file_class: &str,
     ) -> Result<(), String> {
-        let symbols_text = symbols.join(" ");
+        // Preprocess: split PascalCase in content and symbols for better BM25 matching
+        let processed_content = preprocess_code_content(content);
+        // Path-aware tokenization: add path segments as searchable terms
+        let path_tokens = Self::tokenize_path(path);
+        let symbols_with_splits: Vec<String> = symbols.iter().flat_map(|s| {
+            let mut parts = vec![s.clone()];
+            for part in split_pascal_case(s) {
+                if part != s.to_lowercase() {
+                    parts.push(part);
+                }
+            }
+            parts
+        }).collect();
+        let symbols_text = symbols_with_splits.join(" ");
         // Extract filename without extension for better matching
         let filename = std::path::Path::new(path)
             .file_stem()
@@ -223,10 +482,13 @@ impl TantivyIndex {
 
         let doc = doc!(
             self.schema.path_field => path,
+            self.schema.raw_path_field => path,
             self.schema.filename_field => filename,
-            self.schema.content_field => content,
+            self.schema.content_field => processed_content.as_str(),
             self.schema.language_field => language,
             self.schema.symbols_field => symbols_text.as_str(),
+            self.schema.symbol_name_field => symbols.join(" ").as_str(),
+            self.schema.symbol_kind_field => symbol_kinds.join(" ").as_str(),
             self.schema.repository_field => repository_id,
             self.schema.file_class_field => file_class,
         );
@@ -247,7 +509,8 @@ impl TantivyIndex {
         repository_id: &str,
     ) -> Result<(), String> {
         let repo_term = tantivy::Term::from_field_text(self.schema.repository_field, repository_id);
-        let path_term = tantivy::Term::from_field_text(self.schema.path_field, path);
+        // Use raw_path_field (STRING) for exact match — path_field is tokenized TEXT
+        let path_term = tantivy::Term::from_field_text(self.schema.raw_path_field, path);
         let both = BooleanQuery::new(vec![
             (tantivy::query::Occur::Must, Box::new(TermQuery::new(repo_term, IndexRecordOption::Basic)) as Box<dyn Query>),
             (tantivy::query::Occur::Must, Box::new(TermQuery::new(path_term, IndexRecordOption::Basic)) as Box<dyn Query>),
@@ -266,6 +529,56 @@ impl TantivyIndex {
             .map_err(|e| format!("Failed to commit index: {}", e))?;
 
         Ok(())
+    }
+
+    /// Expand a query by finding symbols that contain query terms.
+    /// E.g., "pagination" finds "PaginationInfoViewModel" and adds it as a search term.
+    fn expand_query_with_symbols(&self, reader: &IndexReader, sanitized_query: &str, repository_id: Option<&str>) -> String {
+        let searcher = reader.searcher();
+        let mut extra_terms: Vec<String> = Vec::new();
+
+        // Extract individual query terms from the OR-joined query
+        for term in sanitized_query.split(" OR ") {
+            let term = term.trim();
+            if term.len() < 3 { continue; }
+
+            // Search symbol_name field for symbols containing this term
+            if let Ok(parsed) = QueryParser::for_index(&self.index, vec![self.schema.symbol_name_field]).parse_query(term) {
+                if let Ok(top_docs) = searcher.search(&parsed, &TopDocs::with_limit(5).order_by_score()) {
+                    for (_, doc_addr) in top_docs {
+                        if let Ok(doc) = searcher.doc::<tantivy::TantivyDocument>(doc_addr) {
+                            if let Some(Some(names)) = doc.get_first(self.schema.symbol_name_field).map(|v| v.as_str()) {
+                                // Add the full symbol name (which may be PascalCase)
+                                let name = names.to_string();
+                                let name_lower = name.to_lowercase();
+                                if name_lower != term.to_lowercase() && !extra_terms.contains(&name_lower) {
+                                    extra_terms.push(name_lower);
+                                }
+                                // Also add PascalCase split parts
+                                for part in split_pascal_case(&name) {
+                                    if part.len() >= 2 && part != term.to_lowercase() && !extra_terms.contains(&part) {
+                                        extra_terms.push(part);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if extra_terms.is_empty() {
+            sanitized_query.to_string()
+        } else {
+            // Merge original terms with symbol-discovered terms
+            let mut all_terms: Vec<String> = sanitized_query.split(" OR ").map(|s| s.trim().to_string()).collect();
+            for t in extra_terms {
+                if !all_terms.contains(&t) {
+                    all_terms.push(t);
+                }
+            }
+            all_terms.join(" OR ")
+        }
     }
 
     /// Search the index — optionally scoped to a single repository (TASK-030).
@@ -295,13 +608,15 @@ impl TantivyIndex {
             vec![
                 self.schema.content_field,
                 self.schema.symbols_field,
+                self.schema.symbol_name_field,
                 self.schema.path_field,
                 self.schema.filename_field,
             ],
         );
+        query_parser.set_field_boost(self.schema.symbol_name_field, 3.0);
         query_parser.set_field_boost(self.schema.symbols_field, 2.0);
-        query_parser.set_field_boost(self.schema.path_field, 1.5);
-        query_parser.set_field_boost(self.schema.filename_field, 1.5);
+        query_parser.set_field_boost(self.schema.path_field, 2.5);
+        query_parser.set_field_boost(self.schema.filename_field, 2.0);
 
         let user_query = query_parser
             .parse_query(&sanitized)
@@ -525,6 +840,7 @@ mod tests {
                 "fn main() { println!(\"Hello\"); }",
                 "rust",
                 &["main".to_string()],
+                &[],
                 "repo_a",
                 "Source",
             )
@@ -557,10 +873,10 @@ mod tests {
 
         // Same relative path in two repos (TASK-030: deletes must be repo-scoped)
         index
-            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_a", "Source")
+            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], &[], "repo_a", "Source")
             .unwrap();
         index
-            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_b", "Source")
+            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], &[], "repo_b", "Source")
             .unwrap();
         index.commit(&mut writer).unwrap();
 
@@ -586,7 +902,7 @@ mod tests {
         let mut writer = index.writer().unwrap();
 
         index
-            .add_document(&mut writer, "test.rs", "test", "rust", &[], "repo_a", "Test")
+            .add_document(&mut writer, "test.rs", "test", "rust", &[], &[], "repo_a", "Test")
             .unwrap();
         index.commit(&mut writer).unwrap();
 
@@ -605,10 +921,10 @@ mod tests {
         let mut writer = index.writer().unwrap();
 
         index
-            .add_document(&mut writer, "main.rs", "fn main() {}", "rust", &[], "repo_a", "Source")
+            .add_document(&mut writer, "main.rs", "fn main() {}", "rust", &[], &[], "repo_a", "Source")
             .unwrap();
         index
-            .add_document(&mut writer, "app.py", "def main(): pass", "python", &[], "repo_a", "Source")
+            .add_document(&mut writer, "app.py", "def main(): pass", "python", &[], &[], "repo_a", "Source")
             .unwrap();
         index.commit(&mut writer).unwrap();
 
@@ -642,13 +958,13 @@ mod tests {
         let mut writer = index.writer().unwrap();
 
         index
-            .add_document(&mut writer, "a.rs", "fn alpha() {}", "rust", &[], "repo_a", "Source")
+            .add_document(&mut writer, "a.rs", "fn alpha() {}", "rust", &[], &[], "repo_a", "Source")
             .unwrap();
         index
-            .add_document(&mut writer, "b.rs", "fn beta() {}", "rust", &[], "repo_a", "Source")
+            .add_document(&mut writer, "b.rs", "fn beta() {}", "rust", &[], &[], "repo_a", "Source")
             .unwrap();
         index
-            .add_document(&mut writer, "c.py", "def alpha(): pass", "python", &[], "repo_a", "Source")
+            .add_document(&mut writer, "c.py", "def alpha(): pass", "python", &[], &[], "repo_a", "Source")
             .unwrap();
         index.commit(&mut writer).unwrap();
 

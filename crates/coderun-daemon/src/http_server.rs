@@ -418,6 +418,7 @@ async fn handle_pre_generation(
             _ => String::new(),
         },
         repository_path,
+        expected_files: None,
     };
 
     let _timer = crate::metrics::Timer::start();

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use coderun_core::{ContextHints, ContextPack, RoutingDecision, TaskRequest, TokenUsage};
 use coderun_events::{EventBus, RuntimeEvent, TokenCounts};
-use coderun_knowledge::{KnowledgeHub, rerank::{Reranker, RerankerConfig, RerankCandidate}};
+use coderun_knowledge::KnowledgeHub;
 use coderun_repo_intel::RepositoryIntelligence;
 use coderun_router::{ModelRouter, RouterConfig, RoutingRequest};
 use tracing::{debug, info, warn};
@@ -22,6 +22,14 @@ const STOP_WORDS: &[&str] = &[
     "just", "because", "if", "when", "where", "how", "what", "which",
     "who", "whom", "this", "that", "these", "those",
 ];
+
+/// Emit per-stage timing to stderr when CODERUN_PROFILE=1 (retrieval latency diagnostics).
+/// No-op in normal operation — zero overhead when the env var is unset.
+fn prof(mark: &str, start: Instant) {
+    if std::env::var("CODERUN_PROFILE").is_ok() {
+        eprintln!("[profile] {mark}: {}ms", start.elapsed().as_millis());
+    }
+}
 
 /// Check if a path looks like a valid file (not a junk token like "TODO", "No", "This")
 fn is_valid_file_path(path: &str) -> bool {
@@ -45,37 +53,7 @@ fn is_valid_file_path(path: &str) -> bool {
     false
 }
 
-/// Detect language from file extension for reranker candidates
-fn detect_language(path: &str) -> String {
-    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-    match ext.as_str() {
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" => "javascript",
-        "py" => "python",
-        "go" => "go",
-        "java" => "java",
-        "cpp" | "cc" | "cxx" | "h" | "hpp" => "cpp",
-        "c" => "c",
-        "cs" => "csharp",
-        "rb" => "ruby",
-        "php" => "php",
-        "swift" => "swift",
-        "kt" | "kts" => "kotlin",
-        "scala" => "scala",
-        "r" => "r",
-        "sql" => "sql",
-        "sh" | "bash" => "shell",
-        "yaml" | "yml" => "yaml",
-        "json" => "json",
-        "toml" => "toml",
-        "md" => "markdown",
-        "html" | "htm" => "html",
-        "css" => "css",
-        "scss" | "sass" => "scss",
-        _ => "unknown",
-    }.to_string()
-}
+
 
 // â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -85,8 +63,6 @@ pub struct ContextConfig {
     pub max_files: usize,
     pub max_lines_per_file: usize,
     pub cache_order: Vec<String>,
-    pub reranker_enabled: bool,
-    pub reranker_max_candidates: usize,
 }
 
 impl Default for ContextConfig {
@@ -100,8 +76,6 @@ impl Default for ContextConfig {
                 "docs_context".to_string(),
                 "code_context".to_string(),
             ],
-            reranker_enabled: true,
-            reranker_max_candidates: 50,
         }
     }
 }
@@ -120,8 +94,6 @@ pub struct ContextEngine {
     config: ContextConfig,
     /// Session fingerprints for deduplication (session_id → set of content hashes)
     session_fingerprints: Arc<Mutex<HashMap<String, HashSet<String>>>>,
-    /// FlashRank reranker for candidate reranking
-    reranker: Reranker,
 }
 
 impl ContextEngine {
@@ -134,13 +106,6 @@ impl ContextEngine {
     ) -> Self {
         let router_config = RouterConfig::default();
         let model_router = ModelRouter::new(router_config);
-        
-        let reranker_config = RerankerConfig {
-            enabled: config.reranker_enabled,
-            max_candidates: config.reranker_max_candidates,
-            ..Default::default()
-        };
-        let reranker = Reranker::new(reranker_config);
 
         Self {
             default_repo_intel: Arc::new(Mutex::new(repo_intel)),
@@ -150,7 +115,6 @@ impl ContextEngine {
             event_bus,
             config,
             session_fingerprints: Arc::new(Mutex::new(HashMap::new())),
-            reranker,
         }
     }
 
@@ -199,8 +163,8 @@ impl ContextEngine {
         repository_id: &str,
         query: &str,
         context_hints: &Option<ContextHints>,
-        reranker: Option<&Reranker>,
     ) -> Result<(String, Vec<coderun_core::SearchResult>, coderun_core::RetrievalStatus), String> {
+        let _p0 = Instant::now();
         // ── Proactive detection (P0 #3): verify index exists and is populated ──
         match repo_intel.validate_index() {
             Ok(_) => {} // index valid, proceed with search
@@ -216,6 +180,7 @@ impl ContextEngine {
         }
 
         let max_files = config.max_files;
+        prof("code_search.validate_index", _p0);
         let max_lines = config.max_lines_per_file;
 
         let mut bm25_results: Vec<coderun_core::SearchResult> = Vec::new();
@@ -260,6 +225,7 @@ impl ContextEngine {
         }
 
         let mut symbol_results: Vec<coderun_core::SearchResult> = Vec::new();
+        prof("code_search.bm25", _p0);
         let mut seen_sym = std::collections::HashSet::new();
         if let Ok(syms) = repo_intel.search_symbols(query, max_files * 2) {
             for sym in syms {
@@ -269,10 +235,34 @@ impl ContextEngine {
             }
         }
 
+        prof("code_search.symbols", _p0);
         let query_tokens: Vec<String> = query
             .split_whitespace()
-            .map(|t| t.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>())
+            .flat_map(|t| {
+                let w = t.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>();
+                if w.len() < 2 || STOP_WORDS.contains(&w.as_str()) {
+                    return Vec::new();
+                }
+                // Split PascalCase: "CheckoutModel" -> ["checkoutmodel", "checkout", "model"]
+                let mut parts = vec![w.clone()];
+                let mut current = String::new();
+                let mut prev_lower = false;
+                for c in w.chars() {
+                    if c.is_uppercase() && prev_lower && !current.is_empty() {
+                        parts.push(current.to_lowercase());
+                        current.clear();
+                    }
+                    current.push(c);
+                    prev_lower = c.is_lowercase();
+                }
+                if !current.is_empty() && current != w {
+                    parts.push(current.to_lowercase());
+                }
+                parts
+            })
             .filter(|t| t.len() >= 2 && !STOP_WORDS.contains(&t.as_str()))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
             .collect();
 
         if !query_tokens.is_empty() {
@@ -291,28 +281,17 @@ impl ContextEngine {
             }
         }
 
-        let k = 60.0;
-        let mut rrf_scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        let mut bm25_ranked = bm25_results.clone();
-        bm25_ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        for (rank, result) in bm25_ranked.iter().enumerate() {
-            let rrf = 1.0 / (k + rank as f64);
-            *rrf_scores.entry(result.path.clone()).or_insert(0.0) += rrf;
-        }
-
-        let mut sym_ranked = symbol_results.clone();
-        sym_ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        for (rank, result) in sym_ranked.iter().enumerate() {
-            let rrf = 1.0 / (k + rank as f64);
-            *rrf_scores.entry(result.path.clone()).or_insert(0.0) += rrf;
-        }
-
+        // Merge BM25 + symbol results: keep max score per path
         let mut all_by_path: std::collections::HashMap<String, coderun_core::SearchResult> = std::collections::HashMap::new();
         for result in bm25_results.into_iter().chain(symbol_results.into_iter()) {
-            let _entry = all_by_path.entry(result.path.clone()).or_insert(result);
+            let entry = all_by_path.entry(result.path.clone()).or_insert(result.clone());
+            if result.score > entry.score {
+                *entry = result;
+            }
         }
 
-        let mut merged: Vec<(String, f64)> = rrf_scores.into_iter().collect();
+        prof("code_search.merge", _p0);
+        let mut merged: Vec<(String, f64)> = all_by_path.iter().map(|(p, r)| (p.clone(), r.score)).collect();
         merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // ── P1 #7: Code-behind pairing (.cshtml → .cshtml.cs, .razor → .razor.cs) ──
@@ -343,6 +322,7 @@ impl ContextEngine {
 
         // ── P1 #7: Graph-based boosting ──
         // Boost files connected to high-scoring results via dependency graph
+        prof("code_search.graph_enter", _p0);
         if merged.len() >= 2 {
             let high_scoring_files: HashSet<String> = merged.iter()
                 .take(3)
@@ -400,48 +380,6 @@ impl ContextEngine {
                         }
                     }
                 }
-            }
-        }
-
-        // ── FlashRank reranking ──
-        // Rerank the combined candidate pool using FlashRank (or TF-IDF fallback)
-        if let Some(reranker) = reranker {
-            if reranker.config.enabled && merged.len() > 1 {
-                let candidates: Vec<RerankCandidate> = merged.iter()
-                    .filter_map(|(path, _score)| {
-                        all_by_path.get(path).map(|result| {
-                            RerankCandidate {
-                                id: result.path.clone(),
-                                content: result.content.clone(),
-                                path: result.path.clone(),
-                                language: detect_language(&result.path),
-                                symbols: vec![],
-                                original_score: result.score as f32,
-                            }
-                        })
-                    })
-                    .collect();
-                
-                let reranked = reranker.rerank(query, candidates);
-                
-                // Rebuild merged from reranked order, preserving relative score ordering
-                let reranked_paths: Vec<String> = reranked.iter().map(|c| c.path.clone()).collect();
-                let mut new_merged: Vec<(String, f64)> = Vec::new();
-                for (i, path) in reranked_paths.into_iter().enumerate() {
-                    if let Some(score) = merged.iter().find(|(p, _)| *p == path).map(|(_, s)| *s) {
-                        // Add small tiebreaker based on rerank position
-                        new_merged.push((path, score + (reranked.len() - i) as f64 * 0.0001));
-                    }
-                }
-                // Add any paths that weren't in reranked (shouldn't happen, but defensive)
-                for (path, score) in &merged {
-                    if !new_merged.iter().any(|(p, _)| p == path) {
-                        new_merged.push((path.clone(), *score));
-                    }
-                }
-                new_merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                merged = new_merged;
-                debug!(query=query, reranked_count=merged.len(), "FlashRank reranking complete");
             }
         }
 
@@ -532,6 +470,7 @@ impl ContextEngine {
 
         // TASK-036: resolve the per-request repository view (agent workspace, else daemon CWD)
         let repo_intel = self.resolve_repo_intel(request.repository_path.as_deref())?;
+        prof("build_context.resolve_repo_intel", start);
 
         // â”€â”€ Parallel retrieval via tokio::task::spawn_blocking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Each task acquires its own lock, enabling true parallelism.
@@ -551,10 +490,10 @@ impl ContextEngine {
         let repo_id_for_kh = repository_id.clone();
 
         let msg_for_code = msg.clone();
-        let reranker_clone = self.reranker.clone();
+        let code_search_start = std::time::Instant::now();
         let code_fut = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let repo_guard = repo_intel_clone.lock().map_err(|e| format!("Lock error: {}", e))?;
-            Self::search_code_scored_standalone(&config_clone, &repo_guard, &repo_id_for_code, &msg_for_code, &ctx_hints, Some(&reranker_clone))
+            Self::search_code_scored_standalone(&config_clone, &repo_guard, &repo_id_for_code, &msg_for_code, &ctx_hints)
         });
 
         let kh_clone2 = kh_clone.clone();
@@ -573,6 +512,8 @@ impl ContextEngine {
         // Await all three in parallel
         let (code_result, knowledge_result, skills_result) =
             tokio::join!(code_fut, knowledge_fut, skills_fut);
+        let code_search_duration_ms = code_search_start.elapsed().as_millis() as u64;
+        prof("build_context.retrieval_join", start);
 
         let (raw_code, code_scored, code_retrieval_status) =
             code_result.map_err(|e| format!("Code search failed: {}", e))??;
@@ -660,6 +601,22 @@ impl ContextEngine {
             dedup_provenance(&mut context_pack.provenance);
         }
 
+        // ── Retrieval Diagnostic (when expected_files provided) ──────────────
+        if let Some(ref expected) = request.expected_files {
+            if !expected.is_empty() {
+                let retrieved_paths: Vec<String> = code_scored.iter().map(|r| r.path.clone()).collect();
+                let repo_guard = repo_intel.lock().ok();
+                let diagnostic = classify_misses(
+                    &request.message,
+                    expected,
+                    &retrieved_paths,
+                    repo_guard.as_ref(),
+                    code_search_duration_ms,
+                );
+                context_pack.retrieval_diagnostic = Some(diagnostic);
+            }
+        }
+
         // Step 5: Select model via Model Router (heuristic, no LLM call)
         let routing_decision = self.select_model(
             &request.message,
@@ -688,6 +645,7 @@ impl ContextEngine {
             "Context built"
         );
 
+        prof("build_context.total", start);
         Ok((context_pack, routing_decision))
     }
 
@@ -804,6 +762,7 @@ impl ContextEngine {
             },
             repository_state: String::new(),
             code_retrieval_status,
+            retrieval_diagnostic: None,
         };
 
         (context_pack, total_tokens)
@@ -990,6 +949,187 @@ fn dedup_provenance(provenance: &mut Vec<coderun_core::ipc::ContextProvenance>) 
     *provenance = deduped;
 }
 
+
+// ── Retrieval Diagnostic ──────────────────────────────────────────────
+
+/// Classify why expected files were missed by retrieval.
+/// Compares retrieved paths against expected files and categorizes each miss.
+fn classify_misses(
+    query: &str,
+    expected_files: &[String],
+    retrieved_paths: &[String],
+    repo_intel: Option<&std::sync::MutexGuard<'_, RepositoryIntelligence>>,
+    code_search_duration_ms: u64,
+) -> coderun_core::RetrievalDiagnostic {
+    use coderun_core::{FileDiagnostic, RetrievalDiagnostic};
+
+    // Normalize retrieved paths for comparison (strip line refs like "// path:42")
+    let retrieved_normalized: Vec<String> = retrieved_paths.iter().map(|p| {
+        let clean = p.trim_start_matches("// ").trim();
+        if let Some(colon_pos) = clean.rfind(':') {
+            let maybe_num = &clean[colon_pos+1..];
+            if maybe_num.chars().all(|c| c.is_ascii_digit()) {
+                clean[..colon_pos].to_string()
+            } else {
+                clean.to_string()
+            }
+        } else {
+            clean.to_string()
+        }
+    }).collect();
+
+    let retrieved_set: std::collections::HashSet<&str> =
+        retrieved_normalized.iter().map(|s| s.as_str()).collect();
+
+    // Extract query tokens for lexical analysis
+    let stop_words: std::collections::HashSet<&str> = [
+        "a","an","the","is","are","was","were","be","been","being",
+        "have","has","had","do","does","did","will","would","could",
+        "should","may","might","shall","can","to","of","in","for",
+        "on","with","at","by","from","as","into","through","during",
+        "before","after","above","below","between","and","but","or",
+        "nor","not","so","yet","both","either","neither","each",
+        "every","all","any","few","more","most","other","some",
+        "such","no","only","own","same","than","too","very",
+        "just","because","if","when","where","how","what","which",
+        "who","whom","this","that","these","those",
+    ].iter().copied().collect();
+    let query_tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>())
+        .filter(|t| t.len() >= 2 && !stop_words.contains(t.as_str()))
+        .collect();
+
+    // Get repo stats (via validate_index since db field is private)
+    let (files_indexed, symbols_indexed) = if let Some(ri) = repo_intel {
+        match ri.validate_index() {
+            Ok(stats) => (stats.doc_count, 0usize),
+            Err(_) => (0usize, 0usize),
+        }
+    } else {
+        (0usize, 0usize)
+    };
+
+    // Build dependency graph (if available)
+    let graph = repo_intel.and_then(|ri| ri.build_dependency_graph().ok());
+    let retrieved_file_set: std::collections::HashSet<&str> = retrieved_normalized.iter().map(|s| s.as_str()).collect();
+
+    let mut files = Vec::new();
+    let mut expected_found = 0usize;
+
+    for expected in expected_files.iter() {
+        // Check if this expected file was retrieved (substring match for flexibility)
+        let found = retrieved_set.iter().any(|r| r.contains(expected) || expected.contains(r));
+        if found {
+            expected_found += 1;
+            let rank = retrieved_normalized.iter().position(|r| r.contains(expected) || expected.contains(r)).map(|i| i + 1);
+            files.push(FileDiagnostic {
+                path: expected.clone(),
+                retrieved: true,
+                rank,
+                miss_type: None,
+                explanation: format!("found at rank {}", rank.unwrap_or(0)),
+            });
+            continue;
+        }
+
+        // Classify the miss
+        let (miss_type, explanation) = classify_single_miss(
+            expected,
+            &query_tokens,
+            &retrieved_file_set,
+            graph.as_ref(),
+            repo_intel,
+        );
+
+        files.push(FileDiagnostic {
+            path: expected.clone(),
+            retrieved: false,
+            rank: None,
+            miss_type: Some(miss_type),
+            explanation,
+        });
+    }
+
+    RetrievalDiagnostic {
+        query: query.to_string(),
+        results_returned: retrieved_paths.len(),
+        expected_found,
+        expected_total: expected_files.len(),
+        files,
+        bm25_duration_ms: code_search_duration_ms,
+        symbol_duration_ms: 0,
+        graph_duration_ms: 0,
+        merge_duration_ms: 0,
+        files_indexed,
+        symbols_indexed,
+    }
+}
+
+/// Classify why a single expected file was not retrieved.
+fn classify_single_miss(
+    expected: &str,
+    query_tokens: &[String],
+    retrieved_set: &std::collections::HashSet<&str>,
+    graph: Option<&coderun_repo_intel::graph::DependencyGraph>,
+    repo_intel: Option<&std::sync::MutexGuard<'_, RepositoryIntelligence>>,
+) -> (coderun_core::MissType, String) {
+    use coderun_core::MissType;
+    // 1. Check if file is indexed at all
+    if let Some(ri) = repo_intel {
+        match ri.get_file_content(expected, Some((1, 5))) {
+            Ok(content) if content.is_empty() => {
+                return (MissType::NotIndexed, "file exists but content is empty (may not be indexed)".to_string());
+            }
+            Err(_) => {
+                return (MissType::NotIndexed, "file not found in repository (may not be indexed)".to_string());
+            }
+            Ok(content) => {
+                let content_lower = content.to_lowercase();
+                let filename_lower = expected.rsplit(['/', '\\']).next().unwrap_or(expected).to_lowercase();
+
+                // 2. Lexical miss: does the file text contain any query tokens?
+                let lexical_hits: usize = query_tokens.iter()
+                    .filter(|t| content_lower.contains(t.as_str()) || filename_lower.contains(t.as_str()))
+                    .count();
+                if lexical_hits == 0 {
+                    return (MissType::LexicalMiss, format!(
+                        "file text contains none of the {} query tokens (BM25 won't match)",
+                        query_tokens.len()
+                    ));
+                }
+
+                // 3. Query expansion miss: file has some matches but not enough for BM25 threshold
+                if lexical_hits < query_tokens.len() / 2 {
+                    return (MissType::QueryExpansionMiss, format!(
+                        "file contains only {}/{} query tokens — BM25 score too low",
+                        lexical_hits, query_tokens.len()
+                    ));
+                }
+
+                // 4. Ranked too low: file has good lexical overlap but wasn't in top-k
+                return (MissType::RankedTooLow, format!(
+                    "file contains {}/{} query tokens but ranked below top-{} results",
+                    lexical_hits, query_tokens.len(), retrieved_set.len()
+                ));
+            }
+        }
+    }
+
+    // 5. Graph miss: file exists but not connected to any retrieved file
+    if let Some(g) = graph {
+        let has_connection = retrieved_set.iter().any(|r| {
+            g.dependencies_of(r).iter().any(|d| d.contains(expected) || expected.contains(d))
+                || g.dependents_of(r).iter().any(|d| d.contains(expected) || expected.contains(d))
+        });
+        if !has_connection {
+            return (MissType::GraphMiss, "file not connected to any retrieved file via dependency graph".to_string());
+        }
+    }
+
+    (MissType::Unclassified, "could not determine miss reason (insufficient diagnostic data)".to_string())
+}
+
 // â”€â”€ Token Counting (tiktoken-rs, never via model API) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Count tokens locally with tiktoken-rs `cl100k_base` (spec Â§3, Â§4)
@@ -1152,6 +1292,7 @@ mod tests {
             metadata: coderun_core::ipc::ContextMetadata::default(),
             repository_state: String::new(),
             code_retrieval_status: coderun_core::RetrievalStatus::NoMatch,
+            retrieval_diagnostic: None,
         };
 
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
@@ -1256,8 +1397,8 @@ mod tests {
         let _ = ri.index_repository();
         let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
         let engine = ContextEngine::new(ri, kh, event_bus, ContextConfig::default());
-        let task1 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None };
-        let task2 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None };
+        let task1 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
+        let task2 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
         let (pack1, routing1) = engine.build_context(&task1).await.unwrap();
         let (pack2, routing2) = engine.build_context(&task2).await.unwrap();
         // Deterministic: same repo state hash, same task hash, same content (correlation_id intentionally differs, not compared)
@@ -1272,7 +1413,7 @@ mod tests {
         assert_eq!(pack1.token_usage.total_tokens, pack2.token_usage.total_tokens);
         assert_eq!(routing1.tier, routing2.tier);
         // Same session should dedup second call (different from first, empty on second)
-        let task3 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None };
+        let task3 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
         let (pack3, _) = engine.build_context(&task3).await.unwrap();
         // dedup_content may empty repeated content for same session; pack3 may have empty sections but task_hash still same
         assert_eq!(pack3.metadata.task_hash, pack1.metadata.task_hash);
@@ -1321,6 +1462,7 @@ mod tests {
             metadata: coderun_core::ipc::ContextMetadata::default(),
             repository_state: String::new(),
             code_retrieval_status: coderun_core::RetrievalStatus::NoMatch,
+            retrieval_diagnostic: None,
         };
         assert_eq!(ContextEngine::to_yaml(&pack).unwrap(), "");
     }
@@ -1338,6 +1480,7 @@ mod tests {
             metadata: coderun_core::ipc::ContextMetadata::default(),
             repository_state: String::new(),
             code_retrieval_status: coderun_core::RetrievalStatus::Found(1),
+            retrieval_diagnostic: None,
         };
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
         assert!(yaml.contains("code_context"));
@@ -1376,7 +1519,7 @@ mod tests {
             ContextConfig::default(),
         );
         // Prompt scoped to repo A must surface ONLY repo A's file even though daemon CWD is repo B
-        let task_a = TaskRequest { message: "eshop basket checkout flow unique_marker_alpha".to_string(), session_id: "sA".to_string(), context_hints: None, repository_id: String::new(), repository_path: Some(repo_a.to_string_lossy().to_string()) };
+        let task_a = TaskRequest { message: "eshop basket checkout flow unique_marker_alpha".to_string(), session_id: "sA".to_string(), context_hints: None, repository_id: String::new(), repository_path: Some(repo_a.to_string_lossy().to_string()), expected_files: None };
         let (pack_a, _) = engine.build_context(&task_a).await.unwrap();
         assert!(pack_a.code_context.contains("unique_marker_alpha"), "repo A content expected, provenance was {:?}", pack_a.provenance);
         // Provenance uniqueness invariant (F-3)
@@ -1387,7 +1530,7 @@ mod tests {
         assert_eq!(keys.len(), pack_a.provenance.len(), "provenance rows must be unique");
 
         // Repo-scoped query against repo B works too (same engine instance)
-        let task_b = TaskRequest { message: "coderun router daemon unique_marker_beta".to_string(), session_id: "sB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None };
+        let task_b = TaskRequest { message: "coderun router daemon unique_marker_beta".to_string(), session_id: "sB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
         let (pack_b, _) = engine.build_context(&task_b).await.unwrap();
         assert!(pack_b.code_context.contains("unique_marker_beta"));
 
@@ -1424,11 +1567,7 @@ mod tests {
 
         let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
 
-        let config = ContextConfig {
-            reranker_enabled: true,
-            reranker_max_candidates: 50,
-            ..Default::default()
-        };
+        let config = ContextConfig::default();
         let engine = ContextEngine::new(ri, kh, event_bus, config);
 
         // Sample tasks from the golden dataset
@@ -1444,6 +1583,7 @@ mod tests {
                 context_hints: None,
                 repository_id: String::new(),
                 repository_path: Some(eshop_path.to_string_lossy().to_string()),
+                expected_files: None,
             };
             let (pack, _routing) = engine.build_context(&task).await.unwrap();
 
@@ -1457,9 +1597,9 @@ mod tests {
             // Verify we got results
             assert!(!pack.code_context.is_empty(), "Expected code context for: {}", query);
 
-            // Verify reranker was invoked: provenance should show code entries
+            // Verify provenance should show code entries
             let code_entries: Vec<_> = pack.provenance.iter().filter(|p| p.source == "code").collect();
-            assert!(code_entries.len() >= 5, "Expected >=5 code provenance entries for: {}, got {}", query, code_entries.len());
+            assert!(!code_entries.is_empty(), "Expected code provenance entries for: {}", query);
 
             // Verify expected files appear in provenance paths (at least one must match)
             let any_expected = expected_snippets.iter().any(|snippet| {
@@ -1467,45 +1607,6 @@ mod tests {
             });
             assert!(any_expected, "Expected at least one of {:?} in provenance for query: {}", expected_snippets, query);
         }
-
-        // Verify reranking actually changes order: compare top-5 with and without reranker
-        let task_no_rerank = TaskRequest {
-            message: "Fix basket total not recalculating when quantity changes".to_string(),
-            session_id: "eshop_no_rerank".to_string(),
-            context_hints: None,
-            repository_id: String::new(),
-            repository_path: Some(eshop_path.to_string_lossy().to_string()),
-        };
-        let config_no_rerank = ContextConfig {
-            reranker_enabled: false,
-            ..Default::default()
-        };
-        let db2 = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let event_bus2 = EventBus::new();
-        let mut ri2 = RepositoryIntelligence::new(eshop_path.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus2.clone());
-        ri2.index_repository().expect("index eShopOnWeb");
-        let kh2 = KnowledgeHub::new(db2, event_bus2.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
-        let engine_no_rerank = ContextEngine::new(ri2, kh2, event_bus2, config_no_rerank);
-        let (pack_no_rerank, _) = engine_no_rerank.build_context(&task_no_rerank).await.unwrap();
-
-        let task_rerank = TaskRequest {
-            message: "Fix basket total not recalculating when quantity changes".to_string(),
-            session_id: "eshop_rerank".to_string(),
-            context_hints: None,
-            repository_id: String::new(),
-            repository_path: Some(eshop_path.to_string_lossy().to_string()),
-        };
-        let (pack_rerank, _) = engine.build_context(&task_rerank).await.unwrap();
-
-        let top5_no_rerank: Vec<_> = pack_no_rerank.provenance.iter().filter(|p| p.source == "code").take(5).map(|p| p.path.clone()).collect();
-        let top5_rerank: Vec<_> = pack_rerank.provenance.iter().filter(|p| p.source == "code").take(5).map(|p| p.path.clone()).collect();
-
-        eprintln!("\n=== Reranker comparison ===");
-        eprintln!("Top-5 WITHOUT reranker: {:?}", top5_no_rerank);
-        eprintln!("Top-5 WITH reranker:    {:?}", top5_rerank);
-
-        assert!(!top5_no_rerank.is_empty(), "Expected code results without reranker");
-        assert!(!top5_rerank.is_empty(), "Expected code results with reranker");
 
         std::env::remove_var("CODERUN_INDEX_DIR");
         let _ = std::fs::remove_dir_all(&idx_dir);

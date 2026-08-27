@@ -26,7 +26,7 @@ tags
 
 # Emacs
 *~
-\#*\#
+\#\*\#
 .#*
 *.elc
 
@@ -39,7 +39,7 @@ tags
 .DS_Store
 .AppleDouble
 .LSOverride
-._*
+._
 Thumbs.db
 
 # Windows
@@ -51,16 +51,27 @@ Desktop.ini
 *~
 
 # === Project-specific ===
-# Coderun runtime data
+# Coderun runtime data (database, index, logs, cache)
 .coderun/data.db
 .coderun/data.db-wal
 .coderun/data.db-shm
 .coderun/index/
 .coderun/logs/
 .coderun/cache/
+.coderun/artifacts/
+
+# Coderun config is tracked, but runtime state is not
+# .coderun/config.toml  ← tracked (project config)
+# .coderun/profile.json ← tracked (project profile)
+# .coderun/skills/      ← tracked (skill library)
 
 # Evaluation results (generated)
 eval/results/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
 
 # Environment / secrets
 .env
