@@ -67,8 +67,9 @@ fn try_flashrank_ort(query: &str, candidates: &[RerankCandidate]) -> Option<Vec<
 // ── Reranker ─────────────────────────────────────────────────────────────
 
 /// Reranker for improving search result quality
+#[derive(Debug, Clone)]
 pub struct Reranker {
-    config: RerankerConfig,
+    pub config: RerankerConfig,
 }
 
 impl Reranker {

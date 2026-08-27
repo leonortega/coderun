@@ -1128,6 +1128,8 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
             max_files: core_config.context.max_files,
             max_lines_per_file: core_config.context.max_lines_per_file,
             cache_order: core_config.context.cache_order,
+            reranker_enabled: std::env::var("CODERUN_RERANKER_DISABLED").is_err(),
+            reranker_max_candidates: 50,
         };
         let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), ctx_config);
         let task = coderun_core::TaskRequest { message: prompt.to_string(), session_id: effective_session.clone(), context_hints: None, repository_id: String::new(), repository_path: None };

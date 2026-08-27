@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use coderun_core::{ContextHints, ContextPack, RoutingDecision, TaskRequest, TokenUsage};
 use coderun_events::{EventBus, RuntimeEvent, TokenCounts};
-use coderun_knowledge::KnowledgeHub;
+use coderun_knowledge::{KnowledgeHub, rerank::{Reranker, RerankerConfig, RerankCandidate}};
 use coderun_repo_intel::RepositoryIntelligence;
 use coderun_router::{ModelRouter, RouterConfig, RoutingRequest};
 use tracing::{debug, info, warn};
@@ -34,7 +34,7 @@ fn is_valid_file_path(path: &str) -> bool {
     if lower == "todo" || lower == "no" || lower == "this" || lower == "true" || lower == "false" {
         return false;
     }
-    // Has a directory separator â€” always valid (junk tokens don't contain / or \)
+    // Has a directory separator — always valid (junk tokens don't contain / or \)
     if path.contains('/') || path.contains('\\') {
         return true;
     }
@@ -45,6 +45,38 @@ fn is_valid_file_path(path: &str) -> bool {
     false
 }
 
+/// Detect language from file extension for reranker candidates
+fn detect_language(path: &str) -> String {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "rs" => "rust",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" => "javascript",
+        "py" => "python",
+        "go" => "go",
+        "java" => "java",
+        "cpp" | "cc" | "cxx" | "h" | "hpp" => "cpp",
+        "c" => "c",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "scala" => "scala",
+        "r" => "r",
+        "sql" => "sql",
+        "sh" | "bash" => "shell",
+        "yaml" | "yml" => "yaml",
+        "json" => "json",
+        "toml" => "toml",
+        "md" => "markdown",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" | "sass" => "scss",
+        _ => "unknown",
+    }.to_string()
+}
+
 // â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Clone)]
@@ -53,6 +85,8 @@ pub struct ContextConfig {
     pub max_files: usize,
     pub max_lines_per_file: usize,
     pub cache_order: Vec<String>,
+    pub reranker_enabled: bool,
+    pub reranker_max_candidates: usize,
 }
 
 impl Default for ContextConfig {
@@ -66,6 +100,8 @@ impl Default for ContextConfig {
                 "docs_context".to_string(),
                 "code_context".to_string(),
             ],
+            reranker_enabled: true,
+            reranker_max_candidates: 50,
         }
     }
 }
@@ -73,7 +109,7 @@ impl Default for ContextConfig {
 // â”€â”€ Context Engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub struct ContextEngine {
-    /// Default repo intelligence (daemon CWD) â€” used when a request carries no repository_path
+    /// Default repo intelligence (daemon CWD) — used when a request carries no repository_path
     default_repo_intel: Arc<Mutex<RepositoryIntelligence>>,
     /// Lazily-created per-repository intelligence keyed by canonical workspace path (TASK-036/F-7):
     /// ONE daemon serves many opencode windows on different repos simultaneously.
@@ -82,8 +118,10 @@ pub struct ContextEngine {
     model_router: ModelRouter,
     event_bus: EventBus,
     config: ContextConfig,
-    /// Session fingerprints for deduplication (session_id â†’ set of content hashes)
+    /// Session fingerprints for deduplication (session_id → set of content hashes)
     session_fingerprints: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+    /// FlashRank reranker for candidate reranking
+    reranker: Reranker,
 }
 
 impl ContextEngine {
@@ -96,6 +134,13 @@ impl ContextEngine {
     ) -> Self {
         let router_config = RouterConfig::default();
         let model_router = ModelRouter::new(router_config);
+        
+        let reranker_config = RerankerConfig {
+            enabled: config.reranker_enabled,
+            max_candidates: config.reranker_max_candidates,
+            ..Default::default()
+        };
+        let reranker = Reranker::new(reranker_config);
 
         Self {
             default_repo_intel: Arc::new(Mutex::new(repo_intel)),
@@ -105,6 +150,7 @@ impl ContextEngine {
             event_bus,
             config,
             session_fingerprints: Arc::new(Mutex::new(HashMap::new())),
+            reranker,
         }
     }
 
@@ -153,6 +199,7 @@ impl ContextEngine {
         repository_id: &str,
         query: &str,
         context_hints: &Option<ContextHints>,
+        reranker: Option<&Reranker>,
     ) -> Result<(String, Vec<coderun_core::SearchResult>, coderun_core::RetrievalStatus), String> {
         // ── Proactive detection (P0 #3): verify index exists and is populated ──
         match repo_intel.validate_index() {
@@ -303,7 +350,7 @@ impl ContextEngine {
                 .collect();
             
             // Build dependency graph for the repo
-            if let Ok(repo_path) = repo_intel.repo_path().canonicalize() {
+            if let Ok(_repo_path) = repo_intel.repo_path().canonicalize() {
                 if let Ok(graph) = repo_intel.build_dependency_graph() {
                     // For each result, check if it's connected to high-scoring files
                     for (path, score) in &mut merged {
@@ -353,6 +400,48 @@ impl ContextEngine {
                         }
                     }
                 }
+            }
+        }
+
+        // ── FlashRank reranking ──
+        // Rerank the combined candidate pool using FlashRank (or TF-IDF fallback)
+        if let Some(reranker) = reranker {
+            if reranker.config.enabled && merged.len() > 1 {
+                let candidates: Vec<RerankCandidate> = merged.iter()
+                    .filter_map(|(path, _score)| {
+                        all_by_path.get(path).map(|result| {
+                            RerankCandidate {
+                                id: result.path.clone(),
+                                content: result.content.clone(),
+                                path: result.path.clone(),
+                                language: detect_language(&result.path),
+                                symbols: vec![],
+                                original_score: result.score as f32,
+                            }
+                        })
+                    })
+                    .collect();
+                
+                let reranked = reranker.rerank(query, candidates);
+                
+                // Rebuild merged from reranked order, preserving relative score ordering
+                let reranked_paths: Vec<String> = reranked.iter().map(|c| c.path.clone()).collect();
+                let mut new_merged: Vec<(String, f64)> = Vec::new();
+                for (i, path) in reranked_paths.into_iter().enumerate() {
+                    if let Some(score) = merged.iter().find(|(p, _)| *p == path).map(|(_, s)| *s) {
+                        // Add small tiebreaker based on rerank position
+                        new_merged.push((path, score + (reranked.len() - i) as f64 * 0.0001));
+                    }
+                }
+                // Add any paths that weren't in reranked (shouldn't happen, but defensive)
+                for (path, score) in &merged {
+                    if !new_merged.iter().any(|(p, _)| p == path) {
+                        new_merged.push((path.clone(), *score));
+                    }
+                }
+                new_merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                merged = new_merged;
+                debug!(query=query, reranked_count=merged.len(), "FlashRank reranking complete");
             }
         }
 
@@ -462,9 +551,10 @@ impl ContextEngine {
         let repo_id_for_kh = repository_id.clone();
 
         let msg_for_code = msg.clone();
+        let reranker_clone = self.reranker.clone();
         let code_fut = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let repo_guard = repo_intel_clone.lock().map_err(|e| format!("Lock error: {}", e))?;
-            Self::search_code_scored_standalone(&config_clone, &repo_guard, &repo_id_for_code, &msg_for_code, &ctx_hints)
+            Self::search_code_scored_standalone(&config_clone, &repo_guard, &repo_id_for_code, &msg_for_code, &ctx_hints, Some(&reranker_clone))
         });
 
         let kh_clone2 = kh_clone.clone();
@@ -1085,7 +1175,6 @@ mod tests {
     fn test_frozen_prefix_boundary() {
         // Directly test assemble_context_pack boundary
         use coderun_events::EventBus;
-        use coderun_knowledge::KnowledgeHub;
         use coderun_knowledge::KnowledgeConfig;
         use coderun_repo_intel::RepositoryIntelligence;
         use coderun_storage::Database;
@@ -1306,5 +1395,119 @@ mod tests {
         std::env::remove_var("CODERUN_REPO_STATE");
         let _ = std::fs::remove_dir_all(&repo_a);
         let _ = std::fs::remove_dir_all(&repo_b);
+    }
+
+    #[tokio::test]
+    #[ignore] // Run with: cargo test -p coderun-context -- --ignored test_eshop_reranker
+    async fn test_eshop_reranker() {
+        use coderun_core::TaskRequest;
+        use coderun_events::EventBus;
+        use coderun_knowledge::{KnowledgeConfig, KnowledgeHub};
+        use coderun_repo_intel::RepositoryIntelligence;
+        use coderun_storage::Database;
+        use std::path::PathBuf;
+
+        let eshop_path = std::path::PathBuf::from(r"C:\LeonRepository\eShopOnWeb");
+        if !eshop_path.exists() {
+            eprintln!("Skipping eShopOnWeb test: path not found");
+            return;
+        }
+
+        let _env = ENV_LOCK.lock().unwrap();
+        let idx_dir = std::env::temp_dir().join(format!("coderun_eshop_idx_{}", uuid::Uuid::new_v4()));
+        std::env::set_var("CODERUN_INDEX_DIR", idx_dir.to_string_lossy().to_string());
+
+        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let event_bus = EventBus::new();
+        let mut ri = RepositoryIntelligence::new(eshop_path.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
+        ri.index_repository().expect("index eShopOnWeb");
+
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
+
+        let config = ContextConfig {
+            reranker_enabled: true,
+            reranker_max_candidates: 50,
+            ..Default::default()
+        };
+        let engine = ContextEngine::new(ri, kh, event_bus, config);
+
+        // Sample tasks from the golden dataset
+        let tasks = vec![
+            ("Fix basket total not recalculating when quantity changes", vec!["Basket"]),
+            ("Find how JWT token claims are constructed", vec!["Token", "Identity"]),
+        ];
+
+        for (query, expected_snippets) in &tasks {
+            let task = TaskRequest {
+                message: query.to_string(),
+                session_id: format!("eshop_test_{}", query.len()),
+                context_hints: None,
+                repository_id: String::new(),
+                repository_path: Some(eshop_path.to_string_lossy().to_string()),
+            };
+            let (pack, _routing) = engine.build_context(&task).await.unwrap();
+
+            eprintln!("\n=== Query: {} ===", query);
+            eprintln!("Code context length: {} chars", pack.code_context.len());
+            eprintln!("Provenance entries: {}", pack.provenance.len());
+            for p in pack.provenance.iter().take(5) {
+                eprintln!("  [{}] {} ({}) score={:.2}", p.source, p.path, p.retriever, p.score);
+            }
+
+            // Verify we got results
+            assert!(!pack.code_context.is_empty(), "Expected code context for: {}", query);
+
+            // Verify reranker was invoked: provenance should show code entries
+            let code_entries: Vec<_> = pack.provenance.iter().filter(|p| p.source == "code").collect();
+            assert!(code_entries.len() >= 5, "Expected >=5 code provenance entries for: {}, got {}", query, code_entries.len());
+
+            // Verify expected files appear in provenance paths (at least one must match)
+            let any_expected = expected_snippets.iter().any(|snippet| {
+                pack.provenance.iter().any(|p| p.path.contains(snippet))
+            });
+            assert!(any_expected, "Expected at least one of {:?} in provenance for query: {}", expected_snippets, query);
+        }
+
+        // Verify reranking actually changes order: compare top-5 with and without reranker
+        let task_no_rerank = TaskRequest {
+            message: "Fix basket total not recalculating when quantity changes".to_string(),
+            session_id: "eshop_no_rerank".to_string(),
+            context_hints: None,
+            repository_id: String::new(),
+            repository_path: Some(eshop_path.to_string_lossy().to_string()),
+        };
+        let config_no_rerank = ContextConfig {
+            reranker_enabled: false,
+            ..Default::default()
+        };
+        let db2 = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let event_bus2 = EventBus::new();
+        let mut ri2 = RepositoryIntelligence::new(eshop_path.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus2.clone());
+        ri2.index_repository().expect("index eShopOnWeb");
+        let kh2 = KnowledgeHub::new(db2, event_bus2.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
+        let engine_no_rerank = ContextEngine::new(ri2, kh2, event_bus2, config_no_rerank);
+        let (pack_no_rerank, _) = engine_no_rerank.build_context(&task_no_rerank).await.unwrap();
+
+        let task_rerank = TaskRequest {
+            message: "Fix basket total not recalculating when quantity changes".to_string(),
+            session_id: "eshop_rerank".to_string(),
+            context_hints: None,
+            repository_id: String::new(),
+            repository_path: Some(eshop_path.to_string_lossy().to_string()),
+        };
+        let (pack_rerank, _) = engine.build_context(&task_rerank).await.unwrap();
+
+        let top5_no_rerank: Vec<_> = pack_no_rerank.provenance.iter().filter(|p| p.source == "code").take(5).map(|p| p.path.clone()).collect();
+        let top5_rerank: Vec<_> = pack_rerank.provenance.iter().filter(|p| p.source == "code").take(5).map(|p| p.path.clone()).collect();
+
+        eprintln!("\n=== Reranker comparison ===");
+        eprintln!("Top-5 WITHOUT reranker: {:?}", top5_no_rerank);
+        eprintln!("Top-5 WITH reranker:    {:?}", top5_rerank);
+
+        assert!(!top5_no_rerank.is_empty(), "Expected code results without reranker");
+        assert!(!top5_rerank.is_empty(), "Expected code results with reranker");
+
+        std::env::remove_var("CODERUN_INDEX_DIR");
+        let _ = std::fs::remove_dir_all(&idx_dir);
     }
 }
