@@ -69,8 +69,24 @@ pub struct EngramClient {
 impl EngramClient {
     /// Create a new engram client
     pub fn new(config: EngramConfig) -> Result<Self, String> {
+        let endpoint_host = config.endpoint
+            .replace("http://", "")
+            .replace("https://", "")
+            .split('/')
+            .next()
+            .unwrap_or("localhost")
+            .to_string();
+        let retry_policy = reqwest::retry::for_host(endpoint_host)
+            .max_retries_per_request(config.max_retries)
+            .classify_fn(|req_rep| {
+                match req_rep.status() {
+                    Some(status) if status.is_server_error() => req_rep.retryable(),
+                    _ => req_rep.success(),
+                }
+            });
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(config.timeout_ms))
+            .retry(retry_policy)
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -89,48 +105,37 @@ impl EngramClient {
         }
     }
 
-    /// Save a memory entry
+    /// Save a memory entry — retries are handled automatically by reqwest
     pub async fn save_memory(&self, entry: &MemoryEntry) -> Result<(), String> {
         let url = format!("{}/api/memory/save", self.config.endpoint);
 
-        for attempt in 0..=self.config.max_retries {
-            match self.http_client.post(&url).json(entry).send().await {
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    if response.status().is_success() {
-                        debug!(
-                            namespace = %entry.namespace,
-                            key = %entry.key,
-                            "Memory saved to engram"
-                        );
-                        return Ok(());
-                    }
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    warn!(
-                        status = status,
-                        error = %error,
-                        "Engram save failed"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        attempt = attempt + 1,
-                        error = %e,
-                        "Engram save request failed"
-                    );
-                }
-            }
+        let response = self.http_client
+            .post(&url)
+            .json(entry)
+            .send()
+            .await
+            .map_err(|e| format!("Engram save request failed: {}", e))?;
 
-            // Wait before retry
-            if attempt < self.config.max_retries {
-                tokio::time::sleep(std::time::Duration::from_millis((100 * (attempt + 1)) as u64)).await;
-            }
+        if response.status().is_success() {
+            debug!(
+                namespace = %entry.namespace,
+                key = %entry.key,
+                "Memory saved to engram"
+            );
+            Ok(())
+        } else {
+            let status = response.status().as_u16();
+            let error = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            warn!(
+                status = status,
+                error = %error,
+                "Engram save failed"
+            );
+            Err(format!("Engram save failed: {} {}", status, error))
         }
-
-        Err("Failed to save memory to engram after retries".to_string())
     }
 
     /// Search memory entries

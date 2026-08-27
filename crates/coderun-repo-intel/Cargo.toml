@@ -9,6 +9,7 @@ coderun-events.workspace = true
 coderun-storage.workspace = true
 tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 regex.workspace = true
 glob.workspace = true

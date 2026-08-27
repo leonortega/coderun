@@ -268,7 +268,7 @@ impl DaemonState {
                                 };
                                 let _timer = crate::metrics::Timer::start();
                                 let eng = engine.lock().await;
-                                match eng.build_context(&task) {
+                                match eng.build_context(&task).await {
                                     Ok((pack, routing)) => {
                                         crate::metrics::global().inc_requests("PreGeneration", &routing.tier);
                                         crate::metrics::global().observe_context_tokens(pack.token_usage.total_tokens);

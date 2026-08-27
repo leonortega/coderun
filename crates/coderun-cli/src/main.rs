@@ -183,7 +183,8 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     println!("Coderun Bootstrap — {}", project_name);
     println!("═══════════════════════════════════════");
 
-    println!("[1/6] Scaffold (.coderun/, config, skills, database)");
+    // ── Step 1: Scaffold ─────────────────────────────────────────────
+    println!("[1/7] Scaffold (.coderun/, config, skills, database)");
     let coderun_dir = PathBuf::from(".coderun");
     std::fs::create_dir_all(&coderun_dir)
         .map_err(|e| format!("Failed to create .coderun directory: {}", e))?;
@@ -205,7 +206,8 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to initialize database: {}", e))?;
 
-    println!("[2/6] Repository discovery (languages, frameworks, commands)");
+    // ── Step 2: Repository discovery ─────────────────────────────────
+    println!("[2/7] Repository discovery (languages, frameworks, commands)");
     let discovery = discover_repository(&project_root);
     println!(
         "      languages: {}",
@@ -217,8 +219,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
             .join(", ")
     );
 
-    // Write discovered languages to .coderun/config.toml so tree-sitter and other
-    // language-aware components can use the actual tech stack (not hardcoded defaults).
+    // Write discovered languages to .coderun/config.toml
     if !discovery.languages.is_empty() {
         match update_config_languages(&config_path, &discovery.languages) {
             Ok(updated) => {
@@ -230,9 +231,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         }
     }
 
-    // [2b] Community skills — stack-matched via skills.sh (`npx skills`), installed into
-    // .coderun/skills so CODERUN stays the curator (opencode never loads them natively).
-    // Best-effort + fail-open: offline/missing npx never fails init.
+    // Community skills
     if no_community_skills || std::env::var("CODERUN_NO_COMMUNITY_SKILLS").map(|v| v == "1" || v == "true").unwrap_or(false) {
         println!("[2b] Community skills — skipped (--no-community-skills)");
     } else {
@@ -249,7 +248,35 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         }
     }
 
-    println!("[3/6] Indexing (full-text BM25 + symbol extraction + dependency graph)");
+    // ── Step 3: Parser validation ────────────────────────────────────
+    println!("[3/7] Parser validation (verify tree-sitter grammars)");
+    let mut parser_status: Vec<(String, bool, String)> = Vec::new();
+    for (lang_name, _count) in &discovery.languages {
+        if let Some(id) = coderun_repo_intel::registry::LanguageId::from_str(lang_name) {
+            let has_parser = id.has_parser();
+            let grammar_status = if has_parser {
+                match coderun_repo_intel::parser::validate_grammar(id) {
+                    Ok(()) => "loaded".to_string(),
+                    Err(e) => e, // e.g. "grammar load failed for Rust"
+                }
+            } else {
+                "no parser available".to_string()
+            };
+            parser_status.push((lang_name.clone(), has_parser, grammar_status));
+        } else {
+            parser_status.push((lang_name.clone(), false, "unknown language".to_string()));
+        }
+    }
+    let ready_count = parser_status.iter().filter(|(_, ready, _)| *ready).count();
+    let total_count = parser_status.len();
+    println!("      parsers ready: {}/{}", ready_count, total_count);
+    for (lang, ready, status) in &parser_status {
+        let icon = if *ready { "✓" } else { "—" };
+        println!("        {} {:<20} {}", icon, lang, status);
+    }
+
+    // ── Step 4: Indexing ─────────────────────────────────────────────
+    println!("[4/7] Indexing (full-text BM25 + symbol extraction + dependency graph)");
     let event_bus = coderun_events::EventBus::new();
     let mut repo_intel = coderun_repo_intel::RepositoryIntelligence::new(
         project_root.clone(),
@@ -267,44 +294,68 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
 
-    // RET-008: Smoke test — verify the index is searchable
-    {
-        let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("index");
-        let rid = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
-        if let Ok(idx) = coderun_storage::tantivy_index::TantivyIndex::open(&idx_path.to_string_lossy()) {
-            if let Ok(reader) = idx.reader() {
-                let test_queries = ["class", "main", "service"];
-                let mut any_hit = false;
-                for q in &test_queries {
-                    if let Ok(hits) = idx.search(&reader, q, None, 1, Some(&rid)) {
-                        if !hits.is_empty() {
-                            any_hit = true;
-                            break;
-                        }
-                    }
-                }
-                if !any_hit {
-                    println!("      ⚠ search validation failed — index built but no results for probe queries");
-                    println!("        run 'coderun doctor' to diagnose");
-                }
+    // ── Step 5: Knowledge Hub + Skills ───────────────────────────────
+    println!("[5/7] Knowledge Hub initialization + skill loading");
+    let (knowledge_seeded, _readme) = ingest_seed_documents(&project_root, &db);
+    let mut knowledge_hub = coderun_knowledge::KnowledgeHub::new(
+        coderun_storage::Database::open(&db_path)
+            .map_err(|e| format!("Failed to reopen database for Knowledge Hub: {}", e))?,
+        event_bus.clone(),
+        coderun_knowledge::KnowledgeConfig { memory_enabled: false, ..Default::default() },
+    );
+    let skills_dir = coderun_dir.join("skills");
+    let global_skills_dir = dirs().unwrap_or_else(|| PathBuf::from(".")).join("coderun").join("skills");
+    let mut skills_loaded = 0usize;
+    for dir in [&skills_dir, &global_skills_dir] {
+        if dir.is_dir() {
+            match knowledge_hub.load_skills(dir) {
+                Ok(n) => skills_loaded += n,
+                Err(e) => println!("      (skill loading from {}: {})", dir.display(), e),
             }
         }
     }
+    println!("      ✓ knowledge: {} entries seeded, {} skills loaded", knowledge_seeded, skills_loaded);
 
-    println!("[4/6] Codebase-memory MCP (graph index for agent discovery)");
-    match index_codebase_memory(&project_root) {
-        Ok((nodes, edges)) => {
-            println!("      ✓ {} nodes, {} edges indexed", nodes, edges);
+    // ── Step 6: Validation (smoke test all components) ───────────────
+    println!("[6/7] Validation queries (smoke test)");
+    let repo_id = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
+
+    // Tantivy (via RepositoryIntelligence::validate_index)
+    let ri_for_validation = coderun_repo_intel::RepositoryIntelligence::new(
+        project_root.clone(),
+        coderun_storage::Database::open(&db_path).map_err(|e| format!("DB open failed: {}", e))?,
+        coderun_events::EventBus::new(),
+    );
+    let tantivy_ok = match ri_for_validation.validate_index() {
+        Ok(stats) => {
+            let searchable = stats.doc_count > 0;
+            println!("      Tantivy:   {} ({} docs)", if searchable { "✓ searchable" } else { "✗ empty" }, stats.doc_count);
+            searchable
         }
         Err(e) => {
-            println!("      (skipped: {})", e);
+            println!("      Tantivy:   ✗ {}", e);
+            false
         }
-    }
+    };
 
-    println!("[5/6] Knowledge initialization (README, decision records)");
-    let (knowledge_seeded, _readme) = ingest_seed_documents(&project_root, &db);
+    // Symbols
+    let symbol_count = db.get_all_files().map(|f| f.len()).unwrap_or(0);
+    println!("      Symbols:   {} files tracked", symbol_count);
 
-    println!("[6/6] Repository profile");
+    // Graph
+    let _graph_ok = dep_edges > 0;
+    println!("      Graph:     {} edges", dep_edges);
+
+    // Knowledge
+    let _knowledge_ok = knowledge_seeded > 0;
+    println!("      Knowledge: {} entries", knowledge_seeded);
+
+    // Skills
+    let _skills_ok = skills_loaded > 0;
+    println!("      Skills:    {} loaded", skills_loaded);
+
+    // ── Step 7: Status report ────────────────────────────────────────
+    println!("[7/7] Repository profile");
     let profile = build_profile_json(
         &project_name,
         &discovery,
@@ -317,26 +368,31 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     let profile_path = coderun_dir.join("profile.json");
     std::fs::write(&profile_path, &profile_json)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
-    // TASK-030: knowledge is stamped with this repo's identity so retrieval stays repo-scoped
-    let repo_id = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
     let _ = db.store_knowledge("profile", "repository-profile", &profile_json, 1.0, "bootstrap", &repo_id);
 
     println!();
     println!("✓ Bootstrap complete in {}ms", started.elapsed().as_millis());
     println!();
-    println!("  Files indexed:     {}", stats.files_indexed);
-    println!("  Symbols extracted: {}", stats.symbols_extracted);
-    println!("  Dependency edges:  {}", dep_edges);
+    println!("┌─────────────────────────────────────────┐");
+    let status_label = if tantivy_ok && symbol_count > 0 { "READY" } else { "PARTIAL" };
+    println!("│ Repository Status: {:<21} │", status_label);
+    println!("├─────────────────────────────────────────┤");
+    println!("│ Tree-sitter:  {:<24} │", format!("{}/{} grammars", ready_count, total_count));
+    println!("│ Symbols:      {:<24} │", format!("{} extracted", stats.symbols_extracted));
+    println!("│ Graph:        {:<24} │", format!("{} edges", dep_edges));
+    println!("│ Tantivy:      {:<24} │", format!("{} files", stats.files_indexed));
+    println!("│ Knowledge:    {:<24} │", format!("{} entries", knowledge_seeded));
+    println!("│ Skills:       {:<24} │", format!("{} loaded", skills_loaded));
+    println!("└─────────────────────────────────────────┘");
+    println!();
 
-    // Show languages with parser status
     if !discovery.languages.is_empty() {
-        println!();
         println!("  Languages detected:");
         for (lang_name, count) in &discovery.languages {
-            let has_parser = coderun_repo_intel::registry::LanguageId::from_str(lang_name)
-                .map(|id| id.has_parser())
-                .unwrap_or(false);
-            let status = if has_parser { "READY" } else { "metadata/search" };
+            let status = parser_status.iter()
+                .find(|(l, _, _)| l == lang_name)
+                .map(|(_, ready, _)| if *ready { "READY" } else { "no parser" })
+                .unwrap_or("unknown");
             println!("    {:<20} {:>5} files   {}", lang_name, count, status);
         }
     }
@@ -356,9 +412,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         "  Test command:      {}",
         discovery.test_command.as_deref().unwrap_or("-")
     );
-    println!("  Knowledge seeded:  {} entries", knowledge_seeded);
     println!("  Profile:           {}", profile_path.display());
-    // TASK-038: per-repo artifact home — generated deliverables live inside the analyzed repo
     match ensure_artifact_dir(&project_root, "context") {
         Ok(dir) => {
             println!("  Artifacts:         {}", dir.display());
@@ -1077,7 +1131,8 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool) -> Result<(), String
         };
         let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), ctx_config);
         let task = coderun_core::TaskRequest { message: prompt.to_string(), session_id: effective_session.clone(), context_hints: None, repository_id: String::new(), repository_path: None };
-        let (pack, routing) = ctx.build_context(&task).map_err(|e| e.to_string())?;
+        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+        let (pack, routing) = rt.block_on(ctx.build_context(&task)).map_err(|e| e.to_string())?;
         println!("Skills matched:");
         if pack.behavioral_skills.is_empty() { println!("  (none — deduped or no match)"); } else { println!("  {}", pack.behavioral_skills.lines().next().unwrap_or("").trim()); if pack.behavioral_skills.contains("FROZEN PREFIX END") { println!("  [frozen-prefix boundary present ✓]"); } }
         println!();

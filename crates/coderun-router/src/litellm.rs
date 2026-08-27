@@ -96,6 +96,24 @@ impl LiteLLMClient {
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(config.timeout_ms));
 
+        // Configure automatic retries on connection errors and 5xx responses
+        let endpoint_host = config.endpoint
+            .replace("http://", "")
+            .replace("https://", "")
+            .split('/')
+            .next()
+            .unwrap_or("localhost")
+            .to_string();
+        let retry_policy = reqwest::retry::for_host(endpoint_host)
+            .max_retries_per_request(config.max_retries)
+            .classify_fn(|req_rep| {
+                match req_rep.status() {
+                    Some(status) if status.is_server_error() => req_rep.retryable(),
+                    _ => req_rep.success(),
+                }
+            });
+        builder = builder.retry(retry_policy);
+
         // Add API key header if provided
         if let Some(ref api_key) = config.api_key {
             let key = api_key.clone();
@@ -153,55 +171,43 @@ impl LiteLLMClient {
         }
     }
 
-    /// Send a completion request
+    /// Send a completion request — retries are handled automatically by reqwest
     pub async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, String> {
         let url = format!("{}/v1/chat/completions", self.config.endpoint);
 
-        for attempt in 0..=self.config.max_retries {
-            match self.http_client.post(&url).json(request).send().await {
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    if response.status().is_success() {
-                        let result: ModelResponse = response
-                            .json()
-                            .await
-                            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        let response = self.http_client
+            .post(&url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| format!("LiteLLM request failed: {}", e))?;
 
-                        debug!(
-                            model = %request.model,
-                            tokens = result.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
-                            "LiteLLM completion successful"
-                        );
+        if response.status().is_success() {
+            let result: ModelResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-                        return Ok(result);
-                    }
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    warn!(
-                        status = status,
-                        error = %error,
-                        "LiteLLM completion failed"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        attempt = attempt + 1,
-                        error = %e,
-                        "LiteLLM request failed"
-                    );
-                }
-            }
+            debug!(
+                model = %request.model,
+                tokens = result.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
+                "LiteLLM completion successful"
+            );
 
-            // Wait before retry
-            if attempt < self.config.max_retries {
-                tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt + 1) as u64))
-                    .await;
-            }
+            Ok(result)
+        } else {
+            let status = response.status().as_u16();
+            let error = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            warn!(
+                status = status,
+                error = %error,
+                "LiteLLM completion failed"
+            );
+            Err(format!("LiteLLM completion failed: {} {}", status, error))
         }
-
-        Err("LiteLLM completion failed after retries".to_string())
     }
 
     /// Select model based on routing decision

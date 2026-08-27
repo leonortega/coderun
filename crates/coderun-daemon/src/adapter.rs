@@ -438,7 +438,7 @@ async fn handle_pre_generation(
     // Metrics + rate-limit + audit (best-effort, off-hot-path)
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.read().await;
-    let (context_pack, routing_decision) = engine.build_context(&task)?;
+    let (context_pack, routing_decision) = engine.build_context(&task).await?;
     crate::metrics::global().inc_requests("PreGeneration", &routing_decision.tier);
 
     // TASK-031/F-2: zero-value rewrite suppression

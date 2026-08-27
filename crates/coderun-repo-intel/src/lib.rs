@@ -1,4 +1,4 @@
-mod parser;
+pub mod parser;
 pub mod graph;
 pub mod lsp;
 pub mod registry;
@@ -143,6 +143,23 @@ impl RepositoryIntelligence {
         &self.repository_id
     }
 
+    /// Validate that the index exists and is populated (P0 #2 / P0 #3 proactive detection).
+    /// Returns `Ok(IndexStats)` if valid; `Err` if the index directory is missing or empty.
+    pub fn validate_index(&self) -> Result<coderun_storage::tantivy_index::IndexStats, String> {
+        let path = default_index_path();
+        if !std::path::Path::new(&path).exists() {
+            return Err("index not built".to_string());
+        }
+        let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open(&path)
+            .map_err(|e| format!("index open failed: {}", e))?;
+        let reader = tantivy_index.reader().map_err(|e| format!("reader failed: {}", e))?;
+        let stats = tantivy_index.stats(&reader).map_err(|e| format!("stats failed: {}", e))?;
+        if stats.doc_count == 0 {
+            return Err("index is empty".to_string());
+        }
+        Ok(stats)
+    }
+
     /// Index the repository (full or incremental) — wires tantivy BM25 in-process, incremental + MkDocs ingestion (v0.5.0)
     pub fn index_repository(&mut self) -> Result<IndexStats, String> {
         let start = Instant::now();
@@ -178,9 +195,9 @@ impl RepositoryIntelligence {
             // Classify file using unified registry
             let file_class = classify_file(&path);
 
-            // Skip binary, vendor, dependency, and generated files
+            // Skip binary, vendor, dependency, generated, and stylesheet files
             match file_class {
-                FileClass::Binary | FileClass::Vendor | FileClass::Dependency | FileClass::Generated => {
+                FileClass::Binary | FileClass::Vendor | FileClass::Dependency | FileClass::Generated | FileClass::Stylesheet => {
                     debug!(path = %path_str, class = ?file_class, "Skipping file");
                     files_skipped += 1;
                     continue;
@@ -261,7 +278,19 @@ impl RepositoryIntelligence {
                 let _ = idx.delete_document(writer, &path_str, &self.repository_id);
                 let lang_str = language.as_deref().unwrap_or("text");
                 let sym_names: Vec<String> = extract_symbols(&content, &self.patterns, language.as_deref()).iter().map(|s| s.name.clone()).collect();
-                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names, &self.repository_id);
+                let file_class_str = match &file_class {
+                    FileClass::Source => "Source",
+                    FileClass::Test => "Test",
+                    FileClass::Config => "Config",
+                    FileClass::Documentation => "Documentation",
+                    FileClass::Generated => "Generated",
+                    FileClass::Vendor => "Vendor",
+                    FileClass::Dependency => "Dependency",
+                    FileClass::Binary => "Binary",
+                    FileClass::Stylesheet => "Stylesheet",
+                    FileClass::Unknown => "Unknown",
+                };
+                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names, &self.repository_id, file_class_str);
             }
 
             files_indexed += 1;
@@ -319,7 +348,7 @@ impl RepositoryIntelligence {
                     if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
                         let doc_key = format!("docs:{}", rel);
                         let _ = idx.delete_document(writer, &doc_key, &self.repository_id);
-                        let _ = idx.add_document(writer, &doc_key, &content, "markdown", &[rel.clone()], &self.repository_id);
+                        let _ = idx.add_document(writer, &doc_key, &content, "markdown", &[rel.clone()], &self.repository_id, "Documentation");
                     }
                 }
             }

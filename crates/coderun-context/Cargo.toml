@@ -11,6 +11,7 @@ coderun-repo-intel.workspace = true
 coderun-knowledge.workspace = true
 coderun-skills.workspace = true
 coderun-router.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 serde.workspace = true
 sha2.workspace = true

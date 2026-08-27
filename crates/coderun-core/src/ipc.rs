@@ -122,8 +122,14 @@ pub enum RetrievalStatus {
     /// Search ran successfully but found nothing
     #[default]
     NoMatch,
-    /// No index exists for this repository
+    /// No index exists for this repository (init never ran or index was deleted)
+    IndexNotBuilt,
+    /// Index exists but is empty or unreachable
     IndexUnavailable,
+    /// Tree-sitter grammars failed to load for some languages
+    ParserFailed(Vec<String>),
+    /// Knowledge Hub is not initialized or unavailable
+    KnowledgeHubUnavailable,
     /// Search threw an error (e.g. query parse failure)
     RetrievalFailed(String),
     /// Used a fallback method (e.g. ripgrep after Tantivy miss)

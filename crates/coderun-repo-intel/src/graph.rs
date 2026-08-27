@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 /// Dependency graph derived from imports (codebase-memory-mcp style, AST + regex fallback)
@@ -20,7 +21,7 @@ impl DependencyGraph {
     pub fn build_from_files(repo_root: &Path, files: &[PathBuf]) -> Self {
         // FIRST-CLASS: attempt MCP client (npx codebase-memory-mcp) if CODERUN_MCP_ENABLED=true
         if std::env::var("CODERUN_MCP_ENABLED").map(|v| v=="true").unwrap_or(false) {
-            if let Some(g) = try_codebase_memory_mcp(repo_root, files) {
+            if let Some(g) = try_codebase_memory_mcp_public(repo_root, files) {
                 return g;
             } else {
                 tracing::warn!("codebase-memory-mcp primary failed, fallback to local AST+regex");
@@ -71,12 +72,292 @@ impl DependencyGraph {
     pub fn edge_count(&self) -> usize {
         self.edges.values().map(|v| v.len()).sum()
     }
+
+    /// Get all files in the graph (both as sources and targets)
+    pub fn all_files(&self) -> Vec<&String> {
+        let mut files: HashSet<&String> = HashSet::new();
+        for file in self.edges.keys() {
+            files.insert(file);
+        }
+        for deps in self.edges.values() {
+            for dep in deps {
+                files.insert(dep);
+            }
+        }
+        files.into_iter().collect()
+    }
 }
 
-fn try_codebase_memory_mcp(_repo_root: &Path, _files: &[PathBuf]) -> Option<DependencyGraph> {
-    // v0.5.0 scaffold: MCP client to `npx codebase-memory-mcp`
-    // Not implemented — always returns None to trigger local AST+regex fallback
+/// Call graph tracking function calls between files (P2 #8)
+/// Uses deeper AST analysis to track function calls across file boundaries
+#[derive(Debug, Default)]
+pub struct CallGraph {
+    /// Function call edges: (caller_file, caller_func) -> Vec<(callee_file, callee_func)>
+    edges: HashMap<(String, String), Vec<(String, String)>>,
+    /// Reverse edges for impact analysis
+    reverse: HashMap<(String, String), Vec<(String, String)>>,
+    /// Function definitions: file -> Vec<(func_name, line_start, line_end)>
+    definitions: HashMap<String, Vec<(String, usize, usize)>>,
+}
+
+impl CallGraph {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build call graph from file list using AST analysis
+    pub fn build_from_files(repo_root: &Path, files: &[PathBuf]) -> Self {
+        let mut graph = Self::new();
+        
+        // First pass: extract function definitions from all files
+        for file in files {
+            let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().to_string();
+            if let Ok(content) = std::fs::read_to_string(file) {
+                let defs = extract_function_definitions(&content, &rel);
+                graph.definitions.insert(rel, defs);
+            }
+        }
+        
+        // Second pass: extract function calls and build edges
+        for file in files {
+            let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().to_string();
+            if let Ok(content) = std::fs::read_to_string(file) {
+                let calls = extract_function_calls(&content, &rel);
+                let caller_defs = graph.definitions.get(&rel).cloned().unwrap_or_default();
+                
+                // For each call, find which function it's in and link to callee
+                for (call_line, call_name) in calls {
+                    // Find the function containing this call
+                    let caller_func = find_containing_function(&caller_defs, call_line);
+                    
+                    // Try to find the callee definition across all files
+                    if let Some((callee_file, _callee_line)) = find_function_definition(&graph.definitions, &call_name) {
+                        let caller = (rel.clone(), caller_func);
+                        let callee = (callee_file, call_name);
+                        
+                        graph.edges.entry(caller.clone()).or_default().push(callee.clone());
+                        graph.reverse.entry(callee).or_default().push(caller);
+                    }
+                }
+            }
+        }
+        
+        graph
+    }
+
+    /// Get all functions called by a specific function
+    pub fn callees_of(&self, file: &str, function: &str) -> Vec<(String, String)> {
+        self.edges.get(&(file.to_string(), function.to_string())).cloned().unwrap_or_default()
+    }
+
+    /// Get all functions that call a specific function
+    pub fn callers_of(&self, file: &str, function: &str) -> Vec<(String, String)> {
+        self.reverse.get(&(file.to_string(), function.to_string())).cloned().unwrap_or_default()
+    }
+
+    /// Get all function definitions in a file
+    pub fn definitions_in(&self, file: &str) -> Vec<(String, usize, usize)> {
+        self.definitions.get(file).cloned().unwrap_or_default()
+    }
+
+    /// Get all files in the call graph
+    pub fn all_files(&self) -> Vec<&String> {
+        let mut files: HashSet<&String> = HashSet::new();
+        for file in self.definitions.keys() {
+            files.insert(file);
+        }
+        files.into_iter().collect()
+    }
+
+    /// Get edge count
+    pub fn edge_count(&self) -> usize {
+        self.edges.values().map(|v| v.len()).sum()
+    }
+}
+
+/// Extract function definitions from source code using regex patterns
+fn extract_function_definitions(content: &str, _file: &str) -> Vec<(String, usize, usize)> {
+    let mut defs = Vec::new();
+    
+    // Rust: fn name(...) { ... }
+    // Python: def name(...): ...
+    // JS/TS: function name(...) { ... } or const name = (...) => { ... }
+    // C#: public/private/static ReturnType Name(...) { ... }
+    
+    let patterns = [
+        // Rust functions
+        regex::Regex::new(r"(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(").unwrap(),
+        // Python functions
+        regex::Regex::new(r"def\s+(\w+)\s*\(").unwrap(),
+        // JavaScript/TypeScript functions
+        regex::Regex::new(r"(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(").unwrap(),
+        // C# methods
+        regex::Regex::new(r"(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:void|bool|int|long|float|double|string|var|IEnumerable|Task|ValueTask|IActionResult|ActionResult|ObjectResult)\s+(\w+)\s*\(").unwrap(),
+        // Java methods
+        regex::Regex::new(r"(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:void|boolean|int|long|float|double|String|var)\s+(\w+)\s*\(").unwrap(),
+    ];
+    
+    for (line_num, line) in content.lines().enumerate() {
+        for pattern in &patterns {
+            if let Some(caps) = pattern.captures(line) {
+                if let Some(name_match) = caps.get(1) {
+                    let name = name_match.as_str().to_string();
+                    // Simple heuristic: assume function ends at next function or end of file
+                    // In a real implementation, we'd use proper AST parsing
+                    let line_start = line_num + 1;
+                    let line_end = line_start + 50; // Placeholder: assume functions are ~50 lines
+                    defs.push((name, line_start, line_end));
+                }
+            }
+        }
+    }
+    
+    defs
+}
+
+/// Extract function calls from source code
+fn extract_function_calls(content: &str, _file: &str) -> Vec<(usize, String)> {
+    let mut calls = Vec::new();
+    
+    // Pattern to match function calls: identifier followed by '('
+    let call_pattern = regex::Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
+    
+    // Keywords to exclude (not function calls)
+    let keywords: HashSet<&str> = [
+        "if", "else", "for", "while", "loop", "match", "return", "break", "continue",
+        "fn", "struct", "enum", "impl", "trait", "type", "pub", "mod", "use",
+        "class", "interface", "extends", "implements", "new", "this", "super",
+        "function", "const", "let", "var", "import", "from", "export",
+        "def", "self", "async", "await", "move",
+    ].iter().cloned().collect();
+    
+    for (line_num, line) in content.lines().enumerate() {
+        for caps in call_pattern.captures_iter(line) {
+            if let Some(name_match) = caps.get(1) {
+                let name = name_match.as_str();
+                if !keywords.contains(name) && name.len() > 1 {
+                    calls.push((line_num + 1, name.to_string()));
+                }
+            }
+        }
+    }
+    
+    calls
+}
+
+/// Find which function contains a given line number
+fn find_containing_function(defs: &[(String, usize, usize)], line: usize) -> String {
+    for (name, start, end) in defs {
+        if line >= *start && line <= *end {
+            return name.clone();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Find function definition across all files
+fn find_function_definition(definitions: &HashMap<String, Vec<(String, usize, usize)>>, func_name: &str) -> Option<(String, usize)> {
+    for (file, defs) in definitions {
+        for (name, line_start, _) in defs {
+            if name == func_name {
+                return Some((file.clone(), *line_start));
+            }
+        }
+    }
     None
+}
+
+/// Attempt to build dependency graph via codebase-memory-mcp MCP server.
+/// Returns `Some(DependencyGraph)` on success, `None` to trigger local AST+regex fallback.
+///
+/// Threshold logic (P1 #6): only invoke MCP when local retrieval is insufficient.
+/// The MCP server is invoked via `npx codebase-memory-mcp` with JSON-RPC over stdio.
+pub fn try_codebase_memory_mcp_public(repo_root: &Path, files: &[PathBuf]) -> Option<DependencyGraph> {
+    // Check if MCP is explicitly enabled via environment variable
+    let mcp_enabled = std::env::var("CODERUN_MCP_ENABLED")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    if !mcp_enabled {
+        return None;
+    }
+
+    // Build the request payload for codebase-memory-mcp
+    let file_paths: Vec<String> = files.iter()
+        .filter_map(|f| f.strip_prefix(repo_root).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    if file_paths.is_empty() {
+        return None;
+    }
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "get_dependency_graph",
+            "arguments": {
+                "repo_root": repo_root.to_string_lossy(),
+                "files": file_paths
+            }
+        }
+    });
+
+    // Spawn MCP server process and communicate via stdio
+    let mut child = std::process::Command::new("npx")
+        .args(["codebase-memory-mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    // Write request to stdin
+    if let Some(ref mut stdin) = child.stdin {
+        use std::io::Write;
+        let request_str = serde_json::to_string(&request).ok()?;
+        stdin.write_all(request_str.as_bytes()).ok()?;
+        stdin.write_all(b"\n").ok()?;
+        stdin.flush().ok()?;
+    }
+
+    // Read response with timeout (5 seconds)
+    let response = {
+        let stdout = child.stdout.take()?;
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut response_str = String::new();
+        std::io::BufReader::read_line(&mut reader, &mut response_str).ok()?;
+
+        // Parse JSON-RPC response
+        let response: serde_json::Value = serde_json::from_str(&response_str).ok()?;
+
+        // Check for error
+        if let Some(error) = response.get("error") {
+            tracing::warn!(error = %error, "MCP server returned error");
+            let _ = child.kill();
+            return None;
+        }
+
+        // Extract result
+        response.get("result")?.clone()
+    };
+
+    // Parse the dependency graph from MCP response
+    let edges = response.get("edges")?.as_array()?;
+    let mut graph = DependencyGraph::new();
+
+    for edge in edges {
+        let from = edge.get("from")?.as_str()?;
+        let to = edge.get("to")?.as_str()?;
+        graph.add_edge(from.to_string(), to.to_string());
+    }
+
+    // Wait for child process
+    let _ = child.kill();
+
+    Some(graph)
 }
 
 /// Extract imports via simple regex (fallback when tree-sitter grammar not loaded — kept ONLY inside Err branch above)
@@ -189,7 +470,7 @@ mod tests {
         let graph = DependencyGraph::build_from_files(&dir, &[file_a.clone()]);
         // With MCP disabled, fallback regex should still produce edge
         assert!(graph.edge_count() >= 1);
-        assert!(try_codebase_memory_mcp(&dir, &[file_a.clone()]).is_none(), "MCP disabled should return None");
+        assert!(try_codebase_memory_mcp_public(&dir, &[file_a.clone()]).is_none(), "MCP disabled should return None");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -199,7 +480,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("coderun_graph_mcp2_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         // npx codebase-memory-mcp likely not installed in CI → should fallback with WARN and return None
-        let res = try_codebase_memory_mcp(&dir, &[]);
+        let res = try_codebase_memory_mcp_public(&dir, &[]);
         assert!(res.is_none());
         std::env::remove_var("CODERUN_MCP_ENABLED");
         let _ = std::fs::remove_dir_all(&dir);

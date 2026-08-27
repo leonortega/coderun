@@ -169,6 +169,7 @@ impl LanguageId {
 // ── Language Definition ──────────────────────────────────────────────────
 
 /// Static definition of a supported language.
+#[derive(Debug, Clone)]
 pub struct LanguageDefinition {
     pub id: LanguageId,
     pub extensions: &'static [&'static str],
@@ -183,37 +184,157 @@ impl LanguageDefinition {
 
 // ── Parser Registry ──────────────────────────────────────────────────────
 
-/// Get tree-sitter language for a LanguageId
+/// Get tree-sitter language for a LanguageId (backward-compatible free function).
+/// Prefer `ParserRegistry::get_language()` for new code.
 pub fn get_ts_language(id: LanguageId) -> Option<Language> {
-    match id {
-        LanguageId::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
-        LanguageId::TypeScript | LanguageId::TypeScriptReact => {
-            Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+    ParserRegistry::default().get_language(id)
+}
+
+/// Extensible parser registry — manages language definitions and grammar loading.
+/// Languages can be registered at runtime via `register_language()`.
+#[derive(Debug, Clone)]
+pub struct ParserRegistry {
+    definitions: Vec<LanguageDefinition>,
+    grammar_loaders: std::collections::HashMap<LanguageId, fn() -> Option<Language>>,
+}
+
+impl ParserRegistry {
+    /// Create a new registry with all built-in languages pre-registered.
+    pub fn new() -> Self {
+        let mut registry = Self {
+            definitions: Vec::new(),
+            grammar_loaders: std::collections::HashMap::new(),
+        };
+        registry.register_builtins();
+        registry
+    }
+
+    /// Register a built-in language with its grammar loader.
+    fn register_builtin(&mut self, def: LanguageDefinition, loader: fn() -> Option<Language>) {
+        self.grammar_loaders.insert(def.id, loader);
+        self.definitions.push(def);
+    }
+
+    /// Register all built-in languages.
+    fn register_builtins(&mut self) {
+        // Source languages with parsers
+        self.register_builtin(LanguageDefinition::new(LanguageId::Rust, &["rs"], &["Cargo.toml"]), || Some(tree_sitter_rust::LANGUAGE.into()));
+        self.register_builtin(LanguageDefinition::new(LanguageId::TypeScript, &["ts", "mts", "cts"], &[]), || Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()));
+        self.register_builtin(LanguageDefinition::new(LanguageId::TypeScriptReact, &["tsx"], &[]), || Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()));
+        self.register_builtin(LanguageDefinition::new(LanguageId::JavaScript, &["js", "mjs", "cjs"], &["package.json"]), || Some(tree_sitter_javascript::LANGUAGE.into()));
+        self.register_builtin(LanguageDefinition::new(LanguageId::JavaScriptReact, &["jsx"], &[]), || Some(tree_sitter_javascript::LANGUAGE.into()));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Python, &["py", "pyi"], &["pyproject.toml", "setup.py", "requirements.txt"]), || Some(tree_sitter_python::LANGUAGE.into()));
+        self.register_builtin(LanguageDefinition::new(LanguageId::CSharp, &["cs"], &["*.csproj", "*.sln"]), || Some(tree_sitter_c_sharp::LANGUAGE.into()));
+        #[cfg(feature = "extended-languages")]
+        {
+            self.register_builtin(LanguageDefinition::new(LanguageId::Go, &["go"], &["go.mod"]), || Some(tree_sitter_go::LANGUAGE.into()));
+            self.register_builtin(LanguageDefinition::new(LanguageId::Java, &["java"], &["pom.xml", "build.gradle"]), || Some(tree_sitter_java::LANGUAGE.into()));
+            self.register_builtin(LanguageDefinition::new(LanguageId::C, &["c", "h"], &[]), || Some(tree_sitter_c::LANGUAGE.into()));
+            self.register_builtin(LanguageDefinition::new(LanguageId::Cpp, &["cpp", "cc", "cxx", "hpp"], &[]), || Some(tree_sitter_cpp::LANGUAGE.into()));
         }
-        LanguageId::JavaScript | LanguageId::JavaScriptReact => {
-            Some(tree_sitter_javascript::LANGUAGE.into())
+        // Source languages without parsers (regex fallback)
+        self.register_builtin(LanguageDefinition::new(LanguageId::Ruby, &["rb"], &["Gemfile"]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Php, &["php"], &["composer.json"]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Swift, &["swift"], &["Package.swift"]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Kotlin, &["kt", "kts"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Scala, &["scala"], &["build.sbt"]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Haskell, &["hs"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Elixir, &["ex", "exs"], &["mix.exs"]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Erlang, &["erl"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Lua, &["lua"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Zig, &["zig"], &["build.zig"]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Nim, &["nim"], &["*.nimble"]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::R, &["r", "R"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Ocaml, &["ml"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Clojure, &["clj"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::FSharp, &["fs", "fsx"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Vb, &["vb"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Sql, &["sql"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Shell, &["sh", "bash", "zsh"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Protobuf, &["proto"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::GraphQL, &["graphql", "gql"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Terraform, &["tf", "hcl"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Vue, &["vue"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Svelte, &["svelte"], &[]), || None);
+        // Non-code (metadata/search only)
+        self.register_builtin(LanguageDefinition::new(LanguageId::Markdown, &["md"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Yaml, &["yaml", "yml"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Toml, &["toml"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Json, &["json"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Xml, &["xml"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Html, &["html"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Css, &["css"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Scss, &["scss"], &[]), || None);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Text, &["txt"], &[]), || None);
+    }
+
+    /// Register a new language at runtime.
+    /// Returns `true` if the language was registered, `false` if already present.
+    pub fn register_language(&mut self, def: LanguageDefinition, loader: Option<fn() -> Option<Language>>) -> bool {
+        if self.definitions.iter().any(|d| d.id == def.id) {
+            return false;
         }
-        LanguageId::Python => Some(tree_sitter_python::LANGUAGE.into()),
-        LanguageId::CSharp => Some(tree_sitter_c_sharp::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        LanguageId::Go => Some(tree_sitter_go::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        LanguageId::Java => Some(tree_sitter_java::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        LanguageId::C => Some(tree_sitter_c::LANGUAGE.into()),
-        #[cfg(feature = "extended-languages")]
-        LanguageId::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
-        _ => {
-            #[cfg(not(feature = "extended-languages"))]
-            if matches!(id, LanguageId::Go | LanguageId::Java | LanguageId::C | LanguageId::Cpp) {
-                tracing::warn!(language = id.as_str(), "requires --features extended-languages; fallback to regex");
+        if let Some(f) = loader {
+            self.grammar_loaders.insert(def.id, f);
+        }
+        self.definitions.push(def);
+        true
+    }
+
+    /// Get tree-sitter language for a LanguageId using this registry's loaders.
+    pub fn get_language(&self, id: LanguageId) -> Option<Language> {
+        if let Some(loader) = self.grammar_loaders.get(&id) {
+            return loader();
+        }
+        None
+    }
+
+    /// List all available languages (with parser support status).
+    pub fn list_available_languages(&self) -> Vec<(LanguageId, bool)> {
+        self.definitions.iter().map(|d| (d.id, d.id.has_parser())).collect()
+    }
+
+    /// List languages that have tree-sitter parsers loaded.
+    pub fn list_with_parsers(&self) -> Vec<LanguageId> {
+        self.definitions.iter()
+            .filter(|d| self.get_language(d.id).is_some())
+            .map(|d| d.id)
+            .collect()
+    }
+
+    /// Look up language definition by file extension.
+    pub fn language_by_extension(&self, ext: &str) -> Option<&LanguageDefinition> {
+        self.definitions.iter().find(|def| def.extensions.contains(&ext))
+    }
+
+    /// Look up language definition by manifest filename.
+    pub fn language_by_manifest(&self, filename: &str) -> Option<&LanguageDefinition> {
+        self.definitions.iter().find(|def| def.filenames.contains(&filename))
+    }
+
+    /// Detect language from a file path using this registry.
+    pub fn detect_language(&self, path: &Path) -> Option<&LanguageDefinition> {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if let Some(def) = self.language_by_manifest(name) {
+                return Some(def);
             }
-            None
         }
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if let Some(def) = self.language_by_extension(ext) {
+                return Some(def);
+            }
+        }
+        None
     }
 }
 
-/// Static registry of all known languages.
+impl Default for ParserRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Static registry of all known languages (backward-compatible constant).
 pub const LANGUAGE_REGISTRY: &[LanguageDefinition] = &[
     // ── Source languages with parsers ──
     LanguageDefinition::new(LanguageId::Rust, &["rs"], &["Cargo.toml"]),
@@ -304,11 +425,12 @@ pub enum FileClass {
     Config,
     Documentation,
     Binary,
+    Stylesheet,
     Unknown,
 }
 
 /// Directories that indicate generated/vendor/dependency code
-const VENDOR_DIRS: &[&str] = &["vendor", "node_modules", "third_party", "extern", "external"];
+const VENDOR_DIRS: &[&str] = &["vendor", "node_modules", "third_party", "extern", "external", ".git", ".svn", ".hg", "__pycache__", ".cache", ".coderun", ".vscode", ".idea", ".vs", ".claude", ".devcontainer"];
 const GENERATED_DIRS: &[&str] = &["generated", "gen", "auto-generated", "__generated__"];
 const DEP_DIRS: &[&str] = &["target", "bin", "obj", "dist", "build", ".gradle", ".next", ".nuxt"];
 const TEST_DIRS: &[&str] = &["test", "tests", "__tests__", "test_data", "testdata", "fixtures", "spec"];
@@ -327,6 +449,17 @@ pub fn classify_file(path: &Path) -> FileClass {
             "ico" | "pdf" | "zip" | "tar" | "gz" | "woff" | "woff2" | "ttf"
         ) {
             return FileClass::Binary;
+        }
+        // Stylesheet files — never useful for code search, exclude from index
+        if matches!(ext, "css" | "scss" | "less" | "sass" | "styl") {
+            return FileClass::Stylesheet;
+        }
+    }
+
+    // Check for dotfiles (hidden config files like .editorconfig, .gitignore, etc.)
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if name.starts_with('.') && name.len() > 1 {
+            return FileClass::Config;
         }
     }
 
@@ -424,5 +557,52 @@ mod tests {
                 assert!(language_by_extension(ext).is_some(), "extension {} not found", ext);
             }
         }
+    }
+
+    #[test]
+    fn test_parser_registry_new_has_all_builtins() {
+        let registry = ParserRegistry::new();
+        let langs = registry.list_available_languages();
+        assert!(langs.len() >= 30, "should have all built-in languages");
+        // Verify key languages are present
+        assert!(langs.iter().any(|(id, _)| *id == LanguageId::Rust));
+        assert!(langs.iter().any(|(id, _)| *id == LanguageId::Python));
+        assert!(langs.iter().any(|(id, _)| *id == LanguageId::CSharp));
+    }
+
+    #[test]
+    fn test_parser_registry_get_language() {
+        let registry = ParserRegistry::new();
+        assert!(registry.get_language(LanguageId::Rust).is_some());
+        assert!(registry.get_language(LanguageId::Python).is_some());
+        assert!(registry.get_language(LanguageId::Markdown).is_none());
+    }
+
+    #[test]
+    fn test_parser_registry_register_custom_language() {
+        let mut registry = ParserRegistry::new();
+        let def = LanguageDefinition::new(LanguageId::Zig, &["zig"], &["build.zig"]);
+        // Zig is already registered, so register_language should return false
+        assert!(!registry.register_language(def, None));
+        // Verify list_with_parsers returns languages with loaded grammars
+        let with_parsers = registry.list_with_parsers();
+        assert!(with_parsers.contains(&LanguageId::Rust));
+    }
+
+    #[test]
+    fn test_parser_registry_detect_language() {
+        use std::path::PathBuf;
+        let registry = ParserRegistry::new();
+        assert_eq!(registry.detect_language(&PathBuf::from("src/main.rs")).unwrap().id, LanguageId::Rust);
+        assert_eq!(registry.detect_language(&PathBuf::from("app.py")).unwrap().id, LanguageId::Python);
+        assert!(registry.detect_language(&PathBuf::from("unknown.xyz")).is_none());
+    }
+
+    #[test]
+    fn test_parser_registry_language_by_extension() {
+        let registry = ParserRegistry::new();
+        assert_eq!(registry.language_by_extension("rs").unwrap().id, LanguageId::Rust);
+        assert_eq!(registry.language_by_extension("cs").unwrap().id, LanguageId::CSharp);
+        assert!(registry.language_by_extension("xyz").is_none());
     }
 }

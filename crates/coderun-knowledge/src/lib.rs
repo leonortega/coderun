@@ -229,6 +229,11 @@ impl KnowledgeHub {
         Ok(entries)
     }
 
+    /// Check if the Knowledge Hub has any seeded knowledge for this repository (P0 #3 proactive detection)
+    pub fn is_initialized(&self, repository_id: Option<&str>) -> bool {
+        self.db.count_knowledge(repository_id).unwrap_or(0) > 0
+    }
+
     /// Try engram HTTP search with 2s timeout, fail-open to local only (spec §3) — FIRST-CLASS v0.5.0
     /// Primary: `EngramClient::search_memory()` via HTTP `POST /api/memory/search` with 2s timeout.
     /// Fallback: `db.search_memory()` LIKE only on Err/timeout with WARN.

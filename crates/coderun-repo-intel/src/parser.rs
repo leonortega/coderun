@@ -1,6 +1,30 @@
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use tree_sitter::{Language, Parser};
 
 use crate::registry::{LanguageId, get_ts_language};
+
+// ── Language Cache ──────────────────────────────────────────────────────
+
+/// Thread-safe cache of resolved tree-sitter Language objects.
+/// Avoids repeated FFI lookups when parsing many files of the same language.
+fn language_cache() -> &'static Mutex<HashMap<LanguageId, Language>> {
+    static CACHE: OnceLock<Mutex<HashMap<LanguageId, Language>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_cached_language(id: LanguageId) -> Option<Language> {
+    {
+        let cache = language_cache().lock().unwrap();
+        if let Some(lang) = cache.get(&id) {
+            return Some(lang.clone());
+        }
+    }
+    let lang = get_ts_language(id)?;
+    let mut cache = language_cache().lock().unwrap();
+    cache.entry(id).or_insert_with(|| lang.clone());
+    cache.get(&id).cloned()
+}
 
 // ── Backward-compatible get_language ──────────────────────────────────────
 
@@ -9,6 +33,17 @@ use crate::registry::{LanguageId, get_ts_language};
 pub fn get_language(language: &str) -> Option<Language> {
     let id = LanguageId::from_str(language)?;
     get_ts_language(id)
+}
+
+// ── Grammar validation (P0 #2) ─────────────────────────────────────────────
+
+/// Validate that a tree-sitter grammar can be loaded for the given language.
+/// Returns `Ok(())` if the grammar loads successfully, `Err` with details otherwise.
+pub fn validate_grammar(id: LanguageId) -> Result<(), String> {
+    match get_ts_language(id) {
+        Some(_lang) => Ok(()),
+        None => Err(format!("grammar load failed for {:?}", id)),
+    }
 }
 
 // ── AST Symbol Extraction ────────────────────────────────────────────────
@@ -24,7 +59,12 @@ pub struct AstSymbol {
 
 /// Extract symbols from source code using tree-sitter
 pub fn extract_symbols_ast(content: &str, language: &str) -> Vec<AstSymbol> {
-    let lang = match get_language(language) {
+    let id = match LanguageId::from_str(language) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+
+    let lang = match get_cached_language(id) {
         Some(l) => l,
         None => return Vec::new(),
     };
@@ -46,7 +86,7 @@ pub fn extract_symbols_ast(content: &str, language: &str) -> Vec<AstSymbol> {
 
 /// Extract symbols using LanguageId directly
 pub fn extract_symbols_by_id(content: &str, id: LanguageId) -> Vec<AstSymbol> {
-    let lang = match get_ts_language(id) {
+    let lang = match get_cached_language(id) {
         Some(l) => l,
         None => return Vec::new(),
     };

@@ -211,11 +211,11 @@ Repository Intelligence ──emit──→ Event Bus ──consume──→ Fut
 
 ```rust
 trait IContextBuilder {
-    fn build_context(&self, task: TaskRequest) -> Result<ContextPack, ContextError>;
+    fn build_context(&self, task: &TaskRequest) -> Result<(ContextPack, RoutingDecision), String>;
 }
 ```
 
-Reference implementation: Rust daemon with Unix socket IPC.
+Reference implementation: Rust daemon with Unix socket IPC. Lock strategy: acquire all mutex guards once at the start of `build_context`, pass `&MutexGuard` references to helpers (`search_code_scored`, `retrieve_knowledge_scored`, `match_skills_scored`). This eliminates redundant lock contention and enables future parallelism via `tokio::join!`.
 
 ### IModelGateway
 
@@ -261,6 +261,53 @@ Reference: `crates/coderun-core/src/traits.rs:33-58` + `crates/coderun-workflow/
 | Configuration | Developer | TOML files | Persistent, developer-managed |
 | Logs | Runtime | Log files | Persistent, rotated |
 | Events | Event Bus | In-memory channel | Ephemeral (consumed by CLI/metrics) |
+
+### SQLite as Persistence Backbone
+
+SQLite is the primary persistence layer for all structured metadata:
+
+- **Files:** file paths, content hashes, metadata (tracked for incremental re-indexing)
+- **Symbols:** AST-extracted symbols (functions, classes, methods) with file associations
+- **Knowledge:** documents ingested from README, ADRs, and other sources
+- **Sessions:** session fingerprints for deduplication, token usage metrics
+- **Graph:** dependency edges between files (import/use/require relationships)
+
+Tantivy is the search index (full-text BM25). Tree-sitter is the parser. Graph is the relationship layer. All three are built from the same source code walk during `coderun init`.
+
+## Initialization Pipeline
+
+`coderun init` runs a 7-step pipeline:
+
+```
+[1/7] Scaffold (.coderun/, config, skills, database)
+[2/7] Repository discovery + language detection
+[3/7] Parser validation (verify tree-sitter grammars load)
+[4/7] Indexing (full-text BM25 + symbol extraction + dependency graph)
+[5/7] Knowledge Hub initialization + skill loading
+[6/7] Validation queries (smoke test all components)
+[7/7] Repository status report
+```
+
+Each step is fail-open: errors in one step don't block subsequent steps. The validation step probes Tantivy, SQLite symbols, graph edges, knowledge entries, and skills independently.
+
+## Retrieval Status
+
+`RetrievalStatus` distinguishes between different failure modes:
+
+```rust
+pub enum RetrievalStatus {
+    Found(usize),              // Results were found
+    NoMatch,                   // Search ran successfully but found nothing
+    IndexNotBuilt,             // No index exists (init never ran)
+    IndexUnavailable,          // Index exists but is empty/unreachable
+    ParserFailed(Vec<String>), // Tree-sitter grammars failed to load
+    KnowledgeHubUnavailable,   // Knowledge Hub not initialized
+    RetrievalFailed(String),   // Search threw an error
+    FallbackUsed(String),      // Used fallback method (e.g. ripgrep after Tantivy miss)
+}
+```
+
+This enables the daemon to report structured diagnostics instead of generic "no results" when retrieval fails.
 
 ## Technology Stack (v0.6.0 planned — see `docs/V0_6_0_PLAN.md:0`)
 

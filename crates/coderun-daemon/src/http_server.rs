@@ -422,7 +422,7 @@ async fn handle_pre_generation(
 
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.lock().await;
-    let (context_pack, routing_decision) = engine.build_context(&task)?;
+    let (context_pack, routing_decision) = engine.build_context(&task).await?;
     crate::metrics::global().inc_requests("PreGeneration", &routing_decision.tier);
     // TASK-022: wire metrics — context tokens + retrieval recall (was dead_code)
     crate::metrics::global().observe_context_tokens(context_pack.token_usage.total_tokens);

@@ -1,3 +1,13 @@
+//! Storage layer — SQLite persistence backbone for Coderun.
+//!
+//! This crate owns:
+//! - **Database:** SQLite connection with WAL mode, migrations, and CRUD for files, symbols, knowledge, and sessions.
+//! - **TantivyIndex:** Full-text BM25 search index (in-process Tantivy with MmapDirectory).
+//!
+//! SQLite stores all structured metadata (file hashes, AST symbols, knowledge entries, dependency edges,
+//! token usage). Tantivy is the search index for fast full-text retrieval. Both are built from the
+//! same source code walk during `coderun init` and kept in sync during incremental updates.
+
 pub mod tantivy_index;
 
 use std::path::Path;
@@ -489,6 +499,22 @@ impl Database {
     /// Search knowledge by text (LIKE-based) — optionally scoped to a repository (TASK-030).
     /// `repository_filter: Some(id)` matches ONLY rows stamped with that id (strict — legacy ''
     /// rows never leak across repos). `None` returns everything.
+    /// Count total knowledge entries (for hub initialization checks — P0 #3)
+    pub fn count_knowledge(&self, repository_filter: Option<&str>) -> Result<usize, String> {
+        let sql = if repository_filter.is_some() {
+            "SELECT COUNT(*) FROM knowledge WHERE repository_id = ?1"
+        } else {
+            "SELECT COUNT(*) FROM knowledge"
+        };
+        let count: i64 = if let Some(repo) = repository_filter {
+            self.conn.query_row(sql, params![repo], |row| row.get(0))
+        } else {
+            self.conn.query_row(sql, params![], |row| row.get(0))
+        }
+        .map_err(|e| format!("Failed to count knowledge: {}", e))?;
+        Ok(count as usize)
+    }
+
     pub fn search_knowledge(&self, query: &str, category_filter: Option<&str>, min_confidence: f64, max_results: usize, repository_filter: Option<&str>) -> Result<Vec<KnowledgeRecord>, String> {
         let start = Instant::now();
         let pattern = format!("%{}%", query);

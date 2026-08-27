@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, QueryParser, Query, TermQuery};
 use tantivy::schema::*;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
@@ -18,6 +18,8 @@ pub struct CodeIndexSchema {
     pub symbols_field: Field,
     /// Repository scope field (TASK-030) — every doc is stamped so retrieval can be repo-scoped
     pub repository_field: Field,
+    /// File classification (Source, Config, Documentation, etc.) — used for scoring boosts
+    pub file_class_field: Field,
 }
 
 impl Default for CodeIndexSchema {
@@ -33,9 +35,10 @@ impl CodeIndexSchema {
         let path_field = schema_builder.add_text_field("path", STRING | STORED);
         let filename_field = schema_builder.add_text_field("filename", TEXT | STORED);
         let content_field = schema_builder.add_text_field("content", TEXT | STORED);
-        let language_field = schema_builder.add_text_field("language", STRING | STORED);
+        let language_field = schema_builder.add_text_field("language", STRING | STORED | FAST);
         let symbols_field = schema_builder.add_text_field("symbols", TEXT | STORED);
         let repository_field = schema_builder.add_text_field("repository_id", STRING | STORED);
+        let file_class_field = schema_builder.add_text_field("file_class", STRING | STORED);
 
         Self {
             schema: schema_builder.build(),
@@ -45,7 +48,55 @@ impl CodeIndexSchema {
             language_field,
             symbols_field,
             repository_field,
+            file_class_field,
         }
+    }
+
+    /// Get the file-class boost factor for scoring
+    pub fn file_class_boost(file_class: &str) -> f32 {
+        match file_class {
+            "Source" => 1.5,
+            "Test" => 1.0,
+            "Config" => 0.3,
+            "Documentation" => 0.2,
+            "Binary" => 0.0,
+            "Vendor" => 0.0,
+            "Dependency" => 0.0,
+            "Generated" => 0.1,
+            "Stylesheet" => 0.0,
+            _ => 1.0,
+        }
+    }
+
+    /// Get directory-based boost for source code files
+    /// Domain layer (ApplicationCore) > Infrastructure > Web controllers/services > Views/Pages
+    pub fn directory_boost(path: &str) -> f32 {
+        let lower = path.to_lowercase();
+        // Domain layer — highest priority
+        if lower.contains("applicationcore") || lower.contains("domain") {
+            return 1.3;
+        }
+        // Infrastructure layer
+        if lower.contains("infrastructure") {
+            return 1.2;
+        }
+        // Services, controllers, configuration — business logic
+        if lower.contains("/services/") || lower.contains("/controllers/") || lower.contains("/configuration/") || lower.contains("/features/") {
+            return 1.1;
+        }
+        // Interfaces — important for understanding architecture
+        if lower.contains("/interfaces/") {
+            return 1.2;
+        }
+        // Views, Pages, Razor — UI layer, less relevant for code search
+        if lower.contains("/views/") || lower.contains("/pages/") || lower.contains(".cshtml") || lower.contains(".razor") {
+            return 0.7;
+        }
+        // Static assets — lowest priority
+        if lower.contains("/wwwroot/") {
+            return 0.3;
+        }
+        1.0
     }
 }
 
@@ -161,6 +212,7 @@ impl TantivyIndex {
         language: &str,
         symbols: &[String],
         repository_id: &str,
+        file_class: &str,
     ) -> Result<(), String> {
         let symbols_text = symbols.join(" ");
         // Extract filename without extension for better matching
@@ -176,6 +228,7 @@ impl TantivyIndex {
             self.schema.language_field => language,
             self.schema.symbols_field => symbols_text.as_str(),
             self.schema.repository_field => repository_id,
+            self.schema.file_class_field => file_class,
         );
 
         writer
@@ -217,11 +270,13 @@ impl TantivyIndex {
 
     /// Search the index — optionally scoped to a single repository (TASK-030).
     /// `repository_id: Some(id)` filters hits to docs stamped with that id; `None` searches all.
+    /// `language_filter: Some(lang)` filters hits to docs with that language; `None` searches all.
+    /// Results are boosted by file class (Source > Test > Config > Documentation).
     pub fn search(
         &self,
         reader: &IndexReader,
         query: &str,
-        _language_filter: Option<&str>,
+        language_filter: Option<&str>,
         max_results: usize,
         repository_id: Option<&str>,
     ) -> Result<Vec<SearchHit>, String> {
@@ -230,8 +285,12 @@ impl TantivyIndex {
         // Sanitize query: escape Tantivy special chars, extract meaningful keywords
         let sanitized = sanitize_code_query(query);
 
-        // Build query
-        let query_parser = QueryParser::for_index(
+        // Build query with field boosts:
+        // - symbols_field: 2.0x (symbol name matches are most relevant)
+        // - path_field: 1.5x (file path matches indicate structural relevance)
+        // - filename_field: 1.5x (filename matches are strong signals)
+        // - content_field: 1.0x (default, content matches are useful but less specific)
+        let mut query_parser = QueryParser::for_index(
             &self.index,
             vec![
                 self.schema.content_field,
@@ -240,34 +299,58 @@ impl TantivyIndex {
                 self.schema.filename_field,
             ],
         );
+        query_parser.set_field_boost(self.schema.symbols_field, 2.0);
+        query_parser.set_field_boost(self.schema.path_field, 1.5);
+        query_parser.set_field_boost(self.schema.filename_field, 1.5);
 
         let user_query = query_parser
             .parse_query(&sanitized)
             .map_err(|e| format!("Failed to parse query '{}' (sanitized from '{}'): {}", sanitized, query, e))?;
 
         // Repository scope filter (TermQuery AND user query) — TASK-030/F-1
-        let full_query: Box<dyn Query> = match repository_id {
-            Some(repo) => {
-                let repo_term =
-                    tantivy::Term::from_field_text(self.schema.repository_field, repo);
-                Box::new(BooleanQuery::new(vec![
-                    (
-                        tantivy::query::Occur::Must,
-                        Box::new(TermQuery::new(repo_term, IndexRecordOption::Basic)) as Box<dyn Query>,
-                    ),
-                    (tantivy::query::Occur::Must, user_query),
-                ]))
+        let mut must_clauses: Vec<(tantivy::query::Occur, Box<dyn Query>)> = Vec::new();
+
+        if let Some(repo) = repository_id {
+            let repo_term =
+                tantivy::Term::from_field_text(self.schema.repository_field, repo);
+            must_clauses.push((
+                tantivy::query::Occur::Must,
+                Box::new(TermQuery::new(repo_term, IndexRecordOption::Basic)) as Box<dyn Query>,
+            ));
+        }
+
+        // Language filter — TermQuery on the indexed language field
+        if let Some(lang) = language_filter {
+            if !lang.is_empty() {
+                let lang_term =
+                    tantivy::Term::from_field_text(self.schema.language_field, lang);
+                must_clauses.push((
+                    tantivy::query::Occur::Must,
+                    Box::new(TermQuery::new(lang_term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                ));
             }
-            None => Box::new(user_query),
+        }
+
+        must_clauses.push((tantivy::query::Occur::Must, user_query));
+
+        let full_query: Box<dyn Query> = if must_clauses.len() == 1 {
+            must_clauses.remove(0).1
+        } else {
+            Box::new(BooleanQuery::new(must_clauses))
         };
 
+        // Fetch extra results to account for file-class filtering
+        let fetch_limit = (max_results * 3).min(200);
         let top_docs = searcher
-            .search(&full_query, &TopDocs::with_limit(max_results).order_by_score())
+            .search(&full_query, &TopDocs::with_limit(fetch_limit).order_by_score())
             .map_err(|e| format!("Search failed: {}", e))?;
 
         let mut results = Vec::new();
 
         for (score, doc_addr) in top_docs {
+            if results.len() >= max_results {
+                break;
+            }
             if let Ok(doc) = searcher.doc::<tantivy::TantivyDocument>(doc_addr) {
                 let path = doc
                     .get_first(self.schema.path_field)
@@ -293,17 +376,80 @@ impl TantivyIndex {
                     .unwrap_or("")
                     .to_string();
 
+                let file_class = doc
+                    .get_first(self.schema.file_class_field)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Source")
+                    .to_string();
+
+                // Apply file-class boost and directory boost to the BM25 score
+                let class_boost = CodeIndexSchema::file_class_boost(&file_class);
+                let dir_boost = CodeIndexSchema::directory_boost(&path);
+                let boosted_score = score * class_boost * dir_boost;
+
+                // Skip files with zero boost (Binary, Vendor, Dependency, Stylesheet)
+                if class_boost == 0.0 {
+                    continue;
+                }
+
                 results.push(SearchHit {
                     path,
                     content,
                     language,
                     symbols,
-                    score,
+                    score: boosted_score,
+                    file_class,
                 });
             }
         }
 
         Ok(results)
+    }
+
+    /// Count documents matching a query without fetching hits — O(1) vs O(N) for search.
+    pub fn count(
+        &self,
+        reader: &IndexReader,
+        query: &str,
+        repository_id: Option<&str>,
+    ) -> Result<usize, String> {
+        let searcher = reader.searcher();
+
+        let sanitized = sanitize_code_query(query);
+        let query_parser = QueryParser::for_index(
+            &self.index,
+            vec![
+                self.schema.content_field,
+                self.schema.symbols_field,
+                self.schema.path_field,
+                self.schema.filename_field,
+            ],
+        );
+
+        let user_query = query_parser
+            .parse_query(&sanitized)
+            .map_err(|e| format!("Failed to parse query: {}", e))?;
+
+        let full_query: Box<dyn Query> = match repository_id {
+            Some(repo) => {
+                let repo_term =
+                    tantivy::Term::from_field_text(self.schema.repository_field, repo);
+                Box::new(BooleanQuery::new(vec![
+                    (
+                        tantivy::query::Occur::Must,
+                        Box::new(TermQuery::new(repo_term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                    ),
+                    (tantivy::query::Occur::Must, user_query),
+                ]))
+            }
+            None => Box::new(user_query),
+        };
+
+        let count = searcher
+            .search(&full_query, &Count)
+            .map_err(|e| format!("Count failed: {}", e))?;
+
+        Ok(count)
     }
 
     /// Get index statistics
@@ -316,6 +462,17 @@ impl TantivyIndex {
             index_path: self.index_path.clone(),
         })
     }
+
+    /// Count documents in a specific repository
+    pub fn count_repo_docs(&self, reader: &IndexReader, repository_id: &str) -> Result<usize, String> {
+        let searcher = reader.searcher();
+        let repo_term = tantivy::Term::from_field_text(self.schema.repository_field, repository_id);
+        let query = TermQuery::new(repo_term, IndexRecordOption::Basic);
+        let count = searcher
+            .search(&query, &Count)
+            .map_err(|e| format!("Count failed: {}", e))?;
+        Ok(count)
+    }
 }
 
 // ── Data Types ───────────────────────────────────────────────────────────
@@ -327,6 +484,7 @@ pub struct SearchHit {
     pub language: String,
     pub symbols: String,
     pub score: f32,
+    pub file_class: String,
 }
 
 #[derive(Debug, Clone)]
@@ -368,6 +526,7 @@ mod tests {
                 "rust",
                 &["main".to_string()],
                 "repo_a",
+                "Source",
             )
             .unwrap();
 
@@ -398,10 +557,10 @@ mod tests {
 
         // Same relative path in two repos (TASK-030: deletes must be repo-scoped)
         index
-            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_a")
+            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_a", "Source")
             .unwrap();
         index
-            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_b")
+            .add_document(&mut writer, "src/main.rs", "fn main() {}", "rust", &[], "repo_b", "Source")
             .unwrap();
         index.commit(&mut writer).unwrap();
 
@@ -427,7 +586,7 @@ mod tests {
         let mut writer = index.writer().unwrap();
 
         index
-            .add_document(&mut writer, "test.rs", "test", "rust", &[], "repo_a")
+            .add_document(&mut writer, "test.rs", "test", "rust", &[], "repo_a", "Test")
             .unwrap();
         index.commit(&mut writer).unwrap();
 
@@ -435,5 +594,79 @@ mod tests {
         let stats = index.stats(&reader).unwrap();
 
         assert_eq!(stats.doc_count, 1);
+    }
+
+    #[test]
+    fn test_language_filter() {
+        let temp_dir = TempDir::new().unwrap();
+        let index_path = temp_dir.path().to_str().unwrap();
+
+        let index = TantivyIndex::open(index_path).unwrap();
+        let mut writer = index.writer().unwrap();
+
+        index
+            .add_document(&mut writer, "main.rs", "fn main() {}", "rust", &[], "repo_a", "Source")
+            .unwrap();
+        index
+            .add_document(&mut writer, "app.py", "def main(): pass", "python", &[], "repo_a", "Source")
+            .unwrap();
+        index.commit(&mut writer).unwrap();
+
+        let reader = index.reader().unwrap();
+
+        // Without language filter — finds both
+        let all = index.search(&reader, "main", None, 10, Some("repo_a")).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // With language filter — only rust
+        let rust = index.search(&reader, "main", Some("rust"), 10, Some("repo_a")).unwrap();
+        assert_eq!(rust.len(), 1);
+        assert_eq!(rust[0].language, "rust");
+
+        // With language filter — only python
+        let python = index.search(&reader, "main", Some("python"), 10, Some("repo_a")).unwrap();
+        assert_eq!(python.len(), 1);
+        assert_eq!(python[0].language, "python");
+
+        // With non-matching language filter
+        let none = index.search(&reader, "main", Some("java"), 10, Some("repo_a")).unwrap();
+        assert_eq!(none.len(), 0);
+    }
+
+    #[test]
+    fn test_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let index_path = temp_dir.path().to_str().unwrap();
+
+        let index = TantivyIndex::open(index_path).unwrap();
+        let mut writer = index.writer().unwrap();
+
+        index
+            .add_document(&mut writer, "a.rs", "fn alpha() {}", "rust", &[], "repo_a", "Source")
+            .unwrap();
+        index
+            .add_document(&mut writer, "b.rs", "fn beta() {}", "rust", &[], "repo_a", "Source")
+            .unwrap();
+        index
+            .add_document(&mut writer, "c.py", "def alpha(): pass", "python", &[], "repo_a", "Source")
+            .unwrap();
+        index.commit(&mut writer).unwrap();
+
+        let reader = index.reader().unwrap();
+
+        // Count all docs
+        let total = index.count(&reader, "alpha", None).unwrap();
+        assert_eq!(total, 2);
+
+        // Count repo-scoped
+        let repo_a = index.count(&reader, "alpha", Some("repo_a")).unwrap();
+        assert_eq!(repo_a, 2);
+
+        let repo_b = index.count(&reader, "alpha", Some("repo_b")).unwrap();
+        assert_eq!(repo_b, 0);
+
+        // Count repo docs
+        let count = index.count_repo_docs(&reader, "repo_a").unwrap();
+        assert_eq!(count, 3);
     }
 }
