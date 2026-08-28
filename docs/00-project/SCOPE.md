@@ -35,7 +35,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | **User interaction** | The coding agent owns the user interface |
 | **Multi-tenancy** | Single user, single repository per daemon |
 | **Plugin marketplace** | Skills are community-format files, not a marketplace |
-| **Workflow orchestration** | DBOS Transact native async over SQLite+Litestream **required** since v0.6.0 (`docs/V0_6_0_PLAN.md:1`); No Temporal (deleted) |
+| **Workflow orchestration** | DBOS Transact isolated to `future/workflow/` — not required for v1 runtime |
 | **Distributed infrastructure** | Single local daemon process (+ DBOS sidecar `workflow/dbos` on same host) |
 | **Web dashboard** | CLI-only interface |
 | **Authentication** | Local daemon, no auth needed |
@@ -93,7 +93,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | LiteLLM gateway | Model routing, fallbacks, load balancing (if deployed externally) |
 | Language servers | Optional LSP enrichment (agent's own processes) |
 | Static analysis | Native per-language analyzers |
-| External orchestration | DBOS Transact native async over SQLite+Litestream (required since v0.6.0, `docs/V0_6_0_PLAN.md:1`); Temporal deleted |
+| External orchestration | DBOS Transact (isolated to `future/workflow/` since v0.7.5) |
 
 ## v1 Boundaries
 

@@ -198,7 +198,8 @@
 - task: "Document v1 architecture without workflow"
   category: "documentation"
   expected_files:
-    - docs/coderun_v1_review_and_tasks.md
+    - docs/01-architecture/ARCHITECTURE.md
+    - docs/00-project/SCOPE.md
     - README.md
 
 - task: "Find CLI preview implementation"

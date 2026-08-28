@@ -50,6 +50,9 @@ Set environment variables to configure the plugin:
 ```bash
 # Override daemon URL (default: http://127.0.0.1:9527)
 export CODERUN_DAEMON_URL="http://127.0.0.1:9527"
+
+# Override UDS socket path (default: /tmp/coderun.sock)
+export CODERUN_SOCKET_PATH="/tmp/coderun.sock"
 ```
 
 ### Plugin Code
@@ -135,7 +138,7 @@ See `.claude/hooks/` for the shell script implementations.
 
 ## IPC Protocol
 
-Both adapters communicate with the Coderun daemon via HTTP (TCP on Windows, UDS on Unix).
+Adapters communicate with the Coderun daemon via **UDS + MessagePack** (primary) with HTTP/JSON fallback on `127.0.0.1:9527`.
 
 ### Request Format
 

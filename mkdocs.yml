@@ -28,17 +28,20 @@ nav:
     - Components: docs/01-architecture/COMPONENTS.md
     - Data Flow: docs/01-architecture/DATA_FLOW.md
     - Request Lifecycle: docs/01-architecture/REQUEST_LIFECYCLE.md
+    - Runtime: docs/01-architecture/RUNTIME.md
+    - FlashRank Removal: docs/01-architecture/FLASHRANK_REMOVAL.md
   - Guides:
     - Adapters: docs/ADAPTERS.md
     - Evaluation: docs/EVALUATION.md
     - Roadmap: docs/ROADMAP.md
-    - V0.3.0 Plan: docs/V0_3_0_PLAN.md
-    - V0.4.0 Plan: docs/V0_4_0_PLAN.md
+    - Skills Spec: docs/03-skills/SPEC.md
     - Workflows (DBOS): docs/02-workflows/DBOS.md
     - Dashboards: docs/dashboards/coderun.json
   - Reference:
     - Principles: docs/00-project/PRINCIPLES.md
     - Scope: docs/00-project/SCOPE.md
+    - Project: docs/00-project/PROJECT.md
+    - Glossary: docs/00-project/GLOSSARY.md
 
 # Knowledge Hub ingestion: on `coderun index`, walk docs/**/*.md and push category=docs entries into tantivy
 # (repository-stamped since TASK-030 — retrieval is scoped per repo).

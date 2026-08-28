@@ -1,6 +1,6 @@
 # DBOS Workflows (v0.6.0 — required)
 
-DBOS Transact is the **required** durable orchestrator since v0.6.0 (`docs/V0_6_0_PLAN.md:1`). Runtime uses SQLite + Litestream single-node durability (`sqlite://~/.coderun/dbos.db` + `sqlite://~/.coderun/dbos_system.db`, `DBOS_LITESTREAM_REPLICA_URL` for replica). `IWorkflowEngine` is `async_trait` native (no `block_on_in_thread` hack). See `workflow/dbos/dbos-config.yaml` (prod = SQLite, dev alias `dbos-config-dev.yaml`).
+DBOS Transact is the durable orchestrator (was required since v0.6.0, isolated to `future/workflow/` as of v0.7.5). Runtime uses SQLite + Litestream single-node durability (`sqlite://~/.coderun/dbos.db` + `sqlite://~/.coderun/dbos_system.db`, `DBOS_LITESTREAM_REPLICA_URL` for replica). `IWorkflowEngine` is `async_trait` native. See `future/workflow/dbos/dbos-config.yaml` (prod = SQLite, dev alias `dbos-config-dev.yaml`).
 
 ## When to enable
 
@@ -40,7 +40,7 @@ All payloads pass `redact_secrets()` before `audits.payload`.
 
 ## HMAC
 
-Set `workflow.dbos_shared_secret` / `CODERUN_DBOS_SECRET`; daemon verifies `X-Coderun-Signature: hex(HMAC-SHA256(secret, body))` via `hmac` crate `Hmac<Sha256>` `coderun-core/src/secrets.rs:verify_hmac` (was `sha256(secret+body)` before v0.6.0; see `docs/V0_6_0_PLAN.md:1.1`). Single impl shared with `daemon/src/ratelimit.rs`. For local sidecar the installer default `your-secret` is sufficient — no real token needed for local development.
+Set `workflow.dbos_shared_secret` / `CODERUN_DBOS_SECRET`; daemon verifies `X-Coderun-Signature: hex(HMAC-SHA256(secret, body))` via `hmac` crate `Hmac<Sha256>` `coderun-core/src/secrets.rs:verify_hmac`. Single impl shared with `daemon/src/ratelimit.rs`. For local sidecar the installer default `your-secret` is sufficient — no real token needed for local development.
 
 ## When you DO need a token or key
 

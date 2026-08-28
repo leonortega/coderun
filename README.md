@@ -107,7 +107,7 @@ coderun/
 ├── .opencode/plugins/            # OpenCode plugin (TypeScript, dual-hook chat.message + message.updated shim)
 ├── .claude/hooks/                # Claude Code hooks (shell scripts)
 ├── benches/                      # criterion benches (BuildContext p95)
-└── docs/                         # Architecture and specification docs (ROADMAP v0.6.0, V0_6_0_PLAN.md)
+└── docs/                         # Architecture and specification docs
 ```
 
 ## CLI Commands
@@ -593,7 +593,7 @@ cargo fmt -- --check
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for v0.6.0 (DBOS required + spec compliance) and beyond. Full plans: `docs/V0_3_0_PLAN.md`, `docs/V0_4_0_PLAN.md`, `docs/V0_5_0_PLAN.md`, `docs/V0_6_0_PLAN.md`, workflows `docs/02-workflows/DBOS.md`.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the full release history and future plans. Workflows: `docs/02-workflows/DBOS.md`.
 
 ## Distribution
 
