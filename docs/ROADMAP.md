@@ -1,8 +1,8 @@
 # Coderun Roadmap
 
-## Current Version: v0.7.5
+## Current Version: v0.8.0
 
-**Released:** August 27, 2026
+**Released:** August 28, 2026
 **Status:** Active
 **Crates:** 12 workspace members (+ `coderun-workflow` excluded, in `future/workflow/`)
 
@@ -92,7 +92,7 @@
 - Repository profile artifact: `.coderun/profile.json`
 - ast-grep via npm prebuilt, RTK prebuilt binary installers
 
-### v0.7.5 — Current ✅
+### v0.7.5 ✅
 
 **Released:** August 27, 2026
 
@@ -100,6 +100,16 @@
 - Event persistence removed from hot path (in-memory ring buffer only)
 - DBOS isolated to `future/workflow/` — not required for v1
 - `coderun doctor` works without DBOS
+
+### v0.8.0 — Current ✅
+
+**Released:** August 28, 2026
+
+- Minimal v1 stack: Tree-sitter + Tantivy + SQLite(metadata) + Git (RTK/LiteLLM optional)
+- Removed MkDocs ingestion (docs remain as plain markdown), Knowledge Hub collapsed to Repository Context, FlashRank/Engram/cbm already removed
+- Retrieval latency: global INDEX_CACHE + cached_reader, avoid STORED content fetch for candidates (CODERUN_CANDIDATE_K sweep), graph gated for doc_count>5000
+- `coderun init --community-skills` opt-in (default OFF)
+- `docs/00-project/V1_PLAN.md` + `V1_MINIMAL_STACK_PLAN.md` + `ENGRAM_CBM_REMOVAL.md`/`FLASHRANK_REMOVAL.md` ADRs
 
 ---
 
