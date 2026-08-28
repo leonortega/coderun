@@ -17,6 +17,13 @@ This file applies to all AI agents working in this repository (OpenCode, Claude 
 - This applies to all code edits, refactors, new features, and configuration changes.
 - This rule overrides any other instructions or prior session habits. When in doubt, ask.
 
+## Coderun Binary — Where to Run `coderun init`
+
+- **Installed absolute (always):** `%USERPROFILE%\.coderun\bin\coderun.exe` on Windows, `~/.coderun/bin/coderun` on Unix. This is where `scripts/install.ps1` (`install.ps1:346-378`) and `scripts/install.sh:118-131` copy the prebuilt `target/release/coderun(.exe)` and add `~/.coderun/bin` to USER PATH.
+- **Never search the repo:** do NOT run `Get-ChildItem -Recurse -Filter coderun.exe`, `where coderun`, `find target/release`, or walk 63k files. Agents that search spend minutes and either time out or incorrectly run `C:\LeonRepository\coderun\target\release\coderun.exe` (the dev checkout) instead of the user's project. Use the absolute above.
+- **PATH note (Windows):** `install.ps1` persists USER PATH in HKCU. A running agent shell started *before* install will not see it until restarted. If `coderun --version` fails, use the absolute path or restart the shell. `coderun doctor` now probes PATH.
+- **Correct per-project usage:** `cd <project-root> && %USERPROFILE%\.coderun\bin\coderun.exe init` (or `~/.coderun/bin/coderun init`). The daemon is repo-scoped via `repository_path` (`packages/opencode-coderun/src/index.ts:152`), but `init`/`index` must run in the target repo's `cwd`.
+
 ## Other
 
 - Keep changes local and show `git diff --stat` / `git status --short` for user review before any commit.

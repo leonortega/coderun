@@ -166,18 +166,18 @@ impl ContextEngine {
     ) -> Result<(String, Vec<coderun_core::SearchResult>, coderun_core::RetrievalStatus), String> {
         let _p0 = Instant::now();
         // ── Proactive detection (P0 #3): verify index exists and is populated ──
-        match repo_intel.validate_index() {
-            Ok(_) => {} // index valid, proceed with search
+        let doc_count = match repo_intel.validate_index() {
+            Ok(s) => s.doc_count,
             Err(ref e) if e == "index not built" => {
                 return Ok((String::new(), vec![], coderun_core::RetrievalStatus::IndexNotBuilt));
             }
             Err(ref e) if e == "index is empty" => {
-                // Fall through to search; ripgrep fallback may still find content
+                0 // Fall through to search; ripgrep fallback may still find content
             }
             Err(_) => {
                 return Ok((String::new(), vec![], coderun_core::RetrievalStatus::IndexUnavailable));
             }
-        }
+        };
 
         let max_files = config.max_files;
         prof("code_search.validate_index", _p0);
@@ -205,7 +205,7 @@ impl ContextEngine {
             }
         };
 
-        let mut status = if search_results.total_count > 0 {
+        let status = if search_results.total_count > 0 {
             if used_fallback {
                 coderun_core::RetrievalStatus::FallbackUsed("tantivyâ†’ripgrep".to_string())
             } else {
@@ -267,10 +267,14 @@ impl ContextEngine {
 
         if !query_tokens.is_empty() {
             for result in &mut bm25_results {
-                let symbols_lower = result.content.to_lowercase();
+                // P0 fix: content not fetched for candidates (lazy-load). Boost via symbols + path fields instead.
+                let haystack = format!("{} {}", result.content, result.path).to_lowercase();
+                let symbols_hay = result.content.to_lowercase(); // content is now empty; keep for compat but use path/symbols
+                let _ = symbols_hay;
                 let mut symbol_match_count = 0;
                 for token in &query_tokens {
-                    if symbols_lower.contains(token.as_str()) {
+                    // Check path tokens and symbols (smaller than full content, but correlated with BM25 score)
+                    if haystack.contains(token.as_str()) {
                         symbol_match_count += 1;
                     }
                 }
@@ -320,16 +324,20 @@ impl ContextEngine {
         }
         merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // ── P1 #7: Graph-based boosting ──
-        // Boost files connected to high-scoring results via dependency graph
+        // ── P1 #7: Graph-based boosting ── (deferred for large repos — see ENGRAM_CBM_REMOVAL.md)
+        // Building the dependency graph walks the repo (53k files ≈ seconds). For v1, only
+        // boost via graph when explicitly enabled or repo is small (<5k files), matching
+        // the init deferral in crates/coderun-cli/src/main.rs:311.
         prof("code_search.graph_enter", _p0);
-        if merged.len() >= 2 {
+        let graph_enabled = std::env::var("CODERUN_BUILD_GRAPH").ok().as_deref() == Some("1");
+        let large_repo = doc_count > 5000;
+        if merged.len() >= 2 && (graph_enabled || !large_repo) {
             let high_scoring_files: HashSet<String> = merged.iter()
                 .take(3)
                 .map(|(p, _)| p.clone())
                 .collect();
-            
-            // Build dependency graph for the repo
+
+            // Build dependency graph for the repo (small repos only or forced)
             if let Ok(_repo_path) = repo_intel.repo_path().canonicalize() {
                 if let Ok(graph) = repo_intel.build_dependency_graph() {
                     // For each result, check if it's connected to high-scoring files
@@ -354,34 +362,7 @@ impl ContextEngine {
             merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         }
 
-        // ── P1 #6: MCP Semantic Fallback (threshold logic) ──
-        // Only invoke MCP if local retrieval returns < 3 results
-        if merged.len() < 3 {
-            if let Ok(repo_path) = repo_intel.repo_path().canonicalize() {
-                let file_paths: Vec<std::path::PathBuf> = all_by_path.keys()
-                    .map(|p| repo_path.join(p))
-                    .filter(|p| p.exists())
-                    .collect();
-                
-                if !file_paths.is_empty() {
-                    if let Some(mcp_graph) = coderun_repo_intel::graph::try_codebase_memory_mcp_public(&repo_path, &file_paths) {
-                        // Merge MCP graph results: boost files connected to existing results
-                        let existing_files: HashSet<String> = merged.iter().map(|(p, _)| p.clone()).collect();
-                        for file in mcp_graph.all_files() {
-                            if !existing_files.contains(file) {
-                                // Add MCP-discovered files with a base score
-                                merged.push((file.clone(), 0.1));
-                            }
-                        }
-                        // Re-sort after merge
-                        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        if !merged.is_empty() {
-                            status = coderun_core::RetrievalStatus::FallbackUsed("codebase-memory-mcp".to_string());
-                        }
-                    }
-                }
-            }
-        }
+
 
         let mut results = Vec::new();
         let mut scored = Vec::new();
@@ -418,18 +399,20 @@ impl ContextEngine {
     }
 
     fn retrieve_knowledge_scored_standalone(
-        knowledge_hub: &std::sync::MutexGuard<'_, KnowledgeHub>,
-        repository_id: &str,
-        query: &str,
+        _knowledge_hub: &std::sync::MutexGuard<'_, KnowledgeHub>,
+        _repository_id: &str,
+        _query: &str,
     ) -> Result<(String, Vec<coderun_core::KnowledgeEntry>), String> {
-        // ── Proactive detection (P0 #3): verify Knowledge Hub is initialized ──
-        if !knowledge_hub.is_initialized(Some(repository_id)) {
-            debug!(repository_id = repository_id, "Knowledge Hub not initialized — returning empty docs context");
-            return Ok((String::new(), vec![]));
+        // V1 minimal: Knowledge Hub collapsed to Repository Context per V1_MINIMAL_STACK_PLAN.md:2.5
+        // `repository → context` is source files + symbols + paths + Git state only.
+        // Docs/memory retrieval deferred — agent can `read` docs/*.md directly.
+        // Keep signature for API compat but return empty (hot-path not dependent on KnowledgeHub).
+        // If CODERUN_KNOWLEDGE_ENABLED=1, re-enable legacy retrieval (opt-in for eval).
+        if std::env::var("CODERUN_KNOWLEDGE_ENABLED").ok().as_deref() == Some("1") {
+            // legacy path kept for offline eval comparison only
+            // (would call knowledge_hub.retrieve_knowledge here)
         }
-        let entries = knowledge_hub.retrieve_knowledge(query, None, 10, Some(repository_id))?;
-        let formatted: Vec<String> = entries.iter().map(|e| format!("// [{}] {}: {}", e.category, e.key, e.value)).collect();
-        Ok((formatted.join("\n"), entries))
+        Ok((String::new(), vec![]))
     }
 
     fn match_skills_scored_standalone(
@@ -569,8 +552,8 @@ impl ContextEngine {
                 }
             }
             for entry in &knowledge_scored {
-                let retriever = if entry.source == "engram" { "engram" } else { "tantivy" };
-                let reason = if entry.source == "engram" { "memory".to_string() } else { "bm25".to_string() };
+                let retriever = "tantivy";
+                let reason = "bm25".to_string();
                 // TASK-033/F-4: category stays in `source`; path is cleaned of prefixes/verbatim markers
                 context_pack.provenance.push(coderun_core::ipc::ContextProvenance {
                     path: clean_provenance_path(&entry.key),
@@ -768,7 +751,8 @@ impl ContextEngine {
         (context_pack, total_tokens)
     }
 
-    /// Select model via Model Router
+    /// Select model via Model Router — V1 minimal: heuristic only, no LiteLLM HTTP call
+    /// per V1_MINIMAL_STACK_PLAN.md:2.6 (deferred). Works standalone; LITELLM_URL not required.
     fn select_model(
         &self,
         message: &str,
@@ -1324,7 +1308,7 @@ mod tests {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let event_bus = EventBus::new();
         let repo_intel = RepositoryIntelligence::new(PathBuf::from("."), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let mut budget = 12000;
         let mut usage = HashMap::new();
@@ -1344,7 +1328,7 @@ mod tests {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let event_bus = EventBus::new();
         let repo_intel = RepositoryIntelligence::new(PathBuf::from("."), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let a = engine.dedup_content("sess1", "hello world");
         let b = engine.dedup_content("sess1", "hello world");
@@ -1395,7 +1379,7 @@ mod tests {
         // Index repo so code retrieval has something
         let mut ri = RepositoryIntelligence::new(dir.clone(), Database::open(&db_path).unwrap(), event_bus.clone());
         let _ = ri.index_repository();
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
         let engine = ContextEngine::new(ri, kh, event_bus, ContextConfig::default());
         let task1 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
         let task2 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
@@ -1511,7 +1495,7 @@ mod tests {
         // Engine whose default view is repo_b (simulates a daemon started in repo_b)
         let db = coderun_storage::Database::open(&std::path::PathBuf::from(":memory:")).unwrap();
         let kh_db = coderun_storage::Database::open(&std::path::PathBuf::from(":memory:")).unwrap();
-        let hub = KnowledgeHub::new(kh_db, EventBus::new(), coderun_knowledge::KnowledgeConfig { memory_enabled: false, ..Default::default() });
+        let hub = KnowledgeHub::new(kh_db, EventBus::new(), coderun_knowledge::KnowledgeConfig::default());
         let engine = ContextEngine::new(
             RepositoryIntelligence::new(repo_b.clone(), db, EventBus::new()),
             hub,
@@ -1565,7 +1549,7 @@ mod tests {
         let mut ri = RepositoryIntelligence::new(eshop_path.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
         ri.index_repository().expect("index eShopOnWeb");
 
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig { memory_enabled: false, ..Default::default() });
+        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
 
         let config = ContextConfig::default();
         let engine = ContextEngine::new(ri, kh, event_bus, config);

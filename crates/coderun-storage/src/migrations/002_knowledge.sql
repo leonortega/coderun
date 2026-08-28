@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
     UNIQUE(category, key)
 );
 
--- Memory entries (from engram or local)
+-- Memory entries (SQLite local)
 CREATE TABLE IF NOT EXISTS memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     namespace TEXT NOT NULL,

@@ -98,7 +98,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Knowledge Hub
 
-**Definition:** One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes three retrieval strategies: tag-based skill matching, BM25/tantivy lexical search with FlashRank reranking for docs/code, and engram for memory.
+**Definition:** One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes two retrieval strategies: tag-based skill matching and BM25/tantivy lexical search for docs/code (FlashRank and engram removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md` and `ENGRAM_CBM_REMOVAL.md`).
 
 **Scope:** Owns: storage and retrieval of all knowledge types.
 
@@ -174,13 +174,13 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Memory
 
-**Definition:** Long-term storage of information across sessions. Implemented via engram: a single Go binary, SQLite+FTS5, MCP-native, no LLM/embedding dependency for its core save/search path.
+**Definition:** Long-term storage of information across sessions. Historically via engram (single Go binary, SQLite+FTS5, MCP-native); removed — now SQLite+tantivy local (see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md`). No LLM/embedding dependency for its core save/search path.
 
 **Scope:** Used by the Knowledge Hub for cross-session knowledge persistence.
 
 ### engram
 
-**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies.
+**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies. **Removed** from Coderun v1 — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (replaced by SQLite+tantivy local).
 
 **Scope:** Used for persistent memory in the Knowledge Hub.
 

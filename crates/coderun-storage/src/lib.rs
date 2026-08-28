@@ -173,6 +173,31 @@ impl Database {
         Ok(files)
     }
 
+    /// Get all files with full meta (for incremental mtime+size shortcut — Phase2)
+    pub fn get_all_files_meta(&self) -> Result<Vec<FileRecord>, String> {
+        let start = Instant::now();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, path, hash, size, language, last_indexed_at FROM files")
+            .map_err(|e| format!("Failed to prepare query: {}", e))?;
+        let files = stmt
+            .query_map([], |row| {
+                Ok(FileRecord {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    hash: row.get(2)?,
+                    size: row.get(3)?,
+                    language: row.get(4)?,
+                    last_indexed_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query files: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect files: {}", e))?;
+        log_slow("get_all_files_meta", start);
+        Ok(files)
+    }
+
     /// Get a file by path
     pub fn get_file(&self, path: &str) -> Result<Option<FileRecord>, String> {
         let start = Instant::now();
@@ -719,6 +744,26 @@ impl Database {
     }
 
     // ── Utility ─────────────────────────────────────────────────────
+
+    /// Begin batched transaction for bulk indexing (Phase1 perf — avoids fsync per row)
+    pub fn begin_batch(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("Failed to begin batch: {}", e))
+    }
+
+    /// Commit batched transaction
+    pub fn commit_batch(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("Failed to commit batch: {}", e))
+    }
+
+    /// Rollback batched transaction (best-effort)
+    pub fn rollback_batch(&self) -> Result<(), String> {
+        let _ = self.conn.execute_batch("ROLLBACK");
+        Ok(())
+    }
 
     /// Emit indexing progress event via the event bus
     pub fn emit_indexing_progress(&self, event_bus: &EventBus, files_indexed: usize, symbols_extracted: usize, duration_ms: u64) {

@@ -150,9 +150,9 @@ impl RepositoryIntelligence {
         if !std::path::Path::new(&path).exists() {
             return Err("index not built".to_string());
         }
-        let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open(&path)
+        let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open_cached(&path)
             .map_err(|e| format!("index open failed: {}", e))?;
-        let reader = tantivy_index.reader().map_err(|e| format!("reader failed: {}", e))?;
+        let reader = tantivy_index.cached_reader().map_err(|e| format!("reader failed: {}", e))?;
         let stats = tantivy_index.stats(&reader).map_err(|e| format!("stats failed: {}", e))?;
         if stats.doc_count == 0 {
             return Err("index is empty".to_string());
@@ -172,15 +172,22 @@ impl RepositoryIntelligence {
         let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open(&default_index_path()).ok();
         let mut tantivy_writer = tantivy_index.as_ref().and_then(|idx| idx.writer().ok());
 
-        // Load existing file hashes from database
-        let existing_files = self.db.get_all_files()?;
-        let existing_hashes: HashMap<String, (i64, String)> = existing_files
+        // Load existing file meta — Phase2 mtime+size shortcut (avoids 63k reads on warm re-index)
+        let existing_records = self.db.get_all_files_meta().unwrap_or_default();
+        let existing_hashes: HashMap<String, (i64, String)> = existing_records
+            .iter()
+            .map(|r| (r.path.clone(), (r.id, r.hash.clone())))
+            .collect();
+        let existing_meta: HashMap<String, coderun_storage::FileRecord> = existing_records
             .into_iter()
-            .enumerate()
-            .map(|(i, (path, hash))| (path, (i as i64, hash)))
+            .map(|r| (r.path.clone(), r))
             .collect();
 
         let mut seen_paths = std::collections::HashSet::new();
+
+        // Phase1: begin batched transaction — avoids fsync per row (10-20x win for 63k)
+        let batch_enabled = self.db.begin_batch().is_ok();
+        let mut batch_ops: usize = 0;
 
         // Walk the directory tree
         for entry in self.walk_directory(&self.repo_path)? {
@@ -214,9 +221,17 @@ impl RepositoryIntelligence {
                 continue;
             }
 
-            // Check if binary file
-            if is_likely_binary(&path) {
-                debug!(path = %path_str, "Skipping binary file");
+            // Phase2: mtime+size shortcut — skip reading unchanged files on warm re-index (most of 63k)
+            if let Some(rec) = existing_meta.get(&path_str) {
+                if is_file_unchanged_fast(&path, rec) {
+                    files_indexed += 1; // counted but no I/O
+                    continue;
+                }
+            }
+
+            // Check binary by extension only before read (cheap) — full content check after read
+            if is_binary_extension(&path) {
+                debug!(path = %path_str, "Skipping binary file (extension)");
                 files_skipped += 1;
                 continue;
             }
@@ -230,6 +245,13 @@ impl RepositoryIntelligence {
                     continue;
                 }
             };
+
+            // Phase2: content-based binary detection (null bytes) — no extra fs::read
+            if is_content_binary(&content) {
+                debug!(path = %path_str, "Skipping binary file (content)");
+                files_skipped += 1;
+                continue;
+            }
 
             let hash = compute_hash(&content);
 
@@ -250,16 +272,21 @@ impl RepositoryIntelligence {
                 true
             };
 
-            // Extract symbols (always, even if unchanged — tantivy needs them)
+            // Extract symbols once (tree-sitter + fallback) — reused for DB + tantivy (Phase1 dedup)
+            let extracted = extract_symbols(&content, &self.patterns, language.as_deref());
+            let sym_names: Vec<String> = extracted.iter().map(|s| s.name.clone()).collect();
+            let sym_kinds: Vec<String> = extracted.iter().map(|s| s.kind.clone()).collect();
+
             let file_id = self.db.get_file(&path_str)?
                 .map(|f| f.id)
                 .unwrap_or(0);
 
             if file_id > 0 {
-                let symbols = extract_symbols(&content, &self.patterns, language.as_deref());
                 if file_changed {
-                    // Only insert symbols into DB if file is new/changed
-                    for symbol in &symbols {
+                    // V1 minimal: SQLite symbols kept for legacy search_symbols fallback only;
+                    // retrieval uses tantivy symbol_name field (field boosts) per V1_MINIMAL_STACK_PLAN.md:3
+                    // SQLite is metadata-only (files, index_state, config) — not a second search engine.
+                    for symbol in &extracted {
                         self.db.insert_symbol(
                             file_id,
                             &symbol.name,
@@ -270,16 +297,13 @@ impl RepositoryIntelligence {
                         )?;
                     }
                 }
-                symbols_extracted += symbols.len();
+                symbols_extracted += extracted.len();
             }
 
             // Upsert into tantivy BM25 index (ALWAYS — tantivy may have been cleared)
             if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
                 let _ = idx.delete_document(writer, &path_str, &self.repository_id);
                 let lang_str = language.as_deref().unwrap_or("text");
-                let ast_syms = extract_symbols(&content, &self.patterns, language.as_deref());
-                let sym_names: Vec<String> = ast_syms.iter().map(|s| s.name.clone()).collect();
-                let sym_kinds: Vec<String> = ast_syms.iter().map(|s| s.kind.clone()).collect();
                 let file_class_str = match &file_class {
                     FileClass::Source => "Source",
                     FileClass::Test => "Test",
@@ -296,6 +320,19 @@ impl RepositoryIntelligence {
             }
 
             files_indexed += 1;
+            batch_ops += 1;
+
+            // Batch commit every 1000 files — keeps WAL small, limits transaction size
+            if batch_enabled && batch_ops >= 1000 {
+                let _ = self.db.commit_batch();
+                let _ = self.db.begin_batch();
+                batch_ops = 0;
+                // Tantivy intermediate commit every 1000 docs (heap stays bounded)
+                if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
+                    let _ = idx.commit(writer);
+                    // re-init writer after commit? tantivy writer remains usable after commit, no re-create needed
+                }
+            }
 
             // Log progress every 100 files
             if files_indexed % 100 == 0 {
@@ -304,6 +341,12 @@ impl RepositoryIntelligence {
                     symbols = symbols_extracted,
                     "Indexing progress"
                 );
+            }
+            // Phase4: per-1000 throughput log
+            if files_indexed % 1000 == 0 {
+                let elapsed = start.elapsed().as_millis() as u64;
+                let fps = if elapsed > 0 { (files_indexed as u64 * 1000) / elapsed } else { 0 };
+                info!(files_indexed, elapsed_ms = elapsed, files_per_sec = fps, "Indexing throughput");
             }
         }
 
@@ -315,7 +358,18 @@ impl RepositoryIntelligence {
                     let _ = idx.delete_document(writer, path, &self.repository_id);
                 }
                 files_deleted += 1;
+                batch_ops += 1;
+                if batch_enabled && batch_ops >= 1000 {
+                    let _ = self.db.commit_batch();
+                    let _ = self.db.begin_batch();
+                    batch_ops = 0;
+                }
             }
+        }
+
+        // Finalize DB batch
+        if batch_enabled {
+            let _ = self.db.commit_batch();
         }
 
         // Commit tantivy if writer present
@@ -323,41 +377,9 @@ impl RepositoryIntelligence {
             let _ = idx.commit(writer);
         }
 
-        // FIRST-CLASS v0.5.0: MkDocs ingestion — walk docs/**/*.md → KnowledgeHub category="docs" + tantivy
-        // Best-effort: if docs dir exists, push each md to knowledge store so docs feed retrieval (mkdocs.yml:40)
-        // TASK-030: docs are stamped with this repository_id; TASK-032: upsert (never grows);
-        // TASK-033: dunce::canonicalize avoids \\?\ verbatim prefixes leaking into keys/paths.
-        let docs_dir = self.repo_path.join("docs");
-        if docs_dir.is_dir() {
-            let docs_root = dunce::canonicalize(&docs_dir).unwrap_or(docs_dir);
-            let doc_files = WalkBuilder::new(&docs_root).hidden(false).git_ignore(true).build()
-                .filter_map(|e| e.ok()).filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md")).collect::<Vec<_>>();
-            for entry in doc_files {
-                let path = entry.path();
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    // Robust relative path — falls back to the cleaned absolute path when
-                    // strip_prefix fails (mixed canonicalization), never a \\?\ prefix.
-                    let rel = path.strip_prefix(&self.repo_path)
-                        .or_else(|_| path.strip_prefix(dunce::canonicalize(&self.repo_path).unwrap_or_else(|_| self.repo_path.clone())))
-                        .unwrap_or(path)
-                        .to_string_lossy()
-                        .trim_start_matches("\\\\?\\")
-                        .to_string();
-                    // Idempotent upsert keyed on (category, key, repository_id) — TASK-032
-                    let _ = self.db.store_knowledge("docs", &rel, &content, 0.8, "mkdocs", &self.repository_id);
-                    // Also upsert into tantivy — delete-before-add keeps it idempotent (TASK-032)
-                    if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                        let doc_key = format!("docs:{}", rel);
-                        let _ = idx.delete_document(writer, &doc_key, &self.repository_id);
-                        let _ = idx.add_document(writer, &doc_key, &content, "markdown", &[rel.clone()], &[], &self.repository_id, "Documentation");
-                    }
-                }
-            }
-            if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                let _ = idx.commit(writer);
-            }
-        }
+        // V1 minimal: MkDocs ingestion removed per V1_MINIMAL_STACK_PLAN.md:2.4
+        // docs/*.md remains as plain markdown for agent `read`; not ingested into tantivy/KnowledgeHub.
+        // (was: walk docs/**/*.md → store_knowledge(category="docs") + tantivy docs:… idempotent upsert)
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -384,6 +406,14 @@ impl RepositoryIntelligence {
             duration_ms = duration_ms,
             "Repository indexing complete"
         );
+
+        // Phase4: large-repo hint for 63k case
+        if files_indexed > 50000 {
+            warn!(
+                files_indexed = files_indexed,
+                "Large repository detected — set CODERUN_SYMBOLS_ENABLED=false for ~20% faster indexing (BM25 only), CODERUN_INDEX_THREADS=8 for more parallelism, or CODERUN_BUILD_GRAPH=1 to force graph during init"
+            );
+        }
 
         Ok(stats)
     }
@@ -567,14 +597,15 @@ impl RepositoryIntelligence {
         repository_id: Option<&str>,
     ) -> Result<SearchResults, String> {
         // Try tantivy index at default location; fallback to ripgrep if index missing
+        // P0: Use cached index + cached reader to avoid per-query MmapDirectory open (53k latency fix)
         let index_path = default_index_path();
         let _st = Instant::now();
-        match coderun_storage::tantivy_index::TantivyIndex::open(&index_path) {
+        match coderun_storage::tantivy_index::TantivyIndex::open_cached(&index_path) {
             Ok(idx) => {
                 if std::env::var("CODERUN_PROFILE").is_ok() {
-                    eprintln!("[profile] code_search.tantivy_open: {}ms", _st.elapsed().as_millis());
+                    eprintln!("[profile] code_search.tantivy_open_cached: {}ms", _st.elapsed().as_millis());
                 }
-                let reader = idx.reader().map_err(|e| format!("tantivy reader: {e}"))?;
+                let reader = idx.cached_reader().map_err(|e| format!("tantivy reader: {e}"))?;
                 match idx.search(&reader, query, language_filter, max_results, repository_id) {
                     Ok(hits) => {
                         if hits.is_empty() {
@@ -790,14 +821,20 @@ impl RepositoryIntelligence {
         &self.repo_path
     }
 
-    /// Walk directory tree, yielding indexable files
+    /// Walk directory tree, yielding indexable files — Phase3 parallel (threads=4, CODERUN_INDEX_THREADS override)
     fn walk_directory(&self, dir: &Path) -> Result<Vec<PathBuf>, String> {
         let mut files = Vec::new();
+        let threads = std::env::var("CODERUN_INDEX_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4)
+            .clamp(1, 16);
 
-        // Use ignore's WalkBuilder for respecting .gitignore
+        // Use ignore's WalkBuilder for respecting .gitignore — parallel when threads>1
         let walker = WalkBuilder::new(dir)
             .hidden(false) // Include hidden files (but not .git)
             .git_ignore(true)
+            .threads(threads)
             .build();
 
         for entry in walker {
@@ -894,32 +931,62 @@ fn is_indexable_text_file(path_str: &str) -> bool {
 
 
 
-/// Check if a file is likely binary
+/// Check if a file is likely binary — legacy wrapper (keeps old behavior for tests)
 fn is_likely_binary(path: &Path) -> bool {
-    // Check extension first
+    if is_binary_extension(path) {
+        return true;
+    }
+    if let Ok(content) = std::fs::read(path) {
+        let check_len = content.len().min(512);
+        let null_count = content[..check_len].iter().filter(|&&b| b == 0).count();
+        null_count > check_len / 100
+    } else {
+        false
+    }
+}
+
+/// Fast binary check by extension only (no I/O) — Phase2
+fn is_binary_extension(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if matches!(ext,
+    matches!(ext,
         "exe" | "dll" | "so" | "dylib" | "o" | "a" | "lib" |
         "bin" | "dat" | "png" | "jpg" | "jpeg" | "gif" | "bmp" |
         "ico" | "svg" | "pdf" | "zip" | "tar" | "gz" | "bz2" |
         "xz" | "7z" | "rar" | "woff" | "woff2" | "ttf" | "otf" |
         "eot" | "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg"
-    ) {
-        return true;
-    }
+    )
+}
 
-    // Read first 512 bytes and check for null bytes
-    if let Ok(content) = std::fs::read(path) {
-        let check_len = content.len().min(512);
-        let null_count = content[..check_len]
-            .iter()
-            .filter(|&&b| b == 0)
-            .count();
-        // If more than 1% null bytes in first 512 bytes, likely binary
-        null_count > check_len / 100
-    } else {
-        false
+/// Content-based binary check — Phase2 (no extra fs::read, uses already-loaded content)
+fn is_content_binary(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let check_len = bytes.len().min(512);
+    if check_len == 0 {
+        return false;
     }
+    let null_count = bytes[..check_len].iter().filter(|&&b| b == 0).count();
+    null_count > check_len / 100
+}
+
+/// Phase2 mtime+size shortcut — true if file unchanged since last index (avoids 63k reads on warm)
+fn is_file_unchanged_fast(path: &Path, rec: &coderun_storage::FileRecord) -> bool {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if meta.len() as i64 != rec.size {
+        return false;
+    }
+    let modified = match meta.modified() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let indexed = match chrono::DateTime::parse_from_rfc3339(&rec.last_indexed_at) {
+        Ok(dt) => dt,
+        Err(_) => return false,
+    };
+    let modified_dt: chrono::DateTime<chrono::Utc> = modified.into();
+    modified_dt <= indexed.with_timezone(&chrono::Utc)
 }
 
 /// Default tantivy index path (spec §3 — MmapDirectory).
@@ -1291,7 +1358,9 @@ export async function fetchData() {
 
     #[test]
     fn test_mkdocs_ingestion_on_index() {
-        // MkDocs first-class: index_repository() walks docs/**/*.md → store_knowledge(category="docs")
+        // V1 minimal: MkDocs ingestion removed per V1_MINIMAL_STACK_PLAN.md:2.4
+        // index_repository() no longer walks docs/**/*.md → store_knowledge(category="docs")
+        // docs/*.md remains as plain markdown for agent `read`, not indexed.
         let _env = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CODERUN_INDEX_DIR");
         let dir = std::env::temp_dir().join(format!("coderun_mkdocs_{}", uuid::Uuid::new_v4()));
@@ -1303,17 +1372,17 @@ export async function fetchData() {
         let mut ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
         let stats = ri.index_repository().unwrap();
         assert!(stats.files_indexed >= 1);
-        // Re-open DB to verify docs knowledge was ingested
+        // Re-open DB to verify docs knowledge was NOT ingested (V1 minimal)
         let db2 = coderun_storage::Database::open(&db_path).unwrap();
         let repo_id = ri_repository_id_for_test(&dir);
         let docs = db2.search_knowledge("mkdocs test content", Some("docs"), 0.0, 10, Some(&repo_id)).unwrap();
-        assert!(!docs.is_empty(), "docs ingestion should have stored guide.md with category=docs");
+        assert!(docs.is_empty(), "V1 minimal: docs ingestion removed, guide.md should NOT be stored as knowledge (got {})", docs.len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_mkdocs_ingestion_is_idempotent() {
-        // TASK-032/F-3: re-running index N times must not grow the knowledge table
+        // V1 minimal: MkDocs ingestion removed per V1_MINIMAL_STACK_PLAN.md:2.4 — idempotent = zero docs every run
         let _env = ENV_LOCK.lock().unwrap();
         let index_dir = std::env::temp_dir().join(format!("coderun_idx_{}", uuid::Uuid::new_v4()));
         std::env::set_var("CODERUN_INDEX_DIR", index_dir.to_string_lossy().to_string());
@@ -1329,7 +1398,7 @@ export async function fetchData() {
         let db2 = coderun_storage::Database::open(&db_path).unwrap();
         let repo_id = ri_repository_id_for_test(&dir);
         let hits = db2.search_knowledge("idempotent mkdocs", None, 0.0, 100, Some(&repo_id)).unwrap();
-        assert_eq!(hits.len(), 1, "re-index must upsert, not duplicate (got {})", hits.len());
+        assert_eq!(hits.len(), 0, "V1 minimal: re-index must NOT store docs (got {})", hits.len());
         std::env::remove_var("CODERUN_INDEX_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }

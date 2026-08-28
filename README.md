@@ -6,10 +6,10 @@ An AI Runtime that enhances coding agents with contextual intelligence. Coderun 
 
 - **Context Engine** — Assembles contextual information from your codebase for better AI responses (`BuildContext` — `skills → docs → code` + `FROZEN PREFIX END` + dedup, requires 30s budget, fail-open)
 - **Repository Intelligence** — Incremental indexing: tree-sitter AST (**111 languages** via arborium) + ripgrep + tantivy BM25 + `sg-core` ast-grep structural + dependency graph (`graph.rs`)
-- **Knowledge Hub** — Unified surface: SQLite+tantivy BM25 + engram (HTTP 2s timeout, fail-open to `memory`). FlashRank removed from v1 per benchmark evaluation.
-- **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io) — canonical `Skill {priority,specificity}` + `max_skills_per_request=5` + conflict detection
-- **Model Router** — Heuristic complexity scoring (structural/semantic/scope `0.3/0.4/0.3`) + LiteLLM gateway with `capable→balanced→fast` fallback + `cost_usd` (`[models]` separate from `[routing]`)
-- **Execution Optimizer** — RTK adoption (`RtkAdapter` if binary present) + built-in compressors + tee-on-failure `~/.coderun/logs/tool-failures/` + `tiktoken-rs` honest savings reporting
+- **Repository Context** — Minimal v1: Tree-sitter + Tantivy BM25 (engram/codebase-memory-mcp/FlashRank removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md`/`FLASHRANK_REMOVAL.md`; Knowledge Hub/MkDocs/LiteLLM deferred — see `docs/00-project/V1_MINIMAL_STACK_PLAN.md:2`)
+- **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io) — canonical `Skill {priority,specificity}` + `max_skills_per_request=5` + conflict detection (optional, not on hot-path if absent)
+- **Model Router** — Deferred for v1 minimal (heuristic `capable→balanced→fast` kept as optional no-LiteLLM fallback; see `V1_MINIMAL_STACK_PLAN.md:2.6`)
+- **Execution Optimizer** — RTK optional (`RtkAdapter` if binary present, fallback to normal output) + built-in compressors + tee-on-failure `~/.coderun/logs/tool-failures/` + `tiktoken-rs` honest savings reporting
 - **Event Bus** — Async-only in-memory observability (`ContextBuilt`…`MemorySaved`) + `tracing`/`metrics`/`correlation_id` — no SQLite persistence in v1
 - **Workflows** — Not in v1 (preserved in `future/workflow/` for opt-in only)
 - **Metrics** — Prometheus exposition `GET /metrics` (`coderun_build_context_duration_seconds` histogram `0.01-30s`, `coderun_requests_total`, `coderun_fail_open_total`), Grafana `docs/dashboards/coderun.json`
@@ -24,15 +24,23 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # 2. Build coderun
 cargo build --release
 
-# 3. Initialize your project
-./target/release/coderun init
+# 3. Install to user bin (adds %USERPROFILE%\.coderun\bin to PATH — restart shell)
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # or: bash scripts/install.sh
+# Installed absolute: %USERPROFILE%\.coderun\bin\coderun.exe  (Windows) / ~/.coderun/bin/coderun (Unix)
 
-# 4. Index your repository
-./target/release/coderun index
+# 4. Initialize your project (use installed absolute — not ./target/release)
+~/.coderun/bin/coderun init            # Unix
+# or: %USERPROFILE%\.coderun\bin\coderun.exe init  # Windows — use absolute; do NOT search repo for .exe
+# Fallback if PATH updated: coderun init
 
-# 5. Start the daemon
-./target/release/coderun serve
+# 5. Index your repository
+~/.coderun/bin/coderun index
+
+# 6. Start the daemon (auto-started by installer; manual: ~/.coderun/bin/coderun-daemon)
+~/.coderun/bin/coderun serve
 ```
+
+> **Agents**: always use the installed absolute `%USERPROFILE%\.coderun\bin\coderun.exe` / `~/.coderun/bin/coderun` for `init`/`index`/`doctor`. Do **not** search `target/release` or walk the filesystem for `.exe` — it is already on USER PATH after `install.ps1`/`install.sh` (restart shell if `coderun --version` fails). See `AGENTS.md` and `coderun doctor` PATH probe.
 
 ## Prerequisites
 
@@ -89,7 +97,7 @@ coderun/
 │   ├── coderun-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics (workflow routes behind --features workflow)
 │   ├── coderun-cli/              # CLI — init/index/serve/preview/replay/doctor (workflow behind --features workflow, replay legacy)
 │   ├── coderun-repo-intel/       # Repository Intelligence — tree-sitter 111 langs (arborium) + ripgrep + tantivy + graph + watcher + lsp (21 tests)
-│   ├── coderun-knowledge/        # Knowledge Hub — SQLite+tantivy→rerank→engram deterministic reads (16 tests, collapsed scorer)
+│   ├── coderun-knowledge/        # Knowledge Hub — SQLite+tantivy (engram removed, see ENGRAM_CBM_REMOVAL.md) (collapsed scorer)
 │   ├── coderun-skills/           # Skill Engine — MD/TOML/YAML parsing, tag matching from_skills (8 tests)
 │   ├── coderun-context/          # Context Engine — BuildContext (tiktoken, frozen-prefix, dedup, reversible) (11 tests)
 │   ├── coderun-router/           # Model Router — heuristic + LiteLLM fallback chain + cost (11 tests)
@@ -117,7 +125,10 @@ coderun/
 Initialize coderun for the current repository.
 
 ```bash
-coderun init
+# Use installed absolute — agents must not search for .exe
+~/.coderun/bin/coderun init              # Unix
+%USERPROFILE%\.coderun\bin\coderun.exe init  # Windows
+# or bare `coderun init` only after PATH includes ~/.coderun/bin (install.ps1 / install.sh does this)
 ```
 
 Creates:
@@ -131,7 +142,8 @@ Creates:
 Index the repository for search and context building.
 
 ```bash
-coderun index
+~/.coderun/bin/coderun index              # Unix
+%USERPROFILE%\.coderun\bin\coderun.exe index  # Windows (absolute; do not search target/release)
 ```
 
 Output:
@@ -146,10 +158,11 @@ Output:
 
 ### `coderun serve`
 
-Start the daemon server (UDS primary on `/tmp/coderun.sock` + HTTP fallback on `127.0.0.1:9527`, `GET /metrics`).
+Start the daemon server (UDS primary on `/tmp/coderun.sock` + HTTP fallback on `127.0.0.1:9527`, `GET /metrics`). Auto-started by installer from `~\.coderun\bin\coderun-daemon.exe` with workdir `~\.coderun`.
 
 ```bash
-# Start with default config
+# Start with default config (prefer installed absolute)
+# Daemon already running after `install.ps1` — manual start only if `coderun doctor` shows NOT running
 coderun serve
 coderun serve --socket /tmp/coderun.sock --port 9527
 
@@ -173,7 +186,7 @@ coderun preview "fix auth" --session my-sess --no-cache
 
 Shows:
 - Skills that would match (incl. `FROZEN PREFIX END` boundary)
-- Knowledge entries (BM25→rerank→engram deterministic read) that would be included
+- Knowledge entries (BM25 local) that would be included
 - Code files (ripgrep/tantivy/graph) that would be included
 - Token budget `by_source` (`behavioral_skills 20% / docs 15% / code 55%`)
 - Model routing decision + fallback chain `capable→balanced→fast`
@@ -277,7 +290,7 @@ Skills directory: ✓ OK
 Socket path:     ✓ OK (/tmp/coderun.sock)
 Tree-sitter:     ✓ OK (111 languages via arborium)
 Tantivy:         ✓ OK (MmapDirectory)
-Engram:          ✓ Configured (http://localhost:9090, fail-open local LIKE)
+Engram:          ○ Removed — SQLite+tantivy local (see ENGRAM_CBM_REMOVAL.md)
 LiteLLM:         ✓ Configured (http://localhost:4000, fallback chain)
 RTK:             ⚠ Not found — using built-in compressors
 Tiktoken:        ✓ OK (cl100k_base LazyLock)
@@ -304,7 +317,7 @@ Configuration is loaded in order of priority (highest wins):
 | `[daemon]` | Socket path, concurrency, timeout, `metrics_port`, `rate_limit_per_session` |
 | `[database]` | SQLite path, connection pool |
 | `[index]` | Tantivy path, languages |
-| `[knowledge]` | Memory settings (`memory_enabled`, `memory_endpoint`) |
+| `[knowledge]` | Knowledge settings (`max_knowledge_entries`) — `memory_enabled`/`memory_endpoint` removed (see ENGRAM_CBM_REMOVAL.md) |
 | `[skills]` | Skills directory, auto-discovery |
 | `[context]` | Token budget, file limits, `cache_order` |
 | `[model]` | Default tier, routing toggle |
@@ -324,7 +337,7 @@ Configuration is loaded in order of priority (highest wins):
 | `CODERUN_MODEL_DEFAULT` | model.default_tier | balanced |
 | `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
 | `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
-| `CODERUN_ENGRAM_ENDPOINT` | knowledge.memory_endpoint | http://localhost:9090 |
+| `CODERUN_ENGRAM_ENDPOINT` | *removed* — engram retired (see ENGRAM_CBM_REMOVAL.md) | — |
 <!-- workflow env vars removed from v1 — see future/workflow/README.md (opt-in CODERUN_WORKFLOW_ENABLED=true) -->
 
 ## Skills
@@ -423,8 +436,8 @@ rate limit, throttle, request limit, API limit, middleware, security
 └──────┬──────┘  └─────────────┘  └─────────────┘
         │
         ├──► Repository Intelligence (tree-sitter/ast-grep/ripgrep/tantivy/graph/watcher/lsp)
-        ├──► Knowledge Hub (tantivy→engram deterministic reads)
-        ├──► Skill Engine (tag-based, full-instruction injection)
+         ├──► Knowledge Hub (tantivy local)
+         ├──► Skill Engine (tag-based, full-instruction injection)
         └──► Model Router (heuristic + LiteLLM fallback chain)
                            │
                     ┌──────┴──────┐
@@ -439,8 +452,8 @@ rate limit, throttle, request limit, API limit, middleware, security
 2. Adapter Layer validates, rate-limits (10/s burst 20 per `session_id`), generates correlation ID
 3. Context Engine assembles context pack (`RwLock` read, concurrent sessions):
    - Searches code via Repository Intelligence (ripgrep/tantivy/graph, `tiktoken-rs` budgets)
-   - Retrieves knowledge via Knowledge Hub (BM25 top20 → rerank adaptive K `5-20` → engram 2s fail-open)
-   - Matches skills via Skill Engine (deterministic tag scoring, dedup via `session_fingerprints`)
+    - Retrieves knowledge via Knowledge Hub (BM25 top20 → rerank adaptive K `5-20` local)
+    - Matches skills via Skill Engine (deterministic tag scoring, dedup via `session_fingerprints`)
    - Orders: `behavioral_skills` (20%) → `docs_context` (15%) → `code_context` (55%) + `FROZEN PREFIX END` boundary
    - Reversible truncation (`~/.coderun/cache/originals/{hash}`) + `get_original()`
 4. Model Router selects tier (`capable→balanced→fast` fallback via LiteLLM, `cost_usd` tracked)
@@ -521,7 +534,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | Storage | ✅ Complete | SQLite WAL + tantivy BM25 + `005_audits.sql` (`audits`+`workflows`) + `cost_usd` |
 | Repository Intelligence | ✅ Complete | tree-sitter **111 languages (arborium)** + ripgrep + tantivy full-text + `graph.rs` edges + `watcher.rs` `notify+git2` + stub `lsp.rs` |
 | Skill Engine | ✅ Complete | MD/TOML/YAML, tag matching `from_skills` canonical, conflict detection, full-instruction injection |
-| Knowledge Hub | ✅ Complete | BM25 top20→rerank adaptive `5-20` (TF-IDF, `ort` int8) + engram 2s fail-open + collapsed scorer delegates to `SkillEngine` |
+| Knowledge Hub | ✅ Complete | BM25 top20→rerank adaptive `5-20` (TF-IDF, `ort` int8) local — engram removed (see ENGRAM_CBM_REMOVAL.md) |
 | Model Router | ✅ Complete | Heuristic scoring + LiteLLM gateway `capable→balanced→fast` fallback + fallback tests |
 | Execution Optimizer | ✅ Complete | `RtkAdapter` (binary if present, `~10ms`) + tee-on-failure → `~/.coderun/logs/tool-failures/` + `tiktoken-rs` `LazyLock` |
 | Context Engine | ✅ Complete | `BuildContext` + `RwLock` concurrency, cache-order `skills→docs→code` + `FROZEN PREFIX END` + dedup + reversible `get_original()` + `tiktoken-rs` budgets |
@@ -542,7 +555,8 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | ripgrep | Fast text search (`grep-searcher`+`ignore`) | ✅ Integrated `repo-intel/src/lib.rs` |
 | tantivy | BM25 in-process MmapDirectory + `tantivy_index.rs` wiring | ✅ Integrated (repo-intel `search_fulltext` + storage `005`) |
 | ast-grep | Structural search `search_structural()` `sg-core` gated | ✅ Integrated `sg-core` first-class (`search_structural_fallback` only on Err) |
-| engram | Cross-session memory HTTP `2s` timeout, fail-open local `LIKE` | ✅ Integrated `knowledge/src/engram.rs`+`try_engram_search` |
+| engram | Cross-session memory HTTP `2s` timeout, fail-open local `LIKE` | ❌ Removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (SQLite+tantivy local) |
+| codebase-memory-mcp | Dependency graph probe `npx` / `search_graph --json` 10s timeout | ❌ Removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (local AST+regex) |
 | FlashRank (`ort`) | Removed from v1 runtime per benchmark evaluation — see `docs/01-architecture/FLASHRANK_REMOVAL.md` | ❌ Removed (offline eval only) |
 | LiteLLM | Gateway `select_model` + `fallback_chain()` `capable→balanced→fast` + `cost_usd` | ✅ Integrated `router/src/litellm.rs` |
 | RTK | Tool-output compression `RtkAdapter::detect()` + tee-on-failure `~/.coderun/logs/tool-failures/` | ✅ Integrated `optimizer/src/rtk.rs` (binary optional, built-ins on Err) |

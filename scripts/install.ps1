@@ -7,7 +7,7 @@
 
 .DESCRIPTION
   Tools: Rust, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
-         ast-grep, engram, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo
+         ast-grep, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo
   Prebuilt: target/release/coderun.exe + coderun-daemon.exe are used directly (no cargo build/test).
 
 .PARAMETER SkipBuild
@@ -111,112 +111,24 @@ else {
   }
   else { Warn "npm not found - cannot install ast-grep (heuristic fallback will WARN)" }
 
-  # engram - local binary from .coderun/engram/*.zip (no git clone, no external repo)
-  $engramBinPath = "$env:USERPROFILE\bin\engram.exe"
-  $engramInstalled = $false
-  if (Test-Cmd engram) { Ok "engram $(engram --version 2>&1 | Select-Object -First 1)"; $engramInstalled = $true }
-  elseif (Test-Path $engramBinPath) { Ok "engram binary at $engramBinPath"; $engramInstalled = $true }
-  if (-not $engramInstalled) {
-    $repoEngramZip = Get-ChildItem -LiteralPath "$Root\.coderun\engram" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
-    # also support already-extracted binary in repo
-    $repoEngramExe = Get-ChildItem -LiteralPath "$Root\.coderun\engram" -Filter "engram.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($repoEngramExe -and (Test-Path $repoEngramExe.FullName)) {
-      try {
-        New-Item -ItemType Directory -Force -Path (Split-Path $engramBinPath -Parent) | Out-Null
-        Copy-Item -LiteralPath $repoEngramExe.FullName -Destination $engramBinPath -Force
-        Ok "engram installed to $engramBinPath (from .coderun\engram\engram.exe)"
-        $engramInstalled = $true
-      } catch { Warn "engram copy from repo failed: $_ - local LIKE fallback" }
-    } elseif ($repoEngramZip) {
-      try {
-        New-Item -ItemType Directory -Force -Path (Split-Path $engramBinPath -Parent) | Out-Null
-        $tmpExtract = Join-Path $env:TEMP "engram_extract"
-        if (Test-Path $tmpExtract) { Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue }
-        Expand-Archive -LiteralPath $repoEngramZip.FullName -DestinationPath $tmpExtract -Force
-        $srcExe = Get-ChildItem -LiteralPath $tmpExtract -Recurse -Filter "engram.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($srcExe) {
-          Copy-Item -LiteralPath $srcExe.FullName -Destination $engramBinPath -Force
-          Ok "engram installed to $engramBinPath (from $($repoEngramZip.Name))"
-          $engramInstalled = $true
-        } else { Warn "engram zip did not contain engram.exe - local LIKE fallback" }
-      } catch { Warn "engram install from zip failed: $_ - local LIKE fallback" }
-    } else {
-      Warn "engram zip not found at .coderun\engram\*.zip - local LIKE fallback"
-    }
-  }
-  if (Test-Path "$Root\..\engram") { Ok "legacy engram clone at ..\engram (unused, local binary preferred - can be removed)" }
-  # Show engram detail if installed
-  if ($engramInstalled -and (Test-Path $engramBinPath)) {
-    try { $engramVer = & $engramBinPath --version 2>&1 | Select-Object -First 1; Ok "engram detail: $engramVer at $engramBinPath" } catch {}
-  }
-
+    # engram removed — see docs/01-architecture/ENGRAM_CBM_REMOVAL.md (SQLite+tantivy local)
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
 
-  # codebase-memory-mcp - extract from bundled zip or download from GitHub releases
-  $cbmBinPath = "$env:USERPROFILE\bin\codebase-memory-mcp.exe"
-  $cbmBinNoExt = "$env:USERPROFILE\bin\codebase-memory-mcp"
-  $cbmInstalled = $false
-  if (Test-Cmd codebase-memory-mcp) { Ok "codebase-memory-mcp $(codebase-memory-mcp --version 2>&1 | Select-Object -First 1)"; $cbmInstalled = $true }
-  elseif (Test-Path $cbmBinPath) { Ok "codebase-memory-mcp binary at $cbmBinPath"; $cbmInstalled = $true }
-  if (-not $cbmInstalled) {
-    # Try bundled zip first
-    $cbmZip = Get-ChildItem -LiteralPath "$Root\.coderun\codebase-memory" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $cbmExe = Get-ChildItem -LiteralPath "$Root\.coderun\codebase-memory" -Filter "codebase-memory-mcp.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cbmExe -and (Test-Path $cbmExe.FullName)) {
-      try {
-        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
-        Copy-Item -LiteralPath $cbmExe.FullName -Destination $cbmBinPath -Force
-        Copy-Item -LiteralPath $cbmExe.FullName -Destination $cbmBinNoExt -Force
-        Ok "codebase-memory-mcp installed (from .coderun\codebase-memory binary)"
-        $cbmInstalled = $true
-      } catch { Warn "codebase-memory-mcp copy failed: $_" }
-    } elseif ($cbmZip) {
-      try {
-        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
-        $tmpExtract = Join-Path $env:TEMP "cbm_extract"
-        if (Test-Path $tmpExtract) { Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue }
-        Expand-Archive -LiteralPath $cbmZip.FullName -DestinationPath $tmpExtract -Force
-        $srcExe = Get-ChildItem -LiteralPath $tmpExtract -Recurse -Filter "codebase-memory-mcp.exe" | Select-Object -First 1
-        if ($srcExe) {
-          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinPath -Force
-          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinNoExt -Force
-          Ok "codebase-memory-mcp installed (from $($cbmZip.Name))"
-          $cbmInstalled = $true
-        } else { Warn "codebase-memory-mcp zip did not contain codebase-memory-mcp.exe" }
-        Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
-      } catch { Warn "codebase-memory-mcp extraction failed: $_" }
-    }
-    # Fallback: download from GitHub releases
-    if (-not $cbmInstalled) {
-      try {
-        Info "  Downloading codebase-memory-mcp from GitHub..."
-        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
-        $cbmUrl = "https://github.com/nicholasgasior/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-windows-amd64.zip"
-        $cbmZipPath = Join-Path $env:TEMP "codebase-memory-mcp.zip"
-        Invoke-WebRequest -Uri $cbmUrl -OutFile $cbmZipPath -UseBasicParsing
-        $tmpExtract = Join-Path $env:TEMP "cbm_download_extract"
-        if (Test-Path $tmpExtract) { Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue }
-        Expand-Archive -LiteralPath $cbmZipPath -DestinationPath $tmpExtract -Force
-        $srcExe = Get-ChildItem -LiteralPath $tmpExtract -Recurse -Filter "codebase-memory-mcp.exe" | Select-Object -First 1
-        if ($srcExe) {
-          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinPath -Force
-          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinNoExt -Force
-          Ok "codebase-memory-mcp downloaded and installed"
-          $cbmInstalled = $true
-        } else { Warn "codebase-memory-mcp download zip did not contain binary" }
-        Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
-      } catch { Warn "codebase-memory-mcp download failed: $_" }
-    }
-    if (-not $cbmInstalled) { Warn "codebase-memory-mcp could not be installed" }
+    # codebase-memory-mcp removed — see ENGRAM_CBM_REMOVAL.md (local AST+regex)
   }
 
   # LiteLLM proxy
   if (Test-Cmd pip) { try { pip show litellm 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { pip install "litellm[proxy]" 2>&1 | Out-Null }; Ok "litellm pip" } catch { Warn "litellm pip install failed" } }
 
-  # RTK - extract from .coderun\rtk\*.zip (Windows) -> ~\bin\rtk.exe (NO COMPILE). Cargo source build only as last resort.
-  $rtkBinPath = "$env:USERPROFILE\bin\rtk.exe"
+  # RTK - extract from .coderun\rtk\*.zip (Windows) -> ~\.coderun\bin\rtk.exe (NO COMPILE). Unified bin.
+  $rtkBinPath = Join-Path $env:USERPROFILE ".coderun\bin\rtk.exe"
   if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
   elseif (Test-Path $rtkBinPath) { $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; Ok "rtk binary at $rtkBinPath" }
+  # Migrate legacy ~/bin/rtk.exe -> ~/.coderun/bin/rtk.exe
+  $legacyRtk = "$env:USERPROFILE\bin\rtk.exe"
+  if ((Test-Path $legacyRtk) -and -not (Test-Path $rtkBinPath)) {
+    try { Copy-Item -LiteralPath $legacyRtk -Destination $rtkBinPath -Force; Ok "migrated legacy $legacyRtk -> $rtkBinPath" } catch {}
+  }
   else {
     $repoZip = Get-ChildItem -LiteralPath "$Root\.coderun\rtk" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($repoZip -and (Test-Path $repoZip.FullName)) {
@@ -406,21 +318,6 @@ $opencodeDir = Join-Path $Root ".opencode"   # legacy project dir - cleaned belo
 $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
 $ocGlobalCfg = Join-Path $ocGlobalDir "opencode.jsonc"
 New-Item -ItemType Directory -Force -Path $ocGlobalDir | Out-Null
-# Skip engram copy if already in ~/bin (the plugin resolves it from PATH)
-if (-not (Test-Path $engramBinPath)) {
-  # Only copy engram to opencode dir if not installed in ~/bin
-  $opencodeEngramDir = Join-Path $ocGlobalDir "engram"
-  $opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
-  $engramSrc = $null
-  if (Get-Command engram -ErrorAction SilentlyContinue) { $engramSrc = (Get-Command engram -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source) }
-  if ($engramSrc -and (Test-Path $engramSrc)) {
-    try {
-      New-Item -ItemType Directory -Force -Path $opencodeEngramDir | Out-Null
-      Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBin -Force -ErrorAction Stop
-      Ok "engram copied to $opencodeEngramDir"
-    } catch {}
-  }
-}
 # Global config: plugin only
 $opencodeJsonc = @"
 {
@@ -473,7 +370,19 @@ if (Test-Path $pluginDir) {
     Pop-Location
   }
 } else { Warn "packages/opencode-coderun not found - skipping npm plugin install" }
-Info "Restart opencode to load plugin (daemon http://127.0.0.1:9527)"
+
+# 3b. opencode global skill: coderun -> ~/.config/opencode/skills/coderun (opencode discovers via skill tool — not ~/.coderun/skills)
+$srcSkillDir = Join-Path $Root ".opencode\skills\coderun"
+$dstSkillDir = Join-Path $env:USERPROFILE ".config\opencode\skills\coderun"
+if (Test-Path (Join-Path $srcSkillDir "SKILL.md")) {
+  try {
+    New-Item -ItemType Directory -Force -Path $dstSkillDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $srcSkillDir "SKILL.md") -Destination (Join-Path $dstSkillDir "SKILL.md") -Force -ErrorAction Stop
+    Ok "coderun skill installed to $dstSkillDir (global opencode)"
+  } catch { Warn "failed to install coderun skill to ${dstSkillDir}: $_" }
+} else { Warn "coderun skill source not found at $srcSkillDir\SKILL.md - skipped" }
+
+Info "Restart opencode to load plugin (daemon http://127.0.0.1:9527) + skill 'coderun'"
 
 # 4. Start daemon - coderun must be in RUNNING state after installation
 # TASK-037: launch the daemon from ~\.coderun\bin (installed copy) so the runtime keeps

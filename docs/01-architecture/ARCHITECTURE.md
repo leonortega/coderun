@@ -32,7 +32,6 @@ graph TB
 
         subgraph Local Storage
             DB[(SQLite)]
-            ENG[(engram)]
             TV[(Tantivy/BM25)]
             FS[Filesystem]
         end
@@ -56,7 +55,6 @@ graph TB
 
     RI --> DB
     RI --> TV
-    KH --> ENG
     KH --> TV
     SE --> FS
 
@@ -92,7 +90,6 @@ graph TD
     CE --> MR[Model Router]
 
     KH --> SE[Skill Engine]
-    KH --> ENG[engram]
     KH --> TV[Tantivy/BM25]
 
     RI --> DB[(SQLite)]
@@ -130,7 +127,7 @@ The runtime runs as a single Rust daemon process. All modules execute within thi
 │  ┌──────────────────┐  ┌──────────────────────────────┐  │
 │  │  RTK Integration │  │     Local Storage             │  │
 │  │  (tool output    │  │  - SQLite connection pool     │  │
-│  │   compression)   │  │  - engram HTTP client         │  │
+│  │   compression)   │  │  - SQLite+tantivy local         │  │
 │  │                  │  │  - Tantivy index handles      │  │
 │  │                  │  │  - Filesystem handles         │  │
 │  └──────────────────┘  └──────────────────────────────┘  │
@@ -251,7 +248,7 @@ Reference: `crates/coderun-core/src/traits.rs:33-58` + `crates/coderun-workflow/
 | Repository ASTs | Repository Intelligence | In-memory + cached | Rebuilt on incremental update |
 | Repository metadata | Repository Intelligence | SQLite | Persistent across restarts |
 | BM25/tantivy index | Repository Intelligence + Knowledge Hub | Tantivy directory | Persistent across restarts |
-| Memory entries | Knowledge Hub | engram (SQLite+FTS5) | Persistent across restarts |
+| Memory entries | Knowledge Hub | SQLite+tantivy local | Persistent across restarts |
 | Knowledge entries | Knowledge Hub | SQLite + Tantivy | Persistent across restarts |
 | Skill definitions | Skill Engine | Community-format files | Persistent, developer-managed |
 | Skill match results | Skill Engine | In-memory per request | Ephemeral |
@@ -319,11 +316,11 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 | Structural Search | `sg-core` gated `search_structural()` first-class, `search_structural_fallback()` only on `Err` | `repo-intel/src/lib.rs:352` |
 | Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |
 | Full-text Index | tantivy `MmapDirectory` (in-process) | `storage/src/tantivy_index.rs` + `search_fulltext()` wiring |
-| Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (optional `codebase-memory-mcp` probe `CODERUN_MCP_ENABLED`, not wired into hot-path retrieval) | `repo-intel/src/graph.rs` |
+| Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (local AST+regex) | `repo-intel/src/graph.rs` |
 | Watcher | `notify+git2` incremental `diff_tree_to_workdir` first-class (feature `git-watcher` default), polling 5s fallback only on `Err` | `repo-intel/src/watcher.rs` |
 | LSP | Stub `LspClient` (`CODERUN_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
 | Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see `FLASHRANK_REMOVAL.md` | `knowledge/src/rerank.rs` |
-| Memory | engram HTTP `2s timeout` deterministic reads, fail-open local `LIKE` | `knowledge/src/engram.rs` + `try_engram_search` |
+| Memory | SQLite+tantivy local (engram removed — see `ENGRAM_CBM_REMOVAL.md`) | `coderun-storage` local | |
 | Model Gateway | LiteLLM HTTP + heuristic `capable→balanced→fast` `fallback_chain()` + `cost_usd` | `router/src/litellm.rs` + `src/lib.rs:223` |
 | Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.coderun/logs/tool-failures/` | `optimizer/src/rtk.rs` |
 | Token Counting | `tiktoken-rs` `cl100k_base` + `heuristic` fallback | `context/src/lib.rs:389`/`optimizer/src/lib.rs:303` |
@@ -339,4 +336,4 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 | Testing/Bench | `cargo test` (165 tests) + `promptfoo` + `criterion` `benches/context_bench.rs` (p95 <50ms) | `benches/` |
 | Distribution | `Dockerfile` (distroless), `Formula/coderun.rb` (brew tap+launchd), `cargo-wix` MSI | `deploy/` |
 | Async Runtime | `tokio` full | `daemon`+`workflow` |
-| HTTP Client | `reqwest` (LiteLLM, engram, DBOS) | `router`+`knowledge`+`workflow` |
+| HTTP Client | `reqwest` (LiteLLM, DBOS) | `router`+`workflow` |

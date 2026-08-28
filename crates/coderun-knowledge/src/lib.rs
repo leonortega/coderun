@@ -1,4 +1,3 @@
-pub mod engram;
 pub mod rerank;
 
 use std::path::Path;
@@ -10,15 +9,10 @@ use tracing::{debug, info};
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-/// KnowledgeConfig — rerank_enabled (kept for compat, always passthrough), memory_enabled gates engram
+/// KnowledgeConfig — rerank_enabled kept for compat (passthrough), storage is SQLite+tantivy local
 #[derive(Debug, Clone)]
 pub struct KnowledgeConfig {
     pub rerank_enabled: bool,
-    pub memory_enabled: bool,
-    /// Path to engram binary (CLI mode, no server needed). If empty, uses default discovery.
-    pub engram_binary_path: String,
-    /// DEPRECATED: Use engram_binary_path instead. Kept for config compat.
-    pub memory_endpoint: String,
     pub max_knowledge_entries: usize,
 }
 
@@ -26,9 +20,6 @@ impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
             rerank_enabled: false, // v1: FlashRank removed per benchmark; reranker is passthrough
-            memory_enabled: true,
-            engram_binary_path: String::new(), // auto-discover
-            memory_endpoint: "http://localhost:9090".to_string(), // deprecated
             max_knowledge_entries: 10000,
         }
     }
@@ -143,9 +134,9 @@ impl KnowledgeHub {
         self.db.decay_knowledge_confidence(min_age_days, decay_amount)
     }
 
-    // ── Knowledge Retrieval (BM25 + engram, spec §3) ───────
+    // ── Knowledge Retrieval (BM25 local, spec §3) ───────
 
-    /// Retrieve knowledge matching a query — lexical BM25/tantivy + engram memory.
+    /// Retrieve knowledge matching a query — lexical BM25/tantivy local.
     /// `repository_id: Some(id)` scopes results to one repository (TASK-030/F-1).
     pub fn retrieve_knowledge(
         &self,
@@ -154,11 +145,10 @@ impl KnowledgeHub {
         max_results: usize,
         repository_id: Option<&str>,
     ) -> Result<Vec<KnowledgeEntry>, String> {
-        // Step 1: lexical search (tantivy if available, else LIKE) — cheap pass, collect top 20
+        // lexical search (tantivy if available, else LIKE) — collect top 20, filter by confidence ≥0.3
         let lexical_limit = 20usize;
         let records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit, repository_id)?;
 
-        // Step 2: map records to KnowledgeEntry, filter by confidence ≥0.3, take max_results
         // v1: FlashRank removed — reranker is passthrough (see rerank.rs module docs)
         let mut entries: Vec<KnowledgeEntry> = Vec::new();
         for rec in records.into_iter().take(max_results) {
@@ -175,30 +165,7 @@ impl KnowledgeHub {
             }
         }
 
-        // Step 3: deterministic engram read (hot path via HTTP, 2s timeout, fail-open)
-        // Spec: reads happen deterministically inside pre-generation hook, not MCP tool-choice
-        // Calls Engram HTTP directly (no MCP required) — gated only by memory_enabled config
-        if self.config.memory_enabled {
-            if let Ok(engram_hits) = self.try_engram_search(query, category_filter, 3) {
-                for (key, value) in engram_hits {
-                    // engram hits get confidence boost 1.1 (cross-session memory)
-                    entries.push(KnowledgeEntry {
-                        id: None,
-                        category: "memory".to_string(),
-                        key,
-                        value,
-                        confidence: 0.75,
-                        source: "engram".to_string(),
-                        relevance_score: Some(0.9),
-                    });
-                }
-                if entries.len() > max_results {
-                    entries.truncate(max_results);
-                }
-            }
-        }
-
-        debug!(query = query, results = entries.len(), "Knowledge retrieval (BM25+engram)");
+        debug!(query = query, results = entries.len(), "Knowledge retrieval (BM25 local)");
 
         Ok(entries)
     }
@@ -206,57 +173,6 @@ impl KnowledgeHub {
     /// Check if the Knowledge Hub has any seeded knowledge for this repository (P0 #3 proactive detection)
     pub fn is_initialized(&self, repository_id: Option<&str>) -> bool {
         self.db.count_knowledge(repository_id).unwrap_or(0) > 0
-    }
-
-    /// Try engram CLI search with 2s timeout, fail-open to local only (spec §3)
-    /// Primary: `EngramClient::search_memory()` via CLI `engram search` command.
-    /// Fallback: `db.search_memory()` LIKE only on Err/timeout with WARN.
-    pub(crate) fn try_engram_search(&self, query: &str, _category: Option<&str>, max: usize) -> Result<Vec<(String,String)>, String> {
-        if !self.config.memory_enabled {
-            return self.db.search_memory("default", query, max)
-                .map(|recs| recs.into_iter().map(|r| (r.key, r.value)).collect());
-        }
-        // FIRST-CLASS: attempt engram CLI (no server needed, direct binary call)
-        let engram_cfg = if !self.config.engram_binary_path.is_empty() {
-            crate::engram::EngramConfig {
-                binary_path: self.config.engram_binary_path.clone(),
-                ..Default::default()
-            }
-        } else {
-            crate::engram::EngramConfig::default()
-        };
-        if let Ok(client) = crate::engram::EngramClient::new(engram_cfg) {
-            let query_owned = query.to_string();
-            let max_owned = max;
-            let binary_path = client.binary_path().to_string();
-            let cli_result: Result<Vec<(String,String)>, String> = std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                rt.block_on(async {
-                    let q = crate::engram::MemoryQuery { namespace: "default".to_string(), query: query_owned, max_results: Some(max_owned) };
-                    match tokio::time::timeout(std::time::Duration::from_millis(2000), client.search_memory(&q)).await {
-                        Ok(Ok(res)) => Ok(res.entries.into_iter().map(|e| (e.key, e.value)).collect()),
-                        Ok(Err(e)) => Err(e),
-                        Err(_) => Err("engram CLI timeout 2s".to_string()),
-                    }
-                })
-            }).join().unwrap_or(Err("engram thread join failed".to_string()));
-            match cli_result {
-                Ok(hits) => {
-                    if !hits.is_empty() {
-                        tracing::debug!(binary=%binary_path, hits=%hits.len(), "Engram CLI primary hit");
-                    }
-                    return Ok(hits);
-                }
-                Err(e) => {
-                    tracing::warn!(binary=%binary_path, error=%e, "Engram CLI primary failed, fail-open to local LIKE");
-                }
-            }
-        }
-        // FALLBACK only on Err/timeout
-        match self.db.search_memory("default", query, max) {
-            Ok(recs) => Ok(recs.into_iter().map(|r| (r.key, r.value)).collect()),
-            Err(e) => Err(e),
-        }
     }
 
     // ── Knowledge Extraction ───────────────────────────────────────
@@ -318,9 +234,9 @@ impl KnowledgeHub {
         Ok(extracted)
     }
 
-    // ── Memory Operations (via engram or local) ────────────────────
+    // ── Memory Operations (SQLite local) ────────────────────
 
-    /// Save to memory (local SQLite fallback)
+    /// Save to memory (SQLite local)
     pub fn memory_save(&self, namespace: &str, key: &str, value: &str) -> Result<i64, String> {
         let id = self.db.save_memory(namespace, key, value)?;
         
@@ -333,7 +249,7 @@ impl KnowledgeHub {
         Ok(id)
     }
 
-    /// Search memory (local SQLite fallback)
+    /// Search memory (SQLite local)
     pub fn memory_search(&self, namespace: &str, query: &str, max_results: usize) -> Result<Vec<(String, String)>, String> {
         let records = self.db.search_memory(namespace, query, max_results)?;
         Ok(records
@@ -484,12 +400,10 @@ mod tests {
         Database::open(&path).expect("Failed to create in-memory database")
     }
 
-    /// Hermetic test hub — memory_enabled=false so NOTHING depends on an external
-    /// engram server being alive (compile-time test runs must never touch network)
     fn test_hub() -> KnowledgeHub {
         let db = test_db();
         let event_bus = EventBus::new();
-        let config = KnowledgeConfig { memory_enabled: false, ..Default::default() };
+        let config = KnowledgeConfig::default();
         KnowledgeHub::new(db, event_bus, config)
     }
 
@@ -662,9 +576,6 @@ mod tests {
         assert!(terms.iter().any(|(t, _, _)| t == "user"));
     }
 
-    // ── v0.5.0 first-class tool tests ──────────────────────────────────
-    // Note: try_engram_search is private → test via public retrieve_knowledge/memory_search paths
-
     #[test]
     fn test_retrieve_knowledge_repo_scoped() {
         // TASK-030/F-1: retrieval must be repository-scoped
@@ -681,31 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_engram_search_fallback_when_endpoint_down() {
-        // Engram MCP primary tries HTTP 2s timeout → on Err falls back to local LIKE with WARN
-        let hub = test_hub(); // default memory_endpoint http://localhost:9090 (likely down in CI)
-        hub.memory_save("default", "fallback_key", "fallback_value contains engram_test_token").unwrap();
-        // try_engram_search is private, but retrieve_knowledge exercises it via the same path
-        // When engram is down, retrieve should still return local hits via fallback
-        hub.store_knowledge(&KnowledgeEntry { id: None, category: "default".to_string(), key: "fallback_key".to_string(), value: "fallback_value contains engram_test_token".to_string(), confidence: 0.8, source: "test".to_string(), relevance_score: None }).unwrap();
-        let res = hub.retrieve_knowledge("engram_test_token", None, 5, None).unwrap();
-        assert!(!res.is_empty(), "fallback LIKE should return hits when engram down");
-    }
-
-    #[test]
-    fn test_try_engram_search_direct_fallback() {
-        let hub = test_hub();
-        // Save to local memory so fallback has data
-        hub.memory_save("default", "engram_direct", "hello engram direct fallback").unwrap();
-        // Call private try_engram_search via retrieve path — endpoint down → fallback path
-        // We test that try_engram_search never panics and returns at least empty vec
-        let hits = hub.try_engram_search("engram direct", None, 3).unwrap();
-        // May be 0 or 1 depending on local fallback; key is it doesn't error when HTTP is down
-        assert!(hits.len() <= 3);
-    }
-
-    #[test]
-    fn test_retrieve_knowledge_bm25_rerank_engram_pipeline() {
+    fn test_retrieve_knowledge_bm25_local() {
         let hub = test_hub();
         for i in 0..5 {
             hub.store_knowledge(&KnowledgeEntry { id: None, category: "docs".to_string(), key: format!("k{i}"), value: format!("rerank test doc {i} contains rust"), confidence: 0.6, source: "test".to_string(), relevance_score: None }).unwrap();
@@ -713,19 +600,6 @@ mod tests {
         let res = hub.retrieve_knowledge("rust", Some("docs"), 3, None).unwrap();
         assert!(!res.is_empty());
         assert!(res.len() <= 3);
-        // Adaptive K is exercised internally — no panic means pipeline (tantivy→rerank→engram) works
-    }
-
-    #[test]
-    fn test_engram_config_driven_timeout() {
-        let db = test_db();
-        let event_bus = EventBus::new();
-        let config = KnowledgeConfig { rerank_enabled: false, memory_enabled: true, engram_binary_path: String::new(), memory_endpoint: "http://127.0.0.1:59999".to_string(), max_knowledge_entries: 10000 };
-        let hub = KnowledgeHub::new(db, event_bus, config);
-        hub.memory_save("default", "timeout_test", "timeout value").unwrap();
-        let hits = hub.try_engram_search("timeout_test", None, 5).unwrap();
-        // Should fallback to local memory even when endpoint is bogus (2s timeout handled)
-        assert!(hits.iter().any(|(k,_)| k=="timeout_test") || hits.is_empty());
     }
 
     #[test]

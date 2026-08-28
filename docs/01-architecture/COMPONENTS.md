@@ -416,12 +416,12 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 
 ### Purpose
 
-One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes three retrieval strategies: tag-based skill matching, lexical search with reranking for docs/code, and engram for memory.
+One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes two retrieval strategies: tag-based skill matching and lexical search for docs/code (engram and reranking removed — see `ENGRAM_CBM_REMOVAL.md`, `FLASHRANK_REMOVAL.md`).
 
 ### v0.2.0 Implementation
 
 - **SQLite** for knowledge storage with LIKE-based search
-- **engram** HTTP client for cross-session memory
+- **tantivy BM25** for lexical retrieval
 - **Reranker** passthrough (FlashRank removed from v1 per benchmark — see `FLASHRANK_REMOVAL.md`)
 - **Pattern detection** for knowledge extraction (naming, architectural, domain)
 
@@ -430,7 +430,7 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 - Store and retrieve knowledge entries across all categories
 - Manage skill registry and tag-based matching
 - Perform lexical search for docs and code
-- Store and retrieve memory via engram
+- Store and retrieve memory via SQLite+tantivy local
 - Detect and extract knowledge from indexed code
 - Decay confidence of unused knowledge
 
@@ -442,8 +442,8 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 | retrieve_knowledge | KnowledgeQuery | Query to find relevant knowledge |
 | match_skills | SkillMatchQuery | Task description for skill matching |
 | extract_knowledge | ExtractRequest | Extract knowledge from code analysis |
-| memory_save | MemoryEntry | Save to engram memory |
-| memory_search | MemoryQuery | Search engram memory |
+| memory_save | MemoryEntry | Save to memory (SQLite local) |
+| memory_search | MemoryQuery | Search memory (SQLite local) |
 
 ### Outputs
 
@@ -455,9 +455,8 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 
 ### Dependencies
 
-- SQLite (knowledge storage)
+- SQLite (knowledge + memory storage)
 - BM25/tantivy (knowledge and docs search index)
-- engram (memory storage and retrieval)
 
 ### Persistent Data
 
@@ -465,7 +464,7 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 |------|---------|---------|
 | Knowledge entries | SQLite `knowledge` table | Store knowledge with metadata |
 | Knowledge index | BM25/tantivy | Enable full-text search of knowledge |
-| Memory entries | engram (SQLite+FTS5) | Persistent cross-session memory |
+| Memory entries | SQLite (local) | Persistent cross-session memory |
 
 ### Runtime Behavior
 
@@ -515,8 +514,8 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 |-------|----------|
 | SQLite write failure | Log warning, continue without storing |
 | BM25/tantivy write failure | Log warning, continue without indexing |
-| engram unreachable | Continue without memory, log warning |
-| engram unreachable | Continue without memory, log warning |
+| SQLite memory unreachable | Continue without memory, log warning |
+| SQLite memory unavailable | Continue without memory, log warning |
 | Duplicate key | Merge with existing entry |
 
 ### Boundaries
@@ -531,7 +530,7 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 
 - Use SQLite for knowledge storage
 - Use BM25/tantivy for knowledge search
-- Use engram HTTP API for memory operations
+- Use SQLite for memory operations (engram removed)
 - Knowledge categories: `convention`, `pattern`, `domain`, `decision`
 - Each knowledge entry has: id, category, key, value, confidence, source, created_at, updated_at
 - Skill registry loaded from community-format files at daemon startup
@@ -1101,7 +1100,7 @@ Provide command-line interface for daemon management, repository inspection, and
 1. Load configuration
 2. Initialize logging
 3. Open database and index
-4. Start engram
+4. Initialize knowledge store
 5. Load skills
 6. Index repository (background)
 7. Start Unix socket server

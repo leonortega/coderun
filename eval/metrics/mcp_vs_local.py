@@ -18,9 +18,11 @@ import pathlib
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-CBM_BIN = os.path.expanduser("~/bin/codebase-memory-mcp.exe")
+CBM_BIN = os.path.expanduser("~/.coderun/bin/codebase-memory-mcp.exe")
 if not os.path.exists(CBM_BIN):
-    CBM_BIN = "codebase-memory-mcp"
+    # legacy ~/bin fallback
+    _legacy = os.path.expanduser("~/bin/codebase-memory-mcp.exe")
+    CBM_BIN = _legacy if os.path.exists(_legacy) else "codebase-memory-mcp"
 
 EXTS = ("cs", "cshtml", "razor", "json", "ts", "tsx", "js", "jsx", "md", "yml",
         "yaml", "cpp", "h", "go", "rs", "py", "java", "kt", "rb", "php", "swift", "scala")

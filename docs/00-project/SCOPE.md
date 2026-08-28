@@ -10,13 +10,13 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 |------|------------------|
 | **Agent Interception** | Pre-generation and pre-tool-call hooks for Tier 1 agents (opencode, Claude Code, Cursor, Gemini CLI, Copilot, OpenClaw, Pi, Factory Droid). Tier 2 agents supported as best-effort via convention-based integration. |
 | **Repository Intelligence** | Incremental AST parsing (tree-sitter), structural search (ast-grep), text search (ripgrep), git-change-triggered incremental updates, metadata storage. Optional LSP enrichment via agent's own language server. |
-| **Knowledge Hub** | Unified organizational surface for docs, skills, rules, ADRs, templates, and memory. BM25/tantivy for lexical retrieval. FlashRank for reranking. engram (SQLite+FTS5) for persistent memory. |
+| **Knowledge Hub** | Unified organizational surface for docs, skills, rules, ADRs, templates, and memory. BM25/tantivy for lexical retrieval. FlashRank and engram removed (see `docs/01-architecture/FLASHRANK_REMOVAL.md`, `ENGRAM_CBM_REMOVAL.md`); memory is SQLite+tantivy local. |
 | **Skill Engine** | Deterministic tag-based skill matching from community formats (Claude, Cursor, Continue, agentskills.io). Task classification, skill activation, conflict detection, priority, instruction injection. |
 | **Context Engine** | `BuildContext(task)` — the one public API. Retrieve → rank → rerank → deduplicate → compress → cache-order → token-budget → emit YAML Context Pack. Runs as a long-lived local daemon with Unix socket IPC. Local token counting via `tiktoken-rs`. |
 | **Model Router** | Heuristic complexity/budget/capability scorer. Tier selection (fast/balanced/capable). LiteLLM as model gateway for multi-provider routing, fallback chains, per-key budgets, cost tracking. |
 | **Execution Optimizer** | RTK adopted directly for tool-output compression. Intercepts tool outputs via pre-tool-call hooks. |
 | **Event Bus** | Async-only observability events: ContextBuilt, SkillActivated, RepositoryUpdated, ToolExecuted, ModelSelected, ResponseGenerated, MemorySaved. Consumed by inspection CLI, metrics, and future orchestrators. |
-| **Local Persistence** | SQLite for repository index and metadata. engram for memory. Filesystem for skill definitions, configuration, and logs. |
+| **Local Persistence** | SQLite for repository index, metadata, and memory (engram removed). Filesystem for skill definitions, configuration, and logs. |
 | **CLI** | Start daemon, initialize repository, inspect events, preview/replay prompts, health check. |
 | **Configuration** | TOML-based configuration for model settings, token budgets, skill paths, daemon settings, agent-specific options. |
 | **Offline Evaluation** | Promptfoo configuration for CI regression and scheduled eval against real usage logs. |
@@ -59,8 +59,8 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | Agent interception | Pre-generation and pre-tool-call hooks |
 | Repository parsing | tree-sitter AST parsing, incremental updates on git change |
 | Code indexing | Structural search (ast-grep), text search (ripgrep), metadata storage |
-| Knowledge storage | Docs, skills, rules, ADRs, templates, memory (engram) |
-| Knowledge retrieval | BM25/tantivy lexical search + FlashRank reranking |
+| Knowledge storage | Docs, skills, rules, ADRs, templates, memory (SQLite+tantivy local; engram removed) |
+| Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed) |
 | Skill matching | Deterministic tag-based activation from community formats |
 | Context assembly | Token-budgeted YAML Context Pack with cache-aware ordering |
 | Model selection | Heuristic complexity scoring, tier selection |
@@ -120,9 +120,9 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 │           │                  │           │          │   │
 │  ┌────────▼──────┐  ┌───────▼────┐ ┌────▼─────┐ ┌─▼──────────┐ │
 │  │ Repo Intel    │  │Knowledge Hub│ │Skill Eng │ │Model Router│ │
-│  │ (tree-sitter, │  │(engram,    │ │(tag-     │ │(heuristic, │ │
-│  │  ast-grep,    │  │ BM25,      │ │ based)   │ │ LiteLLM)   │ │
-│  │  ripgrep)     │  │ FlashRank) │ │          │ │            │ │
+│  │ (tree-sitter, │  │(BM25,      │ │(tag-     │ │(heuristic, │ │
+│  │  ast-grep,    │  │ local)     │ │ based)   │ │ LiteLLM)   │ │
+│  │  ripgrep)     │  │            │ │          │ │            │ │
 │  └───────────────┘  └────────────┘ └──────────┘ └────────────┘ │
 │                              │                                   │
 │  ┌───────────────────────────▼──────────────────────────────┐   │
@@ -134,8 +134,8 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                 Local Storage                             │   │
-│  │  - SQLite (index, metadata)                               │   │
-│  │  - engram (memory, FTS5)                                  │   │
+│  │  - SQLite (index, metadata, memory)                       │   │
+│  │  - Tantivy BM25 (index)                                   │   │
 │  │  - Filesystem (skills, config, logs)                      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
@@ -162,7 +162,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 |------|----------|-----------|---------|
 | Agent → Daemon | Unix Domain Socket (MessagePack) | Bidirectional | Pre-generation hooks, pre-tool hooks |
 | Daemon → LiteLLM | HTTP/HTTPS | Outbound | Model routing and inference |
-| Daemon → engram | HTTP API | Bidirectional | Memory read/write |
+| Daemon → engram | *Removed* — memory is SQLite local (see ENGRAM_CBM_REMOVAL.md) | — |
 | Daemon → SQLite | In-process (rusqlite) | Bidirectional | Index and metadata |
 | Daemon → Event Bus | Internal async channel | Outbound only | Observability events |
 
@@ -173,7 +173,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | Repository source code | Developer / Git | Filesystem (read-only by runtime) |
 | Repository index | Runtime | SQLite database |
 | Repository metadata | Runtime | SQLite database |
-| Memory entries | Runtime | engram (SQLite+FTS5) |
+| Memory entries | Runtime | SQLite (local; engram removed) |
 | Skill definitions | Developer | TOML/community-format files on filesystem |
 | Configuration | Developer | TOML files on filesystem |
 | Conversation history | Coding Agent | Not stored by runtime |

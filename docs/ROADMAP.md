@@ -27,8 +27,8 @@
 - tree-sitter AST parsing (Rust, Python, JavaScript, TypeScript)
 - ripgrep text search with .gitignore support
 - tantivy BM25 full-text indexing and search
-- engram HTTP client for cross-session memory
-- FlashRank reranker with TF-IDF fallback
+- *engram HTTP client for cross-session memory — removed in v0.7.6 (see ENGRAM_CBM_REMOVAL.md, replaced by SQLite+tantivy local)*
+- *FlashRank reranker with TF-IDF fallback — removed in v0.7.6 (see FLASHRANK_REMOVAL.md, SQLite+tantivy local)*
 - LiteLLM client for multi-provider model routing
 
 ### v0.3.0 — Spec-Compliance ✅
@@ -39,7 +39,7 @@
 - tiktoken-rs local token counting (cl100k_base)
 - Cache-aware pack: SHA-256 dedup, frozen-prefix boundary, reversible compression
 - Repository Intelligence: structural search, full-text tantivy, dependency graph, git watcher
-- Knowledge Hub: BM25 → FlashRank pipeline, engram deterministic reads (2s timeout)
+- Knowledge Hub: BM25 → FlashRank pipeline *(FlashRank removed in v0.7.6 — see FLASHRANK_REMOVAL.md, reranker is passthrough)*, *engram deterministic reads — removed (see ENGRAM_CBM_REMOVAL.md)*
 - LiteLLM gateway with fallback chains
 - RTK adoption with tee-on-failure
 - Event bus + `coderun preview`/`replay` CLI
@@ -62,9 +62,9 @@
 **Released:** August 24, 2026 | **Tests:** 166
 
 - ast-grep (`sg-core`) first-class, heuristic deleted as primary
-- engram deterministic reads primary, local LIKE only on error
-- FlashRank via `ort` int8, TF-IDF fallback only on model load fail
-- codebase-memory-mcp via MCP probe, regex fallback
+- *engram deterministic reads — removed (see ENGRAM_CBM_REMOVAL.md, SQLite local)*
+- *FlashRank via `ort` int8, TF-IDF fallback only on model load fail — removed in v0.7.6 (see FLASHRANK_REMOVAL.md, offline eval only)*
+- *codebase-memory-mcp probe — removed (see ENGRAM_CBM_REMOVAL.md, local AST+regex)*
 - LiteLLM `IModelGateway` with `capable→balanced→fast` cascade
 - RTK vendored crate primary, built-in compressors fallback only
 - Git `notify`+`git2` incremental watcher, polling fallback only
@@ -88,7 +88,7 @@
 - `coderun init` full bootstrap: scaffold → discovery → indexing → knowledge → engram → profile
 - Repository discovery: language census by extension, framework detection from manifests
 - Knowledge seeding at init: README + ADRs → `store_knowledge(category="docs")`
-- Engram bootstrap: health-check + seed project profile
+- *Engram bootstrap — removed (see ENGRAM_CBM_REMOVAL.md)*
 - Repository profile artifact: `.coderun/profile.json`
 - ast-grep via npm prebuilt, RTK prebuilt binary installers
 
@@ -126,7 +126,7 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 | `coderun-cli` | CLI commands (init, index, preview, doctor, etc.) |
 | `coderun-context` | BuildContext pipeline, token budgeting |
 | `coderun-repo-intel` | tree-sitter, ripgrep, tantivy, graph, watcher |
-| `coderun-knowledge` | Knowledge Hub, engram, retrieval |
+| `coderun-knowledge` | Knowledge Hub, retrieval (engram removed) |
 | `coderun-skills` | Skill matching engine |
 | `coderun-router` | Model routing, LiteLLM gateway |
 | `coderun-optimizer` | RTK compression, tool output optimization |
@@ -145,8 +145,8 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 | tiktoken-rs | Local token counting | ✅ First-class |
 | RTK | Tool output compression | ✅ First-class (binary) |
 | LiteLLM | Model gateway | ✅ First-class |
-| engram | Cross-session memory | ✅ Optional, fail-open |
-| codebase-memory-mcp | Dependency graph | ✅ Optional probe |
+| engram | Cross-session memory | ❌ Removed — see `01-architecture/ENGRAM_CBM_REMOVAL.md` |
+| codebase-memory-mcp | Dependency graph | ❌ Removed — see `01-architecture/ENGRAM_CBM_REMOVAL.md` |
 
 ---
 
@@ -176,7 +176,7 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 ### v2.0 — Platform Extensions
 
 - Multi-repository support
-- Conversation memory via engram
+- Conversation memory (engram removed — deferred)
 - Plugin system
 - Web dashboard
 - Distributed deployment

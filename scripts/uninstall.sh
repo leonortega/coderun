@@ -101,22 +101,11 @@ for pp in ".opencode/plugins/coderun.ts" "$HOME/.config/opencode/plugins/coderun
   [ "$pp" = ".opencode/plugins/coderun.ts" ] && check_pp="$ROOT/.opencode/plugins/coderun.ts"
   if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm plugin 'coderun'"; else rm -f "$check_pp" && ok "removed plugin 'coderun'"; fi; else skip "not found plugin 'coderun'"; fi
 done
-# Also clean portable engram copies: GLOBAL ~/.config/opencode/engram (current install) + legacy .opencode/engram
-for pp in "$HOME/.config/opencode/engram/engram" "$HOME/.config/opencode/engram/engram.exe"; do
-  if [ -e "$pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$pp" && ok "removed $pp (global engram copy)"; fi; fi
 done
-if [ -d "$HOME/.config/opencode/engram" ] && [ -z "$(ls -A "$HOME/.config/opencode/engram" 2>/dev/null)" ]; then
-  if $DRY_RUN; then skip "would rmdir ~/.config/opencode/engram"; else rmdir "$HOME/.config/opencode/engram" 2>/dev/null && ok "removed empty ~/.config/opencode/engram/"; fi
 fi
-for pp in ".opencode/engram/engram" ".opencode/engram/engram.exe"; do
   check_pp="$ROOT/$pp"
-  if [ -e "$check_pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$check_pp" && ok "removed $pp (portable engram)"; fi; fi
 done
-if [ -d "$ROOT/.opencode/engram" ] && [ -z "$(ls -A "$ROOT/.opencode/engram" 2>/dev/null)" ]; then
-  if $DRY_RUN; then skip "would rmdir .opencode/engram"; else rmdir "$ROOT/.opencode/engram" 2>/dev/null && ok "removed empty .opencode/engram/"; fi
 fi
-# Also clean engram, codebase-memory-mcp, and rtk binaries from user bin
-for pp in "$HOME/bin/engram" "$HOME/bin/engram.exe" "$HOME/bin/codebase-memory-mcp" "$HOME/bin/codebase-memory-mcp.exe" "$HOME/bin/rtk" "$HOME/bin/rtk.exe"; do
   if [ -e "$pp" ]; then if $DRY_RUN; then skip "would rm $pp"; else rm -f "$pp" && ok "removed $pp"; fi; fi
 done
 
@@ -169,7 +158,6 @@ try{
   if(j.mcp && typeof j.mcp==='object'){
     let m=j.mcp;
     let had=false;
-    for(const k of ['codebase-memory','engram','codebase-memory-mcp']){
       if(k in m){ delete m[k]; had=true; }
     }
     if(had) changed=true;
@@ -200,6 +188,9 @@ done
 if command -v npm >/dev/null 2>&1; then
   if npm list -g opencode-coderun >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g opencode-coderun"; else npm uninstall -g opencode-coderun 2>/dev/null && ok "uninstalled opencode-coderun (npm -g)" || warn "npm uninstall opencode-coderun failed"; fi; else skip "opencode-coderun not installed globally (npm -g)"; fi
 fi
+# 3c. Opencode global skill: coderun -> ~/.config/opencode/skills/coderun
+SKILL_DIR="$HOME/.config/opencode/skills/coderun"
+if [ -d "$SKILL_DIR" ]; then if $DRY_RUN; then skip "would rm -rf $SKILL_DIR (opencode global skill 'coderun')"; else rm -rf "$SKILL_DIR" && ok "removed opencode global skill 'coderun' at $SKILL_DIR" || warn "failed to remove $SKILL_DIR"; if [ -d "$HOME/.config/opencode/skills" ] && [ -z "$(ls -A "$HOME/.config/opencode/skills" 2>/dev/null)" ]; then rmdir "$HOME/.config/opencode/skills" 2>/dev/null || true; fi; fi; else skip "not found opencode global skill 'coderun' at $SKILL_DIR"; fi
 
 # 4. External tools (default: remove)
 if ! $DO_REMOVE_EXTERNAL; then info "Skipping external tools (--keep-external)";
@@ -208,15 +199,14 @@ else
   # ast-grep: npm @ast-grep/cli (current) or legacy cargo install
   if command -v npm >/dev/null 2>&1 && npm list -g @ast-grep/cli >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g @ast-grep/cli"; else npm uninstall -g @ast-grep/cli 2>/dev/null && ok "uninstalled @ast-grep/cli (npm -g)" || warn "@ast-grep/cli uninstall failed"; fi; else skip "@ast-grep/cli not installed (npm -g)"; fi
   if command -v sg >/dev/null 2>&1 || command -v ast-grep >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall ast-grep (legacy)"; else cargo uninstall ast-grep 2>/dev/null && ok "uninstalled ast-grep (legacy cargo)" || warn "ast-grep cargo uninstall failed"; fi; else skip "legacy cargo ast-grep not installed"; fi
-  # rtk: user-bin prebuilt copy (current) + legacy cargo install
-  if [ -f "$HOME/bin/rtk" ]; then if $DRY_RUN; then skip "would rm ~/bin/rtk"; else rm -f "$HOME/bin/rtk" && ok "removed ~/bin/rtk"; fi; else skip "~/bin/rtk not found"; fi
+  # rtk: unified ~/.coderun/bin + legacy ~/bin + cargo install
+  for _pp in "$HOME/.coderun/bin/rtk" "$HOME/bin/rtk"; do if [ -f "$_pp" ]; then if $DRY_RUN; then skip "would rm $_pp"; else rm -f "$_pp" && ok "removed $_pp"; fi; fi; done
+  if [ ! -f "$HOME/.coderun/bin/rtk" ] && [ ! -f "$HOME/bin/rtk" ]; then skip "~/bin/rtk and ~/.coderun/bin/rtk not found"; fi
   if command -v rtk >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall rtk (legacy)"; else cargo uninstall rtk 2>/dev/null && ok "uninstalled rtk (legacy cargo)" || warn "rtk cargo uninstall failed"; fi; else skip "legacy cargo rtk not installed"; fi
   if command -v npm >/dev/null 2>&1; then
-    for pkg in codebase-memory-mcp promptfoo eslint; do
       if npm list -g "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g $pkg"; else npm uninstall -g "$pkg" 2>/dev/null && ok "uninstalled $pkg (npm -g)"; fi; else skip "$pkg not installed"; fi
     done
   fi
-  if [ -d "$ROOT/../engram" ]; then if $DRY_RUN; then skip "would rm -rf ../engram"; else rm -rf "$ROOT/../engram" && ok "removed engram clone at ../engram"; fi; else skip "engram clone not found at ../engram"; fi
   if command -v pip3 >/dev/null 2>&1; then
     for pkg in litellm mkdocs mkdocs-material pymdown-extensions; do
       if pip3 show "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would pip3 uninstall -y $pkg"; else pip3 uninstall -y "$pkg" 2>/dev/null && ok "uninstalled $pkg (pip)"; fi; else skip "$pkg not installed"; fi

@@ -49,11 +49,6 @@ pub struct IndexConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeConfig {
-    pub memory_enabled: bool,
-    /// Path to engram binary (CLI mode, no server needed). If empty, uses default discovery.
-    pub engram_binary_path: Option<String>,
-    /// DEPRECATED: Use engram_binary_path instead. Kept for config compat.
-    pub memory_endpoint: String,
     pub max_knowledge_entries: usize,
 }
 
@@ -167,9 +162,6 @@ impl Default for IndexConfig {
 impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
-            memory_enabled: true,
-            engram_binary_path: None, // auto-discover
-            memory_endpoint: "http://localhost:9090".to_string(), // deprecated
             max_knowledge_entries: 10000,
         }
     }
@@ -358,9 +350,6 @@ impl Config {
         if let Ok(val) = std::env::var("CODERUN_LITELLM_URL") {
             self.litellm.endpoint = val;
         }
-        if let Ok(val) = std::env::var("CODERUN_ENGRAM_ENDPOINT") {
-            self.knowledge.memory_endpoint = val;
-        }
     }
 
     /// Validate the configuration
@@ -528,8 +517,6 @@ path = "/tmp/index"
 languages = ["rust", "python"]
 
 [knowledge]
-memory_enabled = false
-memory_endpoint = "http://localhost:8080"
 max_knowledge_entries = 5000
 
 [skills]

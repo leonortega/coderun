@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — Installers
 - **ast-grep via npm** prebuilt `@ast-grep/cli` (was cargo compile), PATH fixup + graceful WARN fallback
-- **RTK prebuilt binary** installers copy `.coderun/rtk/rtk.exe` → `~/bin/rtk.exe` (no compile), live-streamed cargo build output as last resort (PS5.1 EAP fixes)
+- **RTK prebuilt binary** installers copy `.coderun/rtk/rtk.exe` → `~/.coderun/bin/rtk.exe` (unified bin, legacy `~/bin/rtk.exe` migrated; no compile), live-streamed cargo build output as last resort (PS5.1 EAP fixes)
 
 ### Changed
 - Version `0.6.0 → 0.7.0` `Cargo.toml` + `release.toml`

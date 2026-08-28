@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-/// Dependency graph derived from imports (codebase-memory-mcp style, AST + regex fallback)
+/// Dependency graph derived from imports (local AST + regex)
 /// Spec §3 Repository Intelligence — produce symbols, dependency graph, entry points.
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
@@ -17,13 +16,8 @@ impl DependencyGraph {
         Self::default()
     }
 
-    /// Build graph from file list — try codebase-memory-mcp direct call, fallback to AST+regex
-    /// Calls codebase-memory-mcp directly via npx subprocess (no MCP protocol required)
+    /// Build graph from file list — local AST+regex
     pub fn build_from_files(repo_root: &Path, files: &[PathBuf]) -> Self {
-        if let Some(g) = try_codebase_memory_mcp_public(repo_root, files) {
-            return g;
-        }
-        tracing::debug!("codebase-memory-mcp unavailable, using local AST+regex");
         let mut graph = Self::new();
         for file in files {
             let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().to_string();
@@ -264,142 +258,7 @@ fn find_function_definition(definitions: &HashMap<String, Vec<(String, usize, us
     None
 }
 
-/// Discover the codebase-memory-mcp executable (native binary preferred, npx fallback).
-/// Returns (exe_path, is_npx_flag) so the caller can adjust args accordingly.
-fn discover_cbm_exe() -> Option<(String, bool)> {
-    // 1. ~/.coderun/bin — installed by our installer (preferred)
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let exe = std::path::PathBuf::from(&home)
-            .join(".coderun")
-            .join("bin")
-            .join("codebase-memory-mcp.exe");
-        if exe.exists() {
-            return Some((exe.to_string_lossy().into_owned(), false));
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    if let Ok(home) = std::env::var("HOME") {
-        let exe = std::path::PathBuf::from(&home)
-            .join(".coderun")
-            .join("bin")
-            .join("codebase-memory-mcp");
-        if exe.exists() {
-            return Some((exe.to_string_lossy().into_owned(), false));
-        }
-    }
-    // 2. npm global install — native exe bundled with the package
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let exe = std::path::PathBuf::from(&appdata)
-            .join("npm")
-            .join("node_modules")
-            .join("codebase-memory-mcp")
-            .join("bin")
-            .join("codebase-memory-mcp.exe");
-        if exe.exists() {
-            return Some((exe.to_string_lossy().into_owned(), false));
-        }
-    }
-    // 3. ~/.local/bin — local installer location
-    #[cfg(not(target_os = "windows"))]
-    if let Ok(home) = std::env::var("HOME") {
-        let exe = std::path::PathBuf::from(&home)
-            .join(".local")
-            .join("bin")
-            .join("codebase-memory-mcp");
-        if exe.exists() {
-            return Some((exe.to_string_lossy().into_owned(), false));
-        }
-    }
-    // 4. npx fallback — resolves from npm cache on every call
-    Some(("npx".to_string(), true))
-}
-
-/// Attempt to build dependency graph via codebase-memory-mcp CLI.
-/// Returns `Some(DependencyGraph)` on success, `None` to trigger local AST+regex fallback.
-///
-/// Uses CLI mode: `codebase-memory-mcp cli search_graph --project <name> --json`
-/// This runs one tool and exits — no MCP server process required.
-pub fn try_codebase_memory_mcp_public(repo_root: &Path, _files: &[PathBuf]) -> Option<DependencyGraph> {
-    let (exe, is_npx) = discover_cbm_exe()?;
-
-    // Derive project name from repo_root (matches codebase-memory-mcp naming convention)
-    let project_name = repo_root.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    // Build CLI args for search_graph tool
-    let mut args: Vec<&str> = Vec::new();
-    if is_npx {
-        args.extend_from_slice(&["-y", "codebase-memory-mcp"]);
-    }
-    args.extend_from_slice(&["cli", "search_graph"]);
-    
-    // We need to pass project name - convert to static str
-    let project_static: &'static str = Box::leak(project_name.into_boxed_str());
-    args.extend_from_slice(&["--project", project_static]);
-    args.extend_from_slice(&["--json"]);
-    // Search for all dependency relationships
-    args.extend_from_slice(&["--relationship", "imports"]);
-    
-    // Run CLI command with timeout
-    let timeout = std::time::Duration::from_secs(10);
-    let output = std::process::Command::new(&exe)
-        .args(&args)
-        .current_dir(repo_root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
-
-    // Wait for output with timeout
-    let start = std::time::Instant::now();
-    let mut child = output;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => {
-                let stdout = child.stdout.take()?;
-                let mut reader = std::io::BufReader::new(stdout);
-                let mut response_str = String::new();
-                std::io::BufRead::read_line(&mut reader, &mut response_str).ok()?;
-                
-                // Parse JSON response
-                let response: serde_json::Value = serde_json::from_str(&response_str).ok()?;
-                
-                // Check for error
-                if response.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    tracing::debug!("codebase-memory-mcp CLI returned error");
-                    return None;
-                }
-                
-                // Extract structured content
-                let structured = response.get("structuredContent")?;
-                let results = structured.get("results")?.as_array()?;
-                
-                let mut graph = DependencyGraph::new();
-                for item in results {
-                    let from = item.get("file").and_then(|v| v.as_str()).unwrap_or("");
-                    let to = item.get("target_file").and_then(|v| v.as_str()).unwrap_or("");
-                    if !from.is_empty() && !to.is_empty() {
-                        graph.add_edge(from.to_string(), to.to_string());
-                    }
-                }
-                
-                return if graph.edge_count() > 0 { Some(graph) } else { None };
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    tracing::debug!("codebase-memory-mcp CLI timed out");
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-/// Extract imports via simple regex (fallback when tree-sitter grammar not loaded — kept ONLY inside Err branch above)
+/// Extract imports via simple regex (local AST+regex primary)
 fn extract_imports(content: &str, _current_file: &str, _repo_root: &Path) -> Vec<String> {
     let mut deps = Vec::new();
     // Rust: use crate::foo::bar, mod foo  (TASK-011: handle mod b; → b.rs)
@@ -494,24 +353,6 @@ mod tests {
         std::fs::write(&file_b, "pub struct Foo;").unwrap();
         let graph = DependencyGraph::build_from_files(&dir, &[file_a.clone(), file_b.clone()]);
         assert!(graph.edge_count() >= 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // ── v0.5.0 first-class tool tests ──────────────────────────────────
-
-    #[test]
-    fn test_try_codebase_memory_mcp_returns_none_when_binary_missing() {
-        // npx codebase-memory-mcp likely not installed in CI → should return None gracefully
-        let dir = std::env::temp_dir().join(format!("coderun_graph_mcp_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file_a = dir.join("a.rs");
-        std::fs::write(&file_a, "use crate::foo::Bar;").unwrap();
-        // build_from_files should fall back to local AST+regex
-        let graph = DependencyGraph::build_from_files(&dir, &[file_a.clone()]);
-        assert!(graph.edge_count() >= 1, "local AST+regex fallback should produce edges");
-        // Direct call returns None if npx binary not available
-        let res = try_codebase_memory_mcp_public(&dir, &[file_a.clone()]);
-        assert!(res.is_none() || res.is_some(), "returns Some or None depending on npx availability");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -29,13 +29,17 @@ enum Commands {
         socket: Option<String>,
     },
     
-    /// One-command repository bootstrap: scaffold → discovery → indexing → knowledge → engram → profile
+    /// One-command repository bootstrap: scaffold → discovery → indexing → knowledge → profile
     Init {
         /// Run interactive setup wizard
         #[arg(long)]
         wizard: bool,
-        /// Skip community skill installation from skills.sh (offline / air-gapped / privacy)
+        /// Opt-in: install community skills from skills.sh (stack-matched via skills.sh)
+        /// Default is OFF per V1 minimal plan; agent tools handle repo ops, skills are optional.
         #[arg(long)]
+        community_skills: bool,
+        /// Skip community skill installation (legacy, kept for compat — default is already skip)
+        #[arg(long, hide = true)]
         no_community_skills: bool,
     },
     
@@ -144,7 +148,7 @@ fn main() {
     
     let result = match cli.command {
         Commands::Serve { port, socket } => cmd_serve(port, socket),
-        Commands::Init { wizard, no_community_skills } => cmd_init(wizard, no_community_skills),
+        Commands::Init { wizard, community_skills, no_community_skills } => cmd_init(wizard, community_skills, no_community_skills),
         Commands::Index { watch } => cmd_index(watch),
         Commands::Preview { prompt, session, no_cache, diag, expected_files } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref()),
         Commands::Status => cmd_status(),
@@ -173,7 +177,7 @@ fn cmd_serve(_port: u16, _socket: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
+fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> Result<(), String> {
     if wizard {
         println!("(wizard mode is non-interactive — defaults applied, edit .coderun/config.toml afterwards)");
         println!();
@@ -237,11 +241,20 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         }
     }
 
-    // Community skills
-    if no_community_skills || std::env::var("CODERUN_NO_COMMUNITY_SKILLS").map(|v| v == "1" || v == "true").unwrap_or(false) {
-        println!("[2b] Community skills — skipped (--no-community-skills)");
+    // Community skills — default OFF per V1 minimal plan (V1_MINIMAL_STACK_PLAN.md:2)
+    // Opt-in via --community-skills or CODERUN_COMMUNITY_SKILLS=1; legacy --no-community-skills still forces skip.
+    let want_community = community_skills
+        || std::env::var("CODERUN_COMMUNITY_SKILLS").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let force_skip = no_community_skills
+        || std::env::var("CODERUN_NO_COMMUNITY_SKILLS").map(|v| v == "1" || v == "true").unwrap_or(false);
+    if force_skip || !want_community {
+        if force_skip {
+            println!("[2b] Community skills — skipped (--no-community-skills)");
+        } else {
+            println!("[2b] Community skills — skipped (default OFF; use --community-skills to install)");
+        }
     } else {
-        println!("[2b] Community skills (stack-matched via skills.sh)");
+        println!("[2b] Community skills (stack-matched via skills.sh — opt-in --community-skills)");
         match install_community_skills(&project_root, &discovery) {
             Ok(added) => {
                 if added > 0 {
@@ -297,7 +310,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     }
 
     // ── Step 5: Indexing ─────────────────────────────────────────────
-    println!("[5/8] Indexing (full-text BM25 + symbol extraction + dependency graph)");
+    println!("[5/8] Indexing (full-text BM25 + symbol extraction)");
     let event_bus = coderun_events::EventBus::new();
     let mut repo_intel = coderun_repo_intel::RepositoryIntelligence::new(
         project_root.clone(),
@@ -307,10 +320,16 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     let stats = repo_intel
         .index_repository()
         .map_err(|e| format!("Indexing failed: {}", e))?;
-    let dep_edges = repo_intel
-        .build_dependency_graph()
-        .map(|g| g.edge_count())
-        .unwrap_or(0);
+    // Phase3: defer graph on large repos (second walk over 63k) — lazy on first query
+    let dep_edges = if stats.files_indexed > 5000 && std::env::var("CODERUN_BUILD_GRAPH").ok().as_deref() != Some("1") {
+        println!("      Graph: deferred (lazy on first query, set CODERUN_BUILD_GRAPH=1 to force during init)");
+        0
+    } else {
+        repo_intel
+            .build_dependency_graph()
+            .map(|g| g.edge_count())
+            .unwrap_or(0)
+    };
     drop(repo_intel);
     let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
@@ -322,7 +341,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         coderun_storage::Database::open(&db_path)
             .map_err(|e| format!("Failed to reopen database for Knowledge Hub: {}", e))?,
         event_bus.clone(),
-        coderun_knowledge::KnowledgeConfig { memory_enabled: false, ..Default::default() },
+        coderun_knowledge::KnowledgeConfig::default(),
     );
     let skills_dir = coderun_dir.join("skills");
     let global_skills_dir = dirs().unwrap_or_else(|| PathBuf::from(".")).join("coderun").join("skills");
@@ -467,60 +486,7 @@ fn daemon_alive() -> bool {
         .unwrap_or(false)
 }
 
-/// Locate the codebase-memory-mcp executable (native binary preferred, npx fallback).
-/// Returns (exe_path, is_npx_flag) so the caller can adjust args accordingly.
-fn discover_cbm_exe() -> Option<(String, bool)> {
-    // 1. npm global install — native exe bundled with the package
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let exe = PathBuf::from(&appdata)
-            .join("npm")
-            .join("node_modules")
-            .join("codebase-memory-mcp")
-            .join("bin")
-            .join("codebase-memory-mcp.exe");
-        if exe.exists() {
-            return Some((exe.to_string_lossy().into_owned(), false));
-        }
-    }
-    // 2. ~/.local/bin — local installer location
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let exe = PathBuf::from(&home)
-            .join(".local")
-            .join("bin")
-            .join("codebase-memory-mcp.exe");
-        if exe.exists() {
-            return Some((exe.to_string_lossy().into_owned(), false));
-        }
-    }
-    // 3. npx fallback — resolves from npm cache on every call
-    Some(("npx".to_string(), true))
-}
 
-/// Best-effort: index the current project into codebase-memory MCP via its CLI.
-/// Returns Ok((nodes, edges)) on success, Err(message) on failure.
-/// The CLI spawns a temporary daemon, indexes the repo, and exits — no conflict
-/// with an opencode-held daemon.
-fn index_codebase_memory(project_root: &Path) -> Result<(u64, u64), String> {
-    let (exe, is_npx) = discover_cbm_exe().ok_or("CBM exe not found")?;
-    let repo_path = project_root.to_string_lossy();
-    let mut args: Vec<&str> = Vec::new();
-    if is_npx {
-        args.extend_from_slice(&["-y", "codebase-memory-mcp"]);
-    }
-    args.extend_from_slice(&["cli", "index_repository", "--repo-path", &repo_path, "--mode", "full"]);
-    let out = run_command_with_timeout(&exe, &args, project_root, std::time::Duration::from_secs(300))?;
-    let out = out.trim();
-    // Parse JSON directly — CLI outputs a single JSON object on stdout
-    let v: serde_json::Value =
-        serde_json::from_str(out).map_err(|e| format!("JSON parse: {} (len={})", e, out.len()))?;
-    let nodes = v["nodes"].as_u64().unwrap_or(0);
-    let edges = v["edges"].as_u64().unwrap_or(0);
-    let status = v["status"].as_str().unwrap_or("unknown");
-    if status == "indexed" || nodes > 0 {
-        return Ok((nodes, edges));
-    }
-    Err(format!("status: {}", status))
-}
 
 #[derive(Default, Debug)]
 struct Discovery {
@@ -1097,8 +1063,10 @@ fn cmd_index(watch: bool) -> Result<(), String> {
         }
         Err(e) => println!("  Artifacts:        (skipped: {})", e),
     }
-    // Also show graph edge count (new in v0.3.0)
-    if let Ok(g) = repo_intel.build_dependency_graph() {
+    // Also show graph edge count (new in v0.3.0) — Phase3 defer on large repos
+    if stats.files_indexed > 5000 && std::env::var("CODERUN_BUILD_GRAPH").ok().as_deref() != Some("1") {
+        println!("  Dependency edges: deferred (lazy, set CODERUN_BUILD_GRAPH=1 to force)");
+    } else if let Ok(g) = repo_intel.build_dependency_graph() {
         println!("  Dependency edges: {}", g.edge_count());
     }
 
@@ -1513,6 +1481,44 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
     
+    // Check installed binary on PATH (AGENTS.md — never search repo for .exe)
+    print!("Coderun PATH:    ");
+    {
+        let bin_dir = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("bin");
+        #[cfg(target_os = "windows")]
+        let installed = bin_dir.join("coderun.exe");
+        #[cfg(not(target_os = "windows"))]
+        let installed = bin_dir.join("coderun");
+        let exists = installed.exists();
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        #[cfg(target_os = "windows")]
+        let sep = ';';
+        #[cfg(not(target_os = "windows"))]
+        let sep = ':';
+        let on_path = path_var.split(sep).any(|p| {
+            let pp = PathBuf::from(p.trim().trim_matches('"'));
+            pp == bin_dir || pp.as_os_str() == bin_dir.as_os_str()
+        });
+        if exists && on_path {
+            println!("✓ OK ({} on PATH)", bin_dir.display());
+        } else if exists && !on_path {
+            println!("⚠ INSTALLED at {} but NOT on PATH — restart shell or add to PATH (install.ps1/install.sh does this). Use absolute: {} init", bin_dir.display(), installed.display());
+            all_ok = false;
+        } else if !exists {
+            println!("✗ NOT FOUND at {} — run scripts/install.ps1 (or install.sh) to copy target/release/coderun(.exe) there", bin_dir.display());
+            all_ok = false;
+        }
+        // Also probe bare `coderun` resolves via PATH
+        let bare_ok = std::process::Command::new(if cfg!(target_os = "windows") { "where" } else { "which" })
+            .arg("coderun")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !bare_ok && exists {
+            println!("  Hint: bare `coderun --version` will fail until new shell — use absolute {} --version", installed.display());
+        }
+    }
+
     // Check skills directory
     print!("Skills directory: ");
     let skills_dir = PathBuf::from(".coderun/skills");
@@ -1622,17 +1628,6 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
-    // Check engram
-    print!("Engram:          ");
-    {
-        let cfg = Config::load(&project_root).unwrap_or_default();
-        if cfg.knowledge.memory_enabled {
-            println!("✓ Configured ({}, deterministic reads via HTTP, fail-open local fallback)", cfg.knowledge.memory_endpoint);
-        } else {
-            println!("⚠ Disabled in config (memory_enabled=false)");
-        }
-    }
-    
     // Check LiteLLM
     print!("LiteLLM:         ");
     {

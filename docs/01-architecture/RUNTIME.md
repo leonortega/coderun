@@ -17,9 +17,8 @@ Start (coderun serve)
   │
   ├── Load configuration
   ├── Initialize logging
-  ├── Open/create SQLite database
-  ├── Open/create engram
-  ├── Open/create Tantivy index
+  ├── Open/create SQLite database (metadata only — see V1_MINIMAL_STACK_PLAN.md:3)
+  ├── Open/create Tantivy index (sole retrieval; no MkDocs ingestion)
   ├── Load skill definitions
   ├── Start Repository Intelligence (background index)
   ├── Start Unix socket server
@@ -88,16 +87,7 @@ Start (coderun serve)
 5. Verify database is readable and writable
 ```
 
-### Step 4: engram Initialization
-
-```
-1. Start engram process (Go binary) if not already running
-2. Verify engram HTTP API is reachable
-3. Initialize memory namespace for current repository
-4. Verify read/write capability
-```
-
-### Step 5: Index Initialization
+### Step 4: Index Initialization
 
 ```
 1. Check if Tantivy index exists at configured path
@@ -106,7 +96,7 @@ Start (coderun serve)
 4. Verify index is readable
 ```
 
-### Step 6: Skill Loading
+### Step 5: Skill Loading
 
 ```
 1. Read skill directory path from configuration
@@ -118,7 +108,7 @@ Start (coderun serve)
 7. Warn on invalid skill files, skip them
 ```
 
-### Step 7: Repository Indexing (Background)
+### Step 6: Repository Indexing (Background)
 
 ```
 1. Check if repository is already indexed (SQLite metadata)
@@ -136,7 +126,7 @@ Start (coderun serve)
 6. Log indexing statistics
 ```
 
-### Step 8: Unix Socket Server Start
+### Step 7: Unix Socket Server Start
 
 ```
 1. Create Unix socket at configured path (default: /tmp/coderun.sock)
@@ -175,9 +165,7 @@ path = "~/.coderun/index/"           # Tantivy index directory
 languages = ["rust", "typescript", "javascript", "python"]  # 111 languages supported via arborium; add any from arborium's language list
 
 [knowledge]
-memory_enabled = true                 # Enable engram memory
-memory_endpoint = "http://localhost:9090"  # engram HTTP API endpoint
-max_knowledge_entries = 10000         # Max knowledge entries
+max_knowledge_entries = 10000         # Max knowledge entries (engram removed — see ENGRAM_CBM_REMOVAL.md)         # Max knowledge entries
 
 [skills]
 path = ".coderun/skills/"            # Skill definitions directory
@@ -243,7 +231,7 @@ retention_days = 7                    # Log retention
 | `CODERUN_MODEL_DEFAULT` | model.default_tier | balanced |
 | `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
 | `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
-| `CODERUN_ENGRAM_ENDPOINT` | knowledge.memory_endpoint | http://localhost:9090 |
+| `CODERUN_ENGRAM_ENDPOINT` | *removed* — engram retired (see ENGRAM_CBM_REMOVAL.md) | — |
 
 ## IPC Protocol
 
@@ -404,7 +392,7 @@ sequenceDiagram
    b. Force completion
 6. Flush Tantivy index (merge pending segments)
 7. Close SQLite connection pool
-8. Stop engram process (if started by daemon)
+8. Close knowledge store
 9. Flush log buffers
 10. Remove Unix socket file
 11. Log shutdown complete
@@ -465,9 +453,9 @@ CREATE INDEX idx_symbols_name ON symbols(name);
 CREATE INDEX idx_token_usage_correlation ON token_usage(correlation_id);
 ```
 
-### engram Memory Schema
+### Memory Schema (SQLite+tantivy local — engram removed, see ENGRAM_CBM_REMOVAL.md)
 
-engram manages its own SQLite+FTS5 schema. The runtime stores:
+SQLite manages memory. The runtime stores:
 
 | Namespace | Content |
 |-----------|---------|
@@ -565,5 +553,5 @@ Structured JSON format:
 | SKILL_MATCH_FAILED | Degraded | Skill matching failed, continue without skills |
 | DATABASE_ERROR | Fatal | SQLite operations failed |
 | INDEX_ERROR | Fatal | Tantivy operations failed |
-| ENGRAM_UNAVAILABLE | Degraded | Memory system unreachable, continue without memory |
+| MEMORY_UNAVAILABLE | Degraded | Memory store unreachable, continue without memory |
 | CONFIGURATION_ERROR | Fatal | Invalid or missing configuration |

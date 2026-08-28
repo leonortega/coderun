@@ -34,8 +34,6 @@ path = "~/.coderun/index/"
 
 [knowledge]
 max_knowledge_entries = 10000
-memory_enabled = true
-memory_endpoint = "http://localhost:9090"
 
 [litellm]
 endpoint = "http://localhost:4000"

@@ -198,7 +198,6 @@ sequenceDiagram
     participant KH as Knowledge Hub
     participant TV as BM25/Tantivy
     participant DB as SQLite
-    participant ENG as engram
 
     CE->>KH: retrieve_knowledge(query, category_filter)
     KH->>TV: search(query, max_results=20)
@@ -210,8 +209,8 @@ sequenceDiagram
     KH->>KH: filter_by_confidence(min=0.3)
     KH->>KH: take(top_10)
 
-    KH->>ENG: search(query)
-    ENG-->>KH: memory_entries
+    KH->>DB: search_memory(query)  -- local LIKE (engram removed)
+    DB-->>KH: memory_entries
 
     KH->>KH: merge(knowledge, memory)
     KH-->>CE: Vec<KnowledgeEntry>
@@ -409,7 +408,7 @@ sequenceDiagram
 
 ---
 
-## Flow 8: Memory Operations
+## Flow 8: Memory Operations (SQLite+tantivy local — engram removed, see ENGRAM_CBM_REMOVAL.md)
 
 ### Read (In Hot Path)
 
@@ -417,11 +416,11 @@ sequenceDiagram
 sequenceDiagram
     participant CE as Context Engine
     participant KH as Knowledge Hub
-    participant ENG as engram
+    participant DB as SQLite
 
     CE->>KH: retrieve_knowledge(query)
-    KH->>ENG: search(query)
-    ENG-->>KH: memory_entries
+    KH->>DB: search_memory(query)
+    DB-->>KH: memory_entries
     KH->>KH: merge with knowledge entries
     KH-->>CE: Vec<KnowledgeEntry>
 ```
@@ -433,13 +432,13 @@ sequenceDiagram
     participant Agent as Coding Agent
     participant AD as Adapter Layer
     participant KH as Knowledge Hub
-    participant ENG as engram
+    participant DB as SQLite
     participant EB as Event Bus
 
     Agent->>AD: MemorySave(namespace, key, value)
     AD->>KH: memory_save(entry)
-    KH->>ENG: save(entry)
-    ENG-->>KH: confirmation
+    KH->>DB: save(entry)
+    DB-->>KH: confirmation
     KH->>EB: emit(MemorySaved)
     KH-->>AD: SaveResult
     AD-->>Agent: confirmation

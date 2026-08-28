@@ -1,10 +1,20 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, QueryParser, Query, TermQuery};
 use tantivy::schema::*;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
 use tracing::info;
+
+/// Global cache for opened indexes — avoids per-query MmapDirectory + Index open (P0 latency fix).
+/// Keyed by index_path string; holds Arc for cheap cloning across concurrent preview calls.
+static INDEX_CACHE: OnceLock<RwLock<HashMap<String, Arc<TantivyIndex>>>> = OnceLock::new();
+
+fn index_cache() -> &'static RwLock<HashMap<String, Arc<TantivyIndex>>> {
+    INDEX_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 // ── Schema Definition ────────────────────────────────────────────────────
 
@@ -286,7 +296,6 @@ fn expand_code_vocabulary(term: &str) -> Vec<String> {
         "mock" => vec!["Mock".to_string(), "Fake".to_string()],
 
         // General code concepts
-        "interface" => vec!["Interface".to_string()],
         "abstract" => vec!["Abstract".to_string(), "Base".to_string()],
         "factory" => vec!["Factory".to_string()],
         "builder" => vec!["Builder".to_string()],
@@ -379,6 +388,8 @@ pub struct TantivyIndex {
     index: Index,
     schema: CodeIndexSchema,
     index_path: String,
+    /// Cached reader (OnCommitWithDelay, shared across queries). Lazily created, reloads on commit via reload().
+    cached_reader: OnceLock<IndexReader>,
 }
 
 impl TantivyIndex {
@@ -405,13 +416,56 @@ impl TantivyIndex {
             index,
             schema,
             index_path: index_path.to_string(),
+            cached_reader: OnceLock::new(),
         })
     }
 
-    /// Get a writer for indexing documents
+    /// Cached open — returns Arc from global cache if present (P0: avoids per-query MmapDirectory open).
+    /// Falls back to `Self::open` and inserts into cache on first call per index_path.
+    pub fn open_cached(index_path: &str) -> Result<Arc<Self>, String> {
+        {
+            let cache = index_cache().read().map_err(|e| format!("cache lock poisoned: {e}"))?;
+            if let Some(hit) = cache.get(index_path) {
+                return Ok(hit.clone());
+            }
+        }
+        let fresh = Arc::new(Self::open(index_path)?);
+        let mut cache = index_cache().write().map_err(|e| format!("cache lock poisoned: {e}"))?;
+        // double-check after write lock
+        if let Some(hit) = cache.get(index_path) {
+            return Ok(hit.clone());
+        }
+        cache.insert(index_path.to_string(), fresh.clone());
+        Ok(fresh)
+    }
+
+    /// Get or create the cached reader (reloads if index has committed since last reader creation).
+    pub fn cached_reader(&self) -> Result<IndexReader, String> {
+        if let Some(r) = self.cached_reader.get() {
+            // Ensure we see latest commits (MmapDirectory with OnCommitWithDelay may need reload)
+            // Reload is cheap if no new commit; searcher().num_docs() will reflect latest after reload.
+            // We call reload on the cached reader's underlying index via `r.reload()` best-effort.
+            let _ = r.reload();
+            return Ok(r.clone());
+        }
+        let r = self.reader()?;
+        let _ = self.cached_reader.set(r.clone());
+        Ok(r)
+    }
+
+    /// Invalidate cached reader — currently reload() handles freshness; kept for API symmetry.
+    #[allow(dead_code)]
+    fn invalidate_reader_cache(&self) {}
+
+    /// Get a writer for indexing documents — adaptive heap for 63k repos (Phase1)
     pub fn writer(&self) -> Result<IndexWriter, String> {
+        self.writer_with_heap(150_000_000)
+    }
+
+    /// Get a writer with explicit heap (tests can use smaller)
+    pub fn writer_with_heap(&self, heap_bytes: usize) -> Result<IndexWriter, String> {
         self.index
-            .writer(50_000_000) // 50MB heap size
+            .writer(heap_bytes)
             .map_err(|e| format!("Failed to create index writer: {}", e))
     }
 
@@ -481,7 +535,7 @@ impl TantivyIndex {
             .unwrap_or("");
 
         let doc = doc!(
-            self.schema.path_field => path,
+            self.schema.path_field => path_tokens.as_str(),
             self.schema.raw_path_field => path,
             self.schema.filename_field => filename,
             self.schema.content_field => processed_content.as_str(),
@@ -533,7 +587,8 @@ impl TantivyIndex {
 
     /// Expand a query by finding symbols that contain query terms.
     /// E.g., "pagination" finds "PaginationInfoViewModel" and adds it as a search term.
-    fn expand_query_with_symbols(&self, reader: &IndexReader, sanitized_query: &str, repository_id: Option<&str>) -> String {
+    #[allow(dead_code)]
+    fn expand_query_with_symbols(&self, reader: &IndexReader, sanitized_query: &str, _repository_id: Option<&str>) -> String {
         let searcher = reader.searcher();
         let mut extra_terms: Vec<String> = Vec::new();
 
@@ -654,11 +709,19 @@ impl TantivyIndex {
             Box::new(BooleanQuery::new(must_clauses))
         };
 
-        // Fetch extra results to account for file-class filtering
-        let fetch_limit = (max_results * 3).min(200);
+        // Fetch extra results to account for file-class filtering — candidateK configurable (P1 sweep 20/50/100/200)
+        // Env CODERUN_CANDIDATE_K overrides; default is max_results*3 capped at 200 (deterministic ranking before Top20)
+        let fetch_limit = std::env::var("CODERUN_CANDIDATE_K")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| (max_results * 3).min(200));
+        let _search_start = std::time::Instant::now();
         let top_docs = searcher
             .search(&full_query, &TopDocs::with_limit(fetch_limit).order_by_score())
             .map_err(|e| format!("Search failed: {}", e))?;
+        if std::env::var("CODERUN_PROFILE").is_ok() {
+            eprintln!("[profile] tantivy.search: {}ms (fetch_limit={})", _search_start.elapsed().as_millis(), fetch_limit);
+        }
 
         let mut results = Vec::new();
 
@@ -668,16 +731,16 @@ impl TantivyIndex {
             }
             if let Ok(doc) = searcher.doc::<tantivy::TantivyDocument>(doc_addr) {
                 let path = doc
-                    .get_first(self.schema.path_field)
+                    .get_first(self.schema.raw_path_field)
+                    .or_else(|| doc.get_first(self.schema.path_field))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
 
-                let content = doc
-                    .get_first(self.schema.content_field)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                // P0: Avoid fetching STORED content_field for all candidates (large for 53k).
+                // Content is lazy-loaded via RepositoryIntelligence::get_file_content for final Top 20.
+                // Keep empty here; ContextEngine will populate via file read after ranking.
+                let content = String::new();
 
                 let language = doc
                     .get_first(self.schema.language_field)

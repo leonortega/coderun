@@ -7,14 +7,14 @@
 .DESCRIPTION
   Default (no flags): stops daemon, removes project build artifacts (target/release/coderun*.exe),
   opencode plugins (project-local + global), ALL first-class external tools
-  (ast-grep, rtk, codebase-memory-mcp, litellm, mkdocs, promptfoo, eslint, engram),
+  (ast-grep, rtk, litellm, mkdocs, promptfoo, eslint),
   and ALL user/project data (%USERPROFILE%\.coderun, .coderun/, sockets). Idempotent - safe to re-run.
 
   This is strict mode: no fallbacks. Default uninstalls everything. Use -KeepExternal / -KeepData
   to preserve tools or data. -KeepBuild preserves target/.
 
 .PARAMETER KeepExternal
-  Keep first-class external tools (do not uninstall ast-grep, rtk, npm/pip packages, engram).
+  Keep first-class external tools (do not uninstall ast-grep, rtk, npm/pip packages).
 
 .PARAMETER KeepData
   Keep user and project data (do not delete %USERPROFILE%\.coderun or .coderun/).
@@ -51,7 +51,7 @@
   # preview only
 
 .NOTES
-  Repository folders/files (.coderun/, target/, .opencode/, workflow/dbos/node_modules, .coderun/engram/*.zip) are NEVER deleted by default.
+  Repository folders/files (.coderun/, target/, .opencode/, workflow/dbos/node_modules) are NEVER deleted by default.
   Use -RemoveRepo to also delete repository artifacts (rarely needed).
 #>
 [CmdletBinding(SupportsShouldProcess=$true)]
@@ -247,7 +247,7 @@ if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins") -and -not (Get-Chil
 }
 
 # 3b. Remove MCP + plugin from opencode (always for coderun entries -- so plugin not showing after uninstall, file kept if has other config)
-Info "Removing opencode MCP (codebase-memory + engram) + plugin (opencode-coderun)..."
+Info "Removing opencode plugin (opencode-coderun)..."
 function Remove-OpencodeMcp($configPath, $isRepo) {
   $displayPath = $configPath
   if ($isRepo) { $displayPath = $configPath -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""; if ($displayPath -eq $configPath) { $displayPath = Split-Path $configPath -Leaf } ; if ($configPath -match "\.opencode") { $displayPath = ".opencode/" + (Split-Path $configPath -Leaf) } else { $displayPath = $displayPath } }
@@ -286,7 +286,7 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
         $removed += "plugin:opencode-coderun"
       }
     }
-    # handle mcp codebase-memory + engram
+    # handle mcp (historical)
     if ($json.ContainsKey('mcp')) {
       $mcp = $json['mcp']
       if ($mcp -is [PSCustomObject]) {
@@ -294,9 +294,7 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
         foreach ($p in $mcp.PSObject.Properties) { $tmp[$p.Name] = $p.Value }
         $mcp = $tmp; $json['mcp'] = $mcp
       }
-      foreach ($k in @('codebase-memory','engram','codebase-memory-mcp')) {
-        if ($mcp.ContainsKey($k)) { $mcp.Remove($k); $removed += $k; $pluginRemoved += $k }
-      }
+      # historical MCP entries (no action)
       if ($mcp.Count -eq 0) { $json.Remove('mcp') }
     }
     if ($removed.Count -eq 0) { Skip "no coderun plugin/MCP entries at $displayPath"; return }
@@ -358,16 +356,6 @@ if (-not $doRemoveExternal) {
   } else { Skip "no legacy cargo rtk on PATH" }
 
   if (Test-Cmd npm) {
-    $hasMcp = $false
-    try { npm list -g codebase-memory-mcp 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasMcp = $true } } catch {}
-    if ($hasMcp) {
-      if ($PSCmdlet.ShouldProcess("codebase-memory-mcp (npm -g)", "npm uninstall -g")) {
-        try { npm uninstall -g codebase-memory-mcp 2>&1 | Out-Null; Ok "uninstalled codebase-memory-mcp (npm -g)" } catch { Warn "npm uninstall codebase-memory-mcp failed: $_" }
-      } else { Skip "would npm uninstall -g codebase-memory-mcp" }
-    } else { Skip "codebase-memory-mcp not installed (npm -g)" }
-  }
-
-  if (Test-Cmd npm) {
     foreach ($pkg in @("promptfoo","eslint")) {
       $hasPkg = $false
       try { npm list -g $pkg 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasPkg = $true } } catch {}
@@ -379,58 +367,6 @@ if (-not $doRemoveExternal) {
     }
   }
 
-  # engram: remove from user bin, GLOBAL ~/.config/opencode/engram and legacy .opencode/engram
-  $engramBin = "$env:USERPROFILE\bin\engram.exe"
-  $engramBinDir = "$env:USERPROFILE\bin"
-  $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
-  $globalEngramDir = Join-Path $ocGlobalDir "engram"
-  $globalEngramBin = Join-Path $globalEngramDir "engram.exe"
-  $globalEngramBinNoExt = Join-Path $globalEngramDir "engram"
-  $opencodeEngramDir = Join-Path $Root ".opencode\engram"
-  $opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
-  $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
-  $engramLegacyClone = Resolve-Path -LiteralPath "$Root\..\engram" -ErrorAction SilentlyContinue
-  if (-not $engramLegacyClone) { $engramLegacyClone = "$Root\..\engram" }
-  if (Test-Path $engramBin) {
-    if ($PSCmdlet.ShouldProcess($engramBin, "Remove-Item")) {
-      try { Remove-Item -LiteralPath $engramBin -Force -ErrorAction Stop; Ok "removed engram binary $engramBin" } catch { Warn "failed to remove $engramBin : $_" }
-      if ((Test-Path $engramBinDir) -and -not (Get-ChildItem -LiteralPath $engramBinDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "engram.exe" })) {
-        Skip "keeping $engramBinDir (user bin folder - not deleted, may contain other tools)"
-      }
-    } else { Skip "would remove engram binary $engramBin" }
-  } else { Skip "engram binary not found at $engramBin (zip kept at .coderun\engram\)" }
-  # Remove portable engram copies: global ~/.config/opencode/engram (current install) + legacy .opencode/engram
-  foreach ($engramLoc in @(
-    @{ Bins = @($globalEngramBin, $globalEngramBinNoExt); Dir = $globalEngramDir; Label = "~/.config/opencode/engram" },
-    @{ Bins = @($opencodeEngramBin, $opencodeEngramBinNoExt); Dir = $opencodeEngramDir; Label = ".opencode/engram" }
-  )) {
-    foreach ($p in $engramLoc.Bins) {
-      if (Test-Path $p) {
-        $display = "$($engramLoc.Label)/$(Split-Path $p -Leaf)"
-        if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
-          try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed engram copy $display" } catch { Warn "failed to remove $display : $_" }
-        } else { Skip "would remove engram copy $display" }
-      }
-    }
-    if (Test-Path $engramLoc.Dir) {
-      if (-not (Get-ChildItem -LiteralPath $engramLoc.Dir -Force -ErrorAction SilentlyContinue)) {
-        if ($PSCmdlet.ShouldProcess($engramLoc.Label, "Remove-Item")) {
-          try { Remove-Item -LiteralPath $engramLoc.Dir -Force -ErrorAction SilentlyContinue; Ok "removed empty $($engramLoc.Label)/" } catch {}
-        }
-      } else { Skip "keeping $($engramLoc.Label)/ (contains other files)" }
-    } else { Skip "not found $($engramLoc.Label)/" }
-  }
-  # Remove codebase-memory-mcp binary from user bin
-  $cbmUserBin = "$env:USERPROFILE\bin\codebase-memory-mcp.exe"
-  $cbmUserBinNoExt = "$env:USERPROFILE\bin\codebase-memory-mcp"
-  foreach ($cbmBin in @($cbmUserBin, $cbmUserBinNoExt)) {
-    if (Test-Path $cbmBin) {
-      $display = $cbmBin -replace [regex]::Escape($env:USERPROFILE + "\"), "~\" }
-      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
-        try { Remove-Item -LiteralPath $cbmBin -Force -ErrorAction Stop; Ok "removed $display (codebase-memory-mcp binary)" } catch { Warn "failed to remove $display : $_" }
-      } else { Skip "would remove $display" }
-    }
-  }
   # 3c. Opencode npm plugin -- installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
   Info "Removing opencode npm plugin (opencode-coderun)..."
   $opencodeNodeModules = @(
@@ -487,10 +423,6 @@ if (-not $doRemoveExternal) {
       } else { Skip "would npm uninstall -g opencode-coderun" }
     } else { Skip "opencode-coderun not installed globally (npm -g)" }
   }
-  if (Test-Path $engramLegacyClone) {
-    Skip "keeping legacy engram clone at ../engram (repository folder - not deleted per policy)"
-  }
-
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
 
   if (Test-Cmd pip) {
@@ -548,6 +480,5 @@ Info "To reinstall: powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 if (Test-Path "$env:USERPROFILE\.config\opencode\plugins\coderun.ts") { Warn "global plugin still present at $env:USERPROFILE\.config\opencode\plugins\coderun.ts - may need manual removal or restart opencode" }
 if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins\coderun.ts")) { Warn "repository plugin still present at .opencode/plugins/coderun.ts even after --RemoveRepo" }
 if ($doRemoveExternal) {
-  if (Test-Path "$env:USERPROFILE\.config\opencode\engram") { Warn "global engram copy still present at ~\.config\opencode\engram - remove manually if not shared with other tools" }
   if (Test-Path "$env:USERPROFILE\.config\opencode\package.json") { Warn "global ~\.config\opencode\package.json still references coderun deps - inspect before removing (may contain your own deps)" }
 }

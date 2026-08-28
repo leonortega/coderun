@@ -58,7 +58,7 @@ async fn e2e_hook_contracts() {
     let hub = KnowledgeHub::new(
         kh_db,
         EventBus::new(),
-        KnowledgeConfig { memory_enabled: false, ..Default::default() },
+        KnowledgeConfig::default(),
     );
     let engine = ContextEngine::new(
         RepositoryIntelligence::new(repo_coderun.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), EventBus::new()),

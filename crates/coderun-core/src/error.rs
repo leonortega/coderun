@@ -44,8 +44,8 @@ pub enum CoderunError {
     #[error("index error: {0}")]
     IndexError(String),
 
-    #[error("engram unavailable: {0}")]
-    EngramUnavailable(String),
+    #[error("memory unavailable: {0}")]
+    MemoryUnavailable(String),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

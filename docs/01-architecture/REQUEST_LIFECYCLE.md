@@ -226,7 +226,7 @@ Context Engine needs repository-specific knowledge to enrich the context.
    - Query: task description
    - Max results: 20
 3. Filter by confidence >= 0.3, take top 10
-4. Search engram for relevant memory entries
+4. Search SQLite memory for relevant entries (engram removed)
 5. Merge knowledge entries with memory entries
 6. Log: `DEBUG knowledge_retrieved entries={count}`
 
@@ -251,8 +251,7 @@ KnowledgeEntry {
 | Error | Behavior |
 |-------|----------|
 | BM25/tantivy search failure | Return empty list, log warning |
-| engram unreachable | Continue without memory |
-| engram unreachable | Continue without memory |
+| SQLite memory unreachable | Continue without memory (engram removed) |
 | No knowledge found | Empty list, continue |
 
 ---

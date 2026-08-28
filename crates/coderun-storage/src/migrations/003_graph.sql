@@ -1,5 +1,5 @@
 -- Migration 003: Dependency graph + cost column (v0.3.0 spec §3, ROADMAP.md:81)
--- Dependency graph edges (AST-derived, codebase-memory-mcp style)
+-- Dependency graph edges (AST-derived, local)
 CREATE TABLE IF NOT EXISTS edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_path TEXT NOT NULL,

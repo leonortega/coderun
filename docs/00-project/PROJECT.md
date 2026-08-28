@@ -82,7 +82,7 @@ The coding agent reads a large log file or search result. The runtime intercepts
 
 ### Use Case 5: Knowledge Accumulation
 
-Over multiple interactions, the runtime builds persistent knowledge about the repository via engram: coding conventions, architectural patterns, frequently modified files, and domain terminology. This knowledge improves future context packages.
+Over multiple interactions, the runtime builds persistent knowledge about the repository via local SQLite+tantivy: coding conventions, architectural patterns, frequently modified files, and domain terminology (engram removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md`). This knowledge improves future context packages.
 
 ## Primary Value Proposition
 
@@ -116,26 +116,26 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 |------------|-------------|
 | Agent interception | Pre-generation and pre-tool-call hooks for Tier 1 agents |
 | Repository indexing | Incremental AST parsing with tree-sitter, structural search with ast-grep, text search with ripgrep |
-| Knowledge retrieval | BM25/tantivy lexical search + FlashRank reranking for docs and code |
-| Memory | Persistent memory via engram (SQLite+FTS5, MCP-native) |
+| Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md`, reranker is passthrough) |
+| Memory | Persistent memory via SQLite+tantivy local (engram removed — see ENGRAM_CBM_REMOVAL.md) |
 | Skill matching | Deterministic tag-based skill activation from community formats |
 | Context construction | Token-budgeted YAML context pack with cache-aware ordering |
 | Model routing | Heuristic complexity scoring → tier selection → LiteLLM gateway |
 | Tool-output optimization | RTK-based compression for tool outputs |
 | Event bus | Async observability events (ContextBuilt, SkillActivated, etc.) |
-| Local persistence | SQLite for index and metadata, engram for memory |
+| Local persistence | SQLite for index, metadata, and memory (engram removed) |
 
 ## v1 Limitations
 
 | Limitation | Description | Future Resolution |
 |------------|-------------|-------------------|
 | Single repository | Runtime handles one repository per daemon process | Multi-repo in v2 |
-| No conversation memory | Runtime does not persist conversation history across sessions | Session memory via engram in v2 |
+| No conversation memory | Runtime does not persist conversation history across sessions | Session memory deferred (engram removed — see ENGRAM_CBM_REMOVAL.md) |
 | No multi-agent coordination | Runtime serves one agent instance at a time | Concurrent agent support in v2 |
 | No web UI | CLI-only interface | Dashboard in v2 |
 | No plugin system | Skills are file-based community formats | Dynamic plugin system in v2 |
 | No distributed deployment | Single local daemon process | Distributed runtime in v2 |
-| No vector/semantic recall | Uses FTS5 lexical recall only (engram) | Semantic recall only if lexical proves insufficient |
+| No vector/semantic recall | Uses tantivy BM25 lexical recall only (engram removed) | Semantic recall only if lexical proves insufficient |
 | No relationship-aware retrieval | Uses BM25 + reranking only | Graph-based retrieval only if concrete query pattern requires it |
 | No external orchestration | Runtime works standalone | DBOS required since v0.6.0 (SQLite+Litestream native); Temporal deleted |
 | Tier 2 agents | Best-effort only, no guarantee of hook compliance | N/A — by design (v0.6.0 keeps README-only) |

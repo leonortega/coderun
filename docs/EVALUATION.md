@@ -19,8 +19,8 @@ The evaluation framework tests two core capabilities:
 ./eval/run-evaluation.sh model    # Model routing only
 ./eval/run-evaluation.sh context  # Context quality only
 
-# Compare BM25 vs MCP vs FlashRank
-./eval/run_comparison.sh
+# Compare BM25 vs MCP vs FlashRank (historical — FlashRank/MCP removed from v1 runtime, see FLASHRANK_REMOVAL.md / ENGRAM_CBM_REMOVAL.md)
+./eval/run_comparison.sh  # offline eval only
 
 # View results in web UI
 npx promptfoo view -c eval/promptfooconfig.yaml
@@ -64,7 +64,7 @@ Compares different retrieval strategies head-to-head.
 ./eval/run_comparison.sh
 ```
 
-Compares: BM25 only vs BM25 + FlashRank vs MCP fallback.
+Compares: BM25 only vs BM25 + FlashRank vs MCP fallback *(historical offline eval — v1 runtime is BM25-only, FlashRank/MCP removed)*.
 
 ## Evaluation Scripts
 

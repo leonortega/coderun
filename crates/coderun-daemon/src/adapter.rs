@@ -672,7 +672,7 @@ mod tests {
         let repo_path = std::env::temp_dir().join(format!("coderun_adapter_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&repo_path).unwrap();
         let repo_intel = coderun_repo_intel::RepositoryIntelligence::new(repo_path.clone(), coderun_storage::Database::open(&std::path::PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-        let kh = coderun_knowledge::KnowledgeHub::new(db, event_bus.clone(), coderun_knowledge::KnowledgeConfig { memory_enabled: false, ..Default::default() });
+        let kh = coderun_knowledge::KnowledgeHub::new(db, event_bus.clone(), coderun_knowledge::KnowledgeConfig::default());
         let engine = ContextEngine::new(repo_intel, kh, event_bus.clone(), coderun_context::ContextConfig::default());
         let engine = Arc::new(RwLock::new(engine));
         let opt = ExecutionOptimizer::new(OptimizerConfig::default());
