@@ -35,9 +35,9 @@ echo "║       Retrieval Quality Comparison (48-task eShopOnWeb)     ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
-# ── Configuration 1: Baseline BM25 ────────────────
-echo "━━━ [1/2] Baseline BM25 (no MCP graph) ━━━"
-CODERUN_MCP_ENABLED=false \
+# ── Configuration 1: Baseline BM25 (no symbols, no MCP) ────────
+echo "━━━ [1/3] Baseline BM25 (no symbols, no MCP) ━━━"
+CODERUN_MCP_ENABLED=false CODERUN_SYMBOLS_ENABLED=false \
     python3 "$SCRIPT_DIR/metrics/retrieval.py" \
         --dataset "$SCRIPT_DIR/datasets/eshop_tasks.yaml" \
         --repo "$REPO" \
@@ -47,9 +47,21 @@ CODERUN_MCP_ENABLED=false \
         --diag 2>&1 | tee "$RESULTS_DIR/baseline_bm25.log"
 echo ""
 
-# ── Configuration 2: With codebase-memory-mcp graph ──────────────
-echo "━━━ [2/2] BM25 + codebase-memory-mcp graph ━━━"
-CODERUN_MCP_ENABLED=true \
+# ── Configuration 2: BM25 + tree-sitter symbols ────────────────
+echo "━━━ [2/3] BM25 + tree-sitter symbols ━━━"
+CODERUN_MCP_ENABLED=false CODERUN_SYMBOLS_ENABLED=true \
+    python3 "$SCRIPT_DIR/metrics/retrieval.py" \
+        --dataset "$SCRIPT_DIR/datasets/eshop_tasks.yaml" \
+        --repo "$REPO" \
+        --binary "$BINARY" \
+        --out "$RESULTS_DIR/with_symbols.json" \
+        --timeout 30 \
+        --diag 2>&1 | tee "$RESULTS_DIR/with_symbols.log"
+echo ""
+
+# ── Configuration 3: BM25 + symbols + codebase-memory-mcp graph ──
+echo "━━━ [3/3] BM25 + symbols + MCP graph ━━━"
+CODERUN_MCP_ENABLED=true CODERUN_SYMBOLS_ENABLED=true \
     python3 "$SCRIPT_DIR/metrics/retrieval.py" \
         --dataset "$SCRIPT_DIR/datasets/eshop_tasks.yaml" \
         --repo "$REPO" \
@@ -61,12 +73,12 @@ echo ""
 
 # ── Summary Comparison ───────────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║                    RESULTS COMPARISON                       ║"
+echo "║              3-WAY RETRIEVAL COMPARISON (48-task eShop)     ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 
-for config in baseline_bm25 with_cbm_graph; do
+for config in baseline_bm25 with_symbols with_cbm_graph; do
     if [ -f "$RESULTS_DIR/${config}.json" ]; then
-        label=$(echo "$config" | sed 's/_/ /g' | sed 's/\b\(.\)/\u\1/g')
+        label=$(echo "$config" | sed 's/_/ /g')
         summary=$(python3 -c "
 import json, sys
 with open('$RESULTS_DIR/${config}.json') as f:
@@ -89,8 +101,6 @@ done
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Full results in: $RESULTS_DIR/"
-echo "  baseline_bm25.json     — BM25 only"
-echo "  with_cbm_graph.json    — BM25 + codebase-memory-mcp graph"
-echo ""
-echo "Note: FlashRank was removed from v1 runtime per benchmark evaluation."
-echo "  Recall@5: +1.97pp but MRR: -6.78pp and 17x slower. Not worth it."
+echo "  baseline_bm25.json     — BM25 only (no symbols, no MCP)"
+echo "  with_symbols.json      — BM25 + tree-sitter symbols (language-pack)"
+echo "  with_cbm_graph.json    — BM25 + symbols + codebase-memory-mcp graph"

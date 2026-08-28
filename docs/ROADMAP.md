@@ -130,7 +130,7 @@ v0.1.0 uses **custom, self-contained implementations** for all components:
 
 1. **DBOS = required + SQLite + native async** — `IWorkflowEngine` becomes `async_trait`, `workflow.enabled:true` default, sidecar `dbos-transact` `governedWorkflow` over `sqlite://~/.coderun/dbos.db` + Litestream replica (`DBOS_LITESTREAM_REPLICA_URL`), real `Hmac<Sha256>` (not `sha256(secret+body)`), fail-closed if DBOS down when enabled.
 2. **Hook compat (OpenSpec)** — spec `chat.message` primary + `message.updated` shim with `hook_compat_total` metric + deprecation `WARN` (remove in v0.7.0).
-3. **Languages = feature B** — default 4 (`rust,ts,js,python`), `go,java,c,cpp` behind `--features extended-languages` (`tree-sitter-go/java/c/cpp`, `parser.rs` gated, `validate()` warns).
+3. **Languages = 111 via arborium** — all languages available by default via arborium bundle, no feature flags needed (`parser.rs` uses `arborium::get_language()`).
 4. **Duplicate collapse** — single `SkillEngine` scorer, single `tier_to_model`, single `verify_hmac` (`hmac` crate), single UDS listener (`adapter.rs`), single `Database::open` + `LazyLock<Regex>` + shared `dirs::home`/`tokens::count`.
 
 Spec: DBOS moves from separate product to required runtime; `Temporal` remains deleted; Tier2 stays README-only; vector/semantic deferred.
@@ -163,7 +163,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for development guidelines.
 
 We welcome contributions in these areas:
 
-1. **tree-sitter grammars** — Add support for more languages (Go, Java, C++)
+1. **tree-sitter grammars** — 111 languages via arborium; add more by extending `LanguageId` enum and mapping to arborium grammar names
 2. **Integration tests** — Test against real codebases
 3. **Benchmarks** — Compare against baseline performance
 4. **Documentation** — Improve guides and examples
@@ -175,7 +175,7 @@ We welcome contributions in these areas:
 | Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 (planned) |
 |--------|--------|--------|--------|--------|--------|--------|
 | Test coverage | 108 tests | 128 tests | 150+ | 165 | 166 | 180+ (async DBOS, extended-langs) |
-| Languages supported | All (regex) | 4 (tree-sitter) | 10+ | 10+ | 10+ (ast-grep sg-core) | 4 default +4 `--features extended-languages` |
+| Languages supported | All (regex) | 4 (tree-sitter) | 10+ | 10+ | 10+ (ast-grep sg-core) | **111 (arborium)** |
 | Search accuracy | ~70% | ~85% | 95%+ | 95%+ | 95%+ (FlashRank ort int8) | 95%+ (ort opt) |
 | Latency (p95) | <100ms | <80ms | <50ms | <50ms (RwLock) | <50ms (first-class tools) | <50ms |
 | Memory usage | <100MB | <150MB | <200MB | <200MB | <200MB (+ort <50MB when enabled) | <200MB (+ort <50MB) |

@@ -1,5 +1,48 @@
 use std::path::Path;
-use tree_sitter::Language;
+
+/// Maps LanguageId to tree-sitter-language-pack's name.
+/// Language-pack uses lowercase names (e.g. "csharp", "fsharp", "typescript").
+pub fn language_pack_name(id: LanguageId) -> &'static str {
+    match id {
+        LanguageId::Rust => "rust",
+        LanguageId::TypeScript => "typescript",
+        LanguageId::TypeScriptReact => "tsx",
+        LanguageId::JavaScript => "javascript",
+        LanguageId::JavaScriptReact => "jsx",
+        LanguageId::Python => "python",
+        LanguageId::CSharp => "csharp",
+        LanguageId::Go => "go",
+        LanguageId::Java => "java",
+        LanguageId::C => "c",
+        LanguageId::Cpp => "cpp",
+        LanguageId::Ruby => "ruby",
+        LanguageId::Php => "php",
+        LanguageId::Swift => "swift",
+        LanguageId::Kotlin => "kotlin",
+        LanguageId::Scala => "scala",
+        LanguageId::Haskell => "haskell",
+        LanguageId::Elixir => "elixir",
+        LanguageId::Erlang => "erlang",
+        LanguageId::Lua => "lua",
+        LanguageId::Zig => "zig",
+        LanguageId::R => "r",
+        LanguageId::Ocaml => "ocaml",
+        LanguageId::Clojure => "clojure",
+        LanguageId::FSharp => "fsharp",
+        LanguageId::Vb => "vb",
+        LanguageId::Sql => "sql",
+        LanguageId::Shell => "bash",
+        LanguageId::Protobuf => "protobuf",
+        LanguageId::GraphQL => "graphql",
+        LanguageId::Terraform => "hcl",
+        LanguageId::Vue => "vue",
+        LanguageId::Svelte => "svelte",
+        // Non-code — no parser
+        LanguageId::Markdown | LanguageId::Yaml | LanguageId::Toml |
+        LanguageId::Json | LanguageId::Xml | LanguageId::Html |
+        LanguageId::Css | LanguageId::Scss | LanguageId::Text => "",
+    }
+}
 
 // ── Language Identity ────────────────────────────────────────────────────
 
@@ -27,7 +70,6 @@ pub enum LanguageId {
     Erlang,
     Lua,
     Zig,
-    Nim,
     R,
     Ocaml,
     Clojure,
@@ -77,7 +119,6 @@ impl LanguageId {
             Self::Erlang => "erlang",
             Self::Lua => "lua",
             Self::Zig => "zig",
-            Self::Nim => "nim",
             Self::R => "r",
             Self::Ocaml => "ocaml",
             Self::Clojure => "clojure",
@@ -103,15 +144,13 @@ impl LanguageId {
     }
 
     /// Does this language have a tree-sitter parser?
+    /// With tree-sitter-language-pack, most languages have parsers available.
     pub fn has_parser(&self) -> bool {
-        matches!(
+        // All non-metadata languages have parsers via tree-sitter-language-pack (371 languages)
+        !matches!(
             self,
-            Self::Rust | Self::TypeScript | Self::TypeScriptReact |
-            Self::JavaScript | Self::JavaScriptReact | Self::Python |
-            Self::CSharp
-        ) || cfg!(feature = "extended-languages") && matches!(
-            self,
-            Self::Go | Self::Java | Self::C | Self::Cpp
+            Self::Markdown | Self::Yaml | Self::Toml | Self::Json |
+            Self::Xml | Self::Html | Self::Css | Self::Scss | Self::Text
         )
     }
 
@@ -139,7 +178,6 @@ impl LanguageId {
             "erlang" | "erl" => Some(Self::Erlang),
             "lua" => Some(Self::Lua),
             "zig" => Some(Self::Zig),
-            "nim" => Some(Self::Nim),
             "r" => Some(Self::R),
             "ocaml" | "ml" => Some(Self::Ocaml),
             "clojure" | "clj" => Some(Self::Clojure),
@@ -184,18 +222,22 @@ impl LanguageDefinition {
 
 // ── Parser Registry ──────────────────────────────────────────────────────
 
-/// Get tree-sitter language for a LanguageId (backward-compatible free function).
-/// Prefer `ParserRegistry::get_language()` for new code.
-pub fn get_ts_language(id: LanguageId) -> Option<Language> {
-    ParserRegistry::default().get_language(id)
+/// Get tree-sitter parser for a LanguageId (backward-compatible free function).
+/// Uses tree-sitter-language-pack to load the parser.
+pub fn get_ts_parser(id: LanguageId) -> Option<tree_sitter_language_pack::Language> {
+    let name = language_pack_name(id);
+    if name.is_empty() {
+        return None;
+    }
+    tree_sitter_language_pack::get_language(name).ok()
 }
 
 /// Extensible parser registry — manages language definitions and grammar loading.
 /// Languages can be registered at runtime via `register_language()`.
-#[derive(Debug, Clone)]
+/// Grammar loading is handled by tree-sitter-language-pack via `language_pack_name()`.
 pub struct ParserRegistry {
     definitions: Vec<LanguageDefinition>,
-    grammar_loaders: std::collections::HashMap<LanguageId, fn() -> Option<Language>>,
+    supported: std::collections::HashSet<LanguageId>,
 }
 
 impl ParserRegistry {
@@ -203,101 +245,101 @@ impl ParserRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
             definitions: Vec::new(),
-            grammar_loaders: std::collections::HashMap::new(),
+            supported: std::collections::HashSet::new(),
         };
         registry.register_builtins();
         registry
     }
 
-    /// Register a built-in language with its grammar loader.
-    fn register_builtin(&mut self, def: LanguageDefinition, loader: fn() -> Option<Language>) {
-        self.grammar_loaders.insert(def.id, loader);
+    /// Register a built-in language.
+    fn register_builtin(&mut self, def: LanguageDefinition, has_parser: bool) {
+        if has_parser {
+            self.supported.insert(def.id);
+        }
         self.definitions.push(def);
     }
 
     /// Register all built-in languages.
+    /// Languages with tree-sitter parsers use tree-sitter-language-pack (371 languages).
     fn register_builtins(&mut self) {
-        // Source languages with parsers
-        self.register_builtin(LanguageDefinition::new(LanguageId::Rust, &["rs"], &["Cargo.toml"]), || Some(tree_sitter_rust::LANGUAGE.into()));
-        self.register_builtin(LanguageDefinition::new(LanguageId::TypeScript, &["ts", "mts", "cts"], &[]), || Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()));
-        self.register_builtin(LanguageDefinition::new(LanguageId::TypeScriptReact, &["tsx"], &[]), || Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()));
-        self.register_builtin(LanguageDefinition::new(LanguageId::JavaScript, &["js", "mjs", "cjs"], &["package.json"]), || Some(tree_sitter_javascript::LANGUAGE.into()));
-        self.register_builtin(LanguageDefinition::new(LanguageId::JavaScriptReact, &["jsx"], &[]), || Some(tree_sitter_javascript::LANGUAGE.into()));
-        self.register_builtin(LanguageDefinition::new(LanguageId::Python, &["py", "pyi"], &["pyproject.toml", "setup.py", "requirements.txt"]), || Some(tree_sitter_python::LANGUAGE.into()));
-        self.register_builtin(LanguageDefinition::new(LanguageId::CSharp, &["cs"], &["*.csproj", "*.sln"]), || Some(tree_sitter_c_sharp::LANGUAGE.into()));
-        #[cfg(feature = "extended-languages")]
-        {
-            self.register_builtin(LanguageDefinition::new(LanguageId::Go, &["go"], &["go.mod"]), || Some(tree_sitter_go::LANGUAGE.into()));
-            self.register_builtin(LanguageDefinition::new(LanguageId::Java, &["java"], &["pom.xml", "build.gradle"]), || Some(tree_sitter_java::LANGUAGE.into()));
-            self.register_builtin(LanguageDefinition::new(LanguageId::C, &["c", "h"], &[]), || Some(tree_sitter_c::LANGUAGE.into()));
-            self.register_builtin(LanguageDefinition::new(LanguageId::Cpp, &["cpp", "cc", "cxx", "hpp"], &[]), || Some(tree_sitter_cpp::LANGUAGE.into()));
+        // Helper: a language has a parser if it has a language-pack name
+        fn has_pack_parser(id: LanguageId) -> bool {
+            !language_pack_name(id).is_empty()
         }
-        // Source languages without parsers (regex fallback)
-        self.register_builtin(LanguageDefinition::new(LanguageId::Ruby, &["rb"], &["Gemfile"]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Php, &["php"], &["composer.json"]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Swift, &["swift"], &["Package.swift"]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Kotlin, &["kt", "kts"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Scala, &["scala"], &["build.sbt"]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Haskell, &["hs"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Elixir, &["ex", "exs"], &["mix.exs"]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Erlang, &["erl"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Lua, &["lua"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Zig, &["zig"], &["build.zig"]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Nim, &["nim"], &["*.nimble"]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::R, &["r", "R"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Ocaml, &["ml"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Clojure, &["clj"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::FSharp, &["fs", "fsx"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Vb, &["vb"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Sql, &["sql"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Shell, &["sh", "bash", "zsh"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Protobuf, &["proto"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::GraphQL, &["graphql", "gql"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Terraform, &["tf", "hcl"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Vue, &["vue"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Svelte, &["svelte"], &[]), || None);
-        // Non-code (metadata/search only)
-        self.register_builtin(LanguageDefinition::new(LanguageId::Markdown, &["md"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Yaml, &["yaml", "yml"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Toml, &["toml"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Json, &["json"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Xml, &["xml"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Html, &["html"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Css, &["css"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Scss, &["scss"], &[]), || None);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Text, &["txt"], &[]), || None);
+
+        // Source languages with parsers (via tree-sitter-language-pack)
+        self.register_builtin(LanguageDefinition::new(LanguageId::Rust, &["rs"], &["Cargo.toml"]), has_pack_parser(LanguageId::Rust));
+        self.register_builtin(LanguageDefinition::new(LanguageId::TypeScript, &["ts", "mts", "cts"], &[]), has_pack_parser(LanguageId::TypeScript));
+        self.register_builtin(LanguageDefinition::new(LanguageId::TypeScriptReact, &["tsx"], &[]), has_pack_parser(LanguageId::TypeScriptReact));
+        self.register_builtin(LanguageDefinition::new(LanguageId::JavaScript, &["js", "mjs", "cjs"], &["package.json"]), has_pack_parser(LanguageId::JavaScript));
+        self.register_builtin(LanguageDefinition::new(LanguageId::JavaScriptReact, &["jsx"], &[]), has_pack_parser(LanguageId::JavaScriptReact));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Python, &["py", "pyi"], &["pyproject.toml", "setup.py", "requirements.txt"]), has_pack_parser(LanguageId::Python));
+        self.register_builtin(LanguageDefinition::new(LanguageId::CSharp, &["cs"], &["*.csproj", "*.sln"]), has_pack_parser(LanguageId::CSharp));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Go, &["go"], &["go.mod"]), has_pack_parser(LanguageId::Go));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Java, &["java"], &["pom.xml", "build.gradle"]), has_pack_parser(LanguageId::Java));
+        self.register_builtin(LanguageDefinition::new(LanguageId::C, &["c", "h"], &[]), has_pack_parser(LanguageId::C));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Cpp, &["cpp", "cc", "cxx", "hpp"], &[]), has_pack_parser(LanguageId::Cpp));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Ruby, &["rb"], &["Gemfile"]), has_pack_parser(LanguageId::Ruby));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Php, &["php"], &["composer.json"]), has_pack_parser(LanguageId::Php));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Swift, &["swift"], &["Package.swift"]), has_pack_parser(LanguageId::Swift));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Kotlin, &["kt", "kts"], &[]), has_pack_parser(LanguageId::Kotlin));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Scala, &["scala"], &["build.sbt"]), has_pack_parser(LanguageId::Scala));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Haskell, &["hs"], &[]), has_pack_parser(LanguageId::Haskell));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Elixir, &["ex", "exs"], &["mix.exs"]), has_pack_parser(LanguageId::Elixir));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Erlang, &["erl"], &[]), has_pack_parser(LanguageId::Erlang));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Lua, &["lua"], &[]), has_pack_parser(LanguageId::Lua));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Zig, &["zig"], &["build.zig"]), has_pack_parser(LanguageId::Zig));
+        self.register_builtin(LanguageDefinition::new(LanguageId::R, &["r", "R"], &[]), has_pack_parser(LanguageId::R));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Ocaml, &["ml"], &[]), has_pack_parser(LanguageId::Ocaml));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Clojure, &["clj"], &[]), has_pack_parser(LanguageId::Clojure));
+        self.register_builtin(LanguageDefinition::new(LanguageId::FSharp, &["fs", "fsx"], &[]), has_pack_parser(LanguageId::FSharp));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Vb, &["vb"], &[]), has_pack_parser(LanguageId::Vb));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Sql, &["sql"], &[]), has_pack_parser(LanguageId::Sql));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Shell, &["sh", "bash", "zsh"], &[]), has_pack_parser(LanguageId::Shell));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Protobuf, &["proto"], &[]), has_pack_parser(LanguageId::Protobuf));
+        self.register_builtin(LanguageDefinition::new(LanguageId::GraphQL, &["graphql", "gql"], &[]), has_pack_parser(LanguageId::GraphQL));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Terraform, &["tf", "hcl"], &[]), has_pack_parser(LanguageId::Terraform));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Vue, &["vue"], &[]), has_pack_parser(LanguageId::Vue));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Svelte, &["svelte"], &[]), has_pack_parser(LanguageId::Svelte));
+        // Non-code (metadata/search only — no tree-sitter parsers needed)
+        self.register_builtin(LanguageDefinition::new(LanguageId::Markdown, &["md"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Yaml, &["yaml", "yml"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Toml, &["toml"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Json, &["json"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Xml, &["xml"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Html, &["html"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Css, &["css"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Scss, &["scss"], &[]), false);
+        self.register_builtin(LanguageDefinition::new(LanguageId::Text, &["txt"], &[]), false);
     }
 
     /// Register a new language at runtime.
     /// Returns `true` if the language was registered, `false` if already present.
-    pub fn register_language(&mut self, def: LanguageDefinition, loader: Option<fn() -> Option<Language>>) -> bool {
+    pub fn register_language(&mut self, def: LanguageDefinition, has_parser: bool) -> bool {
         if self.definitions.iter().any(|d| d.id == def.id) {
             return false;
         }
-        if let Some(f) = loader {
-            self.grammar_loaders.insert(def.id, f);
+        if has_parser {
+            self.supported.insert(def.id);
         }
         self.definitions.push(def);
         true
     }
 
-    /// Get tree-sitter language for a LanguageId using this registry's loaders.
-    pub fn get_language(&self, id: LanguageId) -> Option<Language> {
-        if let Some(loader) = self.grammar_loaders.get(&id) {
-            return loader();
-        }
-        None
+    /// Check if a LanguageId has a tree-sitter parser available via language-pack.
+    pub fn has_parser(&self, id: LanguageId) -> bool {
+        self.supported.contains(&id)
     }
 
     /// List all available languages (with parser support status).
     pub fn list_available_languages(&self) -> Vec<(LanguageId, bool)> {
-        self.definitions.iter().map(|d| (d.id, d.id.has_parser())).collect()
+        self.definitions.iter().map(|d| (d.id, self.supported.contains(&d.id))).collect()
     }
 
-    /// List languages that have tree-sitter parsers loaded.
+    /// List languages that have tree-sitter parsers available.
     pub fn list_with_parsers(&self) -> Vec<LanguageId> {
         self.definitions.iter()
-            .filter(|d| self.get_language(d.id).is_some())
+            .filter(|d| self.supported.contains(&d.id))
             .map(|d| d.id)
             .collect()
     }
@@ -359,7 +401,6 @@ pub const LANGUAGE_REGISTRY: &[LanguageDefinition] = &[
     LanguageDefinition::new(LanguageId::Erlang, &["erl"], &[]),
     LanguageDefinition::new(LanguageId::Lua, &["lua"], &[]),
     LanguageDefinition::new(LanguageId::Zig, &["zig"], &["build.zig"]),
-    LanguageDefinition::new(LanguageId::Nim, &["nim"], &["*.nimble"]),
     LanguageDefinition::new(LanguageId::R, &["r", "R"], &[]),
     LanguageDefinition::new(LanguageId::Ocaml, &["ml"], &[]),
     LanguageDefinition::new(LanguageId::Clojure, &["clj"], &[]),
@@ -542,11 +583,17 @@ mod tests {
 
     #[test]
     fn test_has_parser() {
+        // With tree-sitter-language-pack, all source languages have parsers
         assert!(LanguageId::Rust.has_parser());
         assert!(LanguageId::CSharp.has_parser());
         assert!(LanguageId::Python.has_parser());
-        assert!(!LanguageId::Ruby.has_parser());
+        assert!(LanguageId::Ruby.has_parser());
+        assert!(LanguageId::Go.has_parser());
+        assert!(LanguageId::Kotlin.has_parser());
+        // Non-metadata languages have parsers
         assert!(!LanguageId::Markdown.has_parser());
+        assert!(!LanguageId::Json.has_parser());
+        assert!(!LanguageId::Text.has_parser());
     }
 
     #[test]
@@ -571,11 +618,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_registry_get_language() {
+    fn test_parser_registry_has_parser() {
         let registry = ParserRegistry::new();
-        assert!(registry.get_language(LanguageId::Rust).is_some());
-        assert!(registry.get_language(LanguageId::Python).is_some());
-        assert!(registry.get_language(LanguageId::Markdown).is_none());
+        assert!(registry.has_parser(LanguageId::Rust));
+        assert!(registry.has_parser(LanguageId::Python));
+        assert!(!registry.has_parser(LanguageId::Markdown));
     }
 
     #[test]
@@ -583,7 +630,7 @@ mod tests {
         let mut registry = ParserRegistry::new();
         let def = LanguageDefinition::new(LanguageId::Zig, &["zig"], &["build.zig"]);
         // Zig is already registered, so register_language should return false
-        assert!(!registry.register_language(def, None));
+        assert!(!registry.register_language(def, false));
         // Verify list_with_parsers returns languages with loaded grammars
         let with_parsers = registry.list_with_parsers();
         assert!(with_parsers.contains(&LanguageId::Rust));

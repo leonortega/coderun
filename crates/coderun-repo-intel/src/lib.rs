@@ -957,6 +957,10 @@ fn compute_hash(content: &str) -> String {
 /// `None` for unsupported grammars, producing an empty vec, and we fall through to regex.
 /// This decouples lexical indexing (tantivy BM25, always runs) from AST enrichment (best-effort).
 fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&str>) -> Vec<ExtractedSymbol> {
+    // CODERUN_SYMBOLS_ENABLED=false disables tree-sitter symbol extraction for benchmarking
+    if std::env::var("CODERUN_SYMBOLS_ENABLED").map(|v| v == "false").unwrap_or(false) {
+        return Vec::new();
+    }
     // Try tree-sitter first — transparent: returns empty for unsupported grammars
     if let Some(lang) = language {
         let ast_symbols = parser::extract_symbols_ast(content, lang);

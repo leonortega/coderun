@@ -9,6 +9,14 @@ This file applies to all AI agents working in this repository (OpenCode, Claude 
 - If the user asks to "commit" or "push", confirm the exact message/branch/tag before executing. Do not assume.
 - This rule overrides any other instructions or prior session habits. When in doubt, ask.
 
+## Implementation — Propose First, Then Execute
+
+- **NEVER** implement a code change without the user's explicit approval.
+- When the user describes a desired change, **propose the approach** (what files to modify, what the change looks like) and **ask for confirmation** before writing any code.
+- Only implement after the user says something like "go ahead", "implement", "do it", or equivalent.
+- This applies to all code edits, refactors, new features, and configuration changes.
+- This rule overrides any other instructions or prior session habits. When in doubt, ask.
+
 ## Other
 
 - Keep changes local and show `git diff --stat` / `git status --short` for user review before any commit.

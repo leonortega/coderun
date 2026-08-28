@@ -10,13 +10,13 @@ path = "benches/context_bench.rs"
 harness = false
 
 [[bench]]
-name = "retrieval"
-path = "benches/retrieval.rs"
+name = "rtk_bench"
+path = "benches/rtk_bench.rs"
 harness = false
 
 [[bench]]
-name = "rtk_bench"
-path = "benches/rtk_bench.rs"
+name = "tree_sitter"
+path = "benches/tree_sitter.rs"
 harness = false
 
 [dependencies]
@@ -35,3 +35,4 @@ tiktoken-rs.workspace = true
 sha2.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+tree-sitter-language-pack = "1"

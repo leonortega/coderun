@@ -2,11 +2,11 @@
 <#
 .SYNOPSIS
   Coderun uninstaller (Windows PowerShell 5.1)
-  V1 scope: local runtime only -- reverses scripts/install.ps1 - removes everything by default, preserves future/workflow source unless -RemoveRepo.
+  Reverses scripts/install.ps1 - removes everything by default, preserves source unless -RemoveRepo.
 
 .DESCRIPTION
   Default (no flags): stops daemon, removes project build artifacts (target/release/coderun*.exe),
-  DBOS sidecar node_modules, opencode plugins (project-local + global), ALL first-class external tools
+  opencode plugins (project-local + global), ALL first-class external tools
   (ast-grep, rtk, codebase-memory-mcp, litellm, mkdocs, promptfoo, eslint, engram),
   and ALL user/project data (%USERPROFILE%\.coderun, .coderun/, sockets). Idempotent - safe to re-run.
 
@@ -87,7 +87,7 @@ $doRemoveRepo = $RemoveRepo  # only if explicitly requested
 
 if ($DryRun) { $PSBoundParameters["WhatIf"] = $true; $WhatIfPreference = $true }
 
-Info "Coderun uninstaller (DBOS/workflow future-only)"
+Info "Coderun uninstaller"
 if ($WhatIfPreference) { Warn "DryRun/WhatIf active - no changes will be made" }
 Info "Options: RemoveExternal( effective=$doRemoveExternal KeepExternal=$KeepExternal ) RemoveData( effective=$doRemoveData KeepData=$KeepData ) KeepBuild=$KeepBuild Force=$Force"
 

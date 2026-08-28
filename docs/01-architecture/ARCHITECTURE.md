@@ -315,7 +315,7 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 |-------|------------|------|
 | Language | Rust (>= 1.75) | Context Engine, daemon, all modules (`coderun-workflow` new) |
 | Agent IPC | UDS + MessagePack primary (`rmp-serde`+`tokio::net::UnixListener`) + HTTP/JSON fallback (`axum`) on `127.0.0.1:9527` | Daemon ↔ Agent; `POST /hook`, `GET /metrics`, `POST /workflow/*` |
-| AST Parsing | tree-sitter 4 default (`rust,ts,js,python`) + 4 behind `--features extended-languages` (`go,java,c,cpp`) | `repo-intel/src/parser.rs` (`V0_6_0_PLAN.md:2.2`) |
+| AST Parsing | tree-sitter **111 languages** via arborium bundle (no feature flags) | `repo-intel/src/parser.rs` |
 | Structural Search | `sg-core` gated `search_structural()` first-class (`V0_5_0_PLAN.md:1.1`), `search_structural_fallback()` only on `Err` | `repo-intel/src/lib.rs:352` |
 | Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |
 | Full-text Index | tantivy `MmapDirectory` (in-process) | `storage/src/tantivy_index.rs` + `search_fulltext()` wiring |

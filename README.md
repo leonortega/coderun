@@ -1,11 +1,11 @@
 # Coderun — AI Runtime
 
-An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via UDS/MessagePack (HTTP fallback), enriching them with repository context, knowledge, skills, and model routing decisions. **v1** returns to the agreed local-runtime scope: DBOS/workflows move to `future/workflow` (opt-in via `--features workflow`), event persistence is in-memory only (`tracing`+`metrics`+`correlation_id` canonical), and default languages are `rust/typescript/javascript/python` (`go/java/c/cpp` behind `--features extended-languages`).
+An AI Runtime that enhances coding agents with contextual intelligence. Coderun runs as a local daemon, intercepting agent requests via UDS/MessagePack (HTTP fallback), enriching them with repository context, knowledge, skills, and model routing decisions. **v1** returns to the agreed local-runtime scope: DBOS/workflows move to `future/workflow` (opt-in via `--features workflow`), event persistence is in-memory only (`tracing`+`metrics`+`correlation_id` canonical), and default languages are `rust/typescript/javascript/python` (111 languages supported via arborium, add any from the list).
 
 ## Features
 
 - **Context Engine** — Assembles contextual information from your codebase for better AI responses (`BuildContext` — `skills → docs → code` + `FROZEN PREFIX END` + dedup, requires 30s budget, fail-open)
-- **Repository Intelligence** — Incremental indexing: tree-sitter AST (4 default, +4 behind `--features extended-languages`: `go,java,c,cpp`) + ripgrep + tantivy BM25 + `sg-core` ast-grep structural + dependency graph (`graph.rs`)
+- **Repository Intelligence** — Incremental indexing: tree-sitter AST (**111 languages** via arborium) + ripgrep + tantivy BM25 + `sg-core` ast-grep structural + dependency graph (`graph.rs`)
 - **Knowledge Hub** — Unified surface: SQLite+tantivy BM25 + engram (HTTP 2s timeout, fail-open to `memory`). FlashRank removed from v1 per benchmark evaluation.
 - **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io) — canonical `Skill {priority,specificity}` + `max_skills_per_request=5` + conflict detection
 - **Model Router** — Heuristic complexity scoring (structural/semantic/scope `0.3/0.4/0.3`) + LiteLLM gateway with `capable→balanced→fast` fallback + `cost_usd` (`[models]` separate from `[routing]`)
@@ -58,11 +58,11 @@ cargo build -p coderun-core
 ```bash
 # Run all tests (v1: ~190 tests; workflow in future/workflow --features workflow)
 cargo test
-cargo test --features extended-languages -p coderun-repo-intel  # +4 langs (go,java,c,cpp)
+cargo test -p coderun-repo-intel                  # 111 langs (arborium)
 
 # Run tests for a specific crate
 cargo test -p coderun-core       # secrets HMAC (LazyLock), config v1 defaults
-cargo test -p coderun-repo-intel # parser 4 default + extended-languages gate
+cargo test -p coderun-repo-intel # parser 111 langs via arborium
 # future/workflow: cargo test -p coderun-workflow --manifest-path future/workflow/Cargo.toml
 
 # Run with output
@@ -88,7 +88,7 @@ coderun/
 │   ├── coderun-core/             # Shared types, errors, config (WorkflowConfig enabled:false, HMAC LazyLock) (~32 tests)
 │   ├── coderun-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics (workflow routes behind --features workflow)
 │   ├── coderun-cli/              # CLI — init/index/serve/preview/replay/doctor (workflow behind --features workflow, replay legacy)
-│   ├── coderun-repo-intel/       # Repository Intelligence — tree-sitter 4+4 extended-languages + ripgrep + tantivy + graph + watcher + lsp (21 tests)
+│   ├── coderun-repo-intel/       # Repository Intelligence — tree-sitter 111 langs (arborium) + ripgrep + tantivy + graph + watcher + lsp (21 tests)
 │   ├── coderun-knowledge/        # Knowledge Hub — SQLite+tantivy→rerank→engram deterministic reads (16 tests, collapsed scorer)
 │   ├── coderun-skills/           # Skill Engine — MD/TOML/YAML parsing, tag matching from_skills (8 tests)
 │   ├── coderun-context/          # Context Engine — BuildContext (tiktoken, frozen-prefix, dedup, reversible) (11 tests)
@@ -272,10 +272,10 @@ Coderun Doctor (v1 — 8 probes, DBOS future only)
 ═══════════════════════════════════════
 
 SQLite:          ✓ OK (WAL, migrations 001-003)
-Config:          ✓ OK (4 langs + extended-languages flag noted)
+Config:          ✓ OK (4 default langs, 111 available via arborium)
 Skills directory: ✓ OK
 Socket path:     ✓ OK (/tmp/coderun.sock)
-Tree-sitter:     ✓ OK (4 default + 4 with --features extended-languages)
+Tree-sitter:     ✓ OK (111 languages via arborium)
 Tantivy:         ✓ OK (MmapDirectory)
 Engram:          ✓ Configured (http://localhost:9090, fail-open local LIKE)
 LiteLLM:         ✓ Configured (http://localhost:4000, fallback chain)
@@ -515,11 +515,11 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 
 | Component | Status | Implementation |
 |-----------|--------|----------------|
-| Config System | ✅ Complete | TOML + env (`CODERUN_*` v1), `[workflow]` future only (opt-in `CODERUN_WORKFLOW_ENABLED=true`), `index.languages` 4 default + `extended-languages` warn, validation |
+| Config System | ✅ Complete | TOML + env (`CODERUN_*` v1), `[workflow]` future only (opt-in `CODERUN_WORKFLOW_ENABLED=true`), `index.languages` 4 default + 111 available via arborium, validation |
 | Core Types | ✅ Complete | IPC (MessagePack), `IWorkflowEngine` **async** `async_trait`, HMAC `hmac` crate `LazyLock<Regex>` |
 | Event Bus | ✅ Complete | `broadcast` + ring→SQLite `004_events.sql` for `replay` |
 | Storage | ✅ Complete | SQLite WAL + tantivy BM25 + `005_audits.sql` (`audits`+`workflows`) + `cost_usd` |
-| Repository Intelligence | ✅ Complete | tree-sitter **4 +4 extended-languages** + ripgrep + tantivy full-text + `graph.rs` edges + `watcher.rs` `notify+git2` + stub `lsp.rs` |
+| Repository Intelligence | ✅ Complete | tree-sitter **111 languages (arborium)** + ripgrep + tantivy full-text + `graph.rs` edges + `watcher.rs` `notify+git2` + stub `lsp.rs` |
 | Skill Engine | ✅ Complete | MD/TOML/YAML, tag matching `from_skills` canonical, conflict detection, full-instruction injection |
 | Knowledge Hub | ✅ Complete | BM25 top20→rerank adaptive `5-20` (TF-IDF, `ort` int8) + engram 2s fail-open + collapsed scorer delegates to `SkillEngine` |
 | Model Router | ✅ Complete | Heuristic scoring + LiteLLM gateway `capable→balanced→fast` fallback + fallback tests |
@@ -538,7 +538,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 
 | Tool | Integration | Status |
 |------|-------------|--------|
-| tree-sitter | AST parsing for Rust, Python, JS, TS (4 default) + `go,java,c,cpp` via `--features extended-languages` | ✅ Integrated `repo-intel/src/parser.rs` `LazyLock` gating |
+| tree-sitter | AST parsing for **111 languages** via arborium bundle | ✅ Integrated `repo-intel/src/parser.rs` |
 | ripgrep | Fast text search (`grep-searcher`+`ignore`) | ✅ Integrated `repo-intel/src/lib.rs` |
 | tantivy | BM25 in-process MmapDirectory + `tantivy_index.rs` wiring | ✅ Integrated (repo-intel `search_fulltext` + storage `005`) |
 | ast-grep | Structural search `search_structural()` `sg-core` gated | ✅ Integrated `sg-core` first-class (`search_structural_fallback` only on Err) |

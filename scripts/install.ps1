@@ -2,13 +2,12 @@
 <#
 .SYNOPSIS
   Coderun first-class installer (Windows PowerShell 5.1)
-  V1 scope: local AI runtime only (DBOS/workflows in future/workflow, opt-in CODERUN_WORKFLOW_ENABLED=true)
-  Installs ALL stack tools as first-class (no optional except LSP, no Temporal) + uses prebuilt coderun (no compile/test).
+  Installs ALL stack tools as first-class + uses prebuilt coderun (no compile/test).
   Idempotent - re-run to update.
 
 .DESCRIPTION
-  Tools: Rust 1.75, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
-         ast-grep, engram (local .coderun/engram/*.zip), codebase-memory-mcp, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo, DBOS sidecar (future/workflow only)
+  Tools: Rust, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
+         ast-grep, engram, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo
   Prebuilt: target/release/coderun.exe + coderun-daemon.exe are used directly (no cargo build/test).
 
 .PARAMETER SkipBuild
@@ -35,7 +34,7 @@ function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
-Info "Coderun installer (DBOS/workflow future-only)"
+Info "Coderun installer"
 
 # 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~\.coderun\bin)
 # and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
@@ -146,43 +145,69 @@ else {
     }
   }
   if (Test-Path "$Root\..\engram") { Ok "legacy engram clone at ..\engram (unused, local binary preferred - can be removed)" }
+  # Show engram detail if installed
+  if ($engramInstalled -and (Test-Path $engramBinPath)) {
+    try { $engramVer = & $engramBinPath --version 2>&1 | Select-Object -First 1; Ok "engram detail: $engramVer at $engramBinPath" } catch {}
+  }
 
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
 
-  # codebase-memory-mcp - install via bundled installer (CLI mode only, no MCP server)
+  # codebase-memory-mcp - extract from bundled zip or download from GitHub releases
   $cbmBinPath = "$env:USERPROFILE\bin\codebase-memory-mcp.exe"
   $cbmBinNoExt = "$env:USERPROFILE\bin\codebase-memory-mcp"
   $cbmInstalled = $false
   if (Test-Cmd codebase-memory-mcp) { Ok "codebase-memory-mcp $(codebase-memory-mcp --version 2>&1 | Select-Object -First 1)"; $cbmInstalled = $true }
   elseif (Test-Path $cbmBinPath) { Ok "codebase-memory-mcp binary at $cbmBinPath"; $cbmInstalled = $true }
   if (-not $cbmInstalled) {
-    # Use bundled installer with --skip-config (installs binary without agent configuration)
-    $cbmInstaller = Join-Path $Root ".coderun\codebase-memory\install.ps1"
-    $cbmInstallerBin = Join-Path $Root ".coderun\codebase-memory\codebase-memory-mcp.exe"
-    if (Test-Path $cbmInstaller) {
+    # Try bundled zip first
+    $cbmZip = Get-ChildItem -LiteralPath "$Root\.coderun\codebase-memory" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $cbmExe = Get-ChildItem -LiteralPath "$Root\.coderun\codebase-memory" -Filter "codebase-memory-mcp.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cbmExe -and (Test-Path $cbmExe.FullName)) {
       try {
         New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
-        $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & powershell -ExecutionPolicy Bypass -File $cbmInstaller "--dir=$(Split-Path $cbmBinPath -Parent)" "--skip-config" 2>&1 | Out-Null
-        $ErrorActionPreference = $prevEA
-        if (Test-Path $cbmBinPath) {
-          # Also copy without .exe extension for PATH compatibility
-          Copy-Item -LiteralPath $cbmBinPath -Destination $cbmBinNoExt -Force -ErrorAction SilentlyContinue
-          Ok "codebase-memory-mcp installed (CLI mode, no agent config)"
-          $cbmInstalled = $true
-        }
-      } catch { Warn "codebase-memory-mcp installer failed: $_" }
-    } elseif (Test-Path $cbmInstallerBin) {
-      # Fallback: copy prebuilt binary directly
-      try {
-        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
-        Copy-Item -LiteralPath $cbmInstallerBin -Destination $cbmBinPath -Force
-        Copy-Item -LiteralPath $cbmInstallerBin -Destination $cbmBinNoExt -Force
+        Copy-Item -LiteralPath $cbmExe.FullName -Destination $cbmBinPath -Force
+        Copy-Item -LiteralPath $cbmExe.FullName -Destination $cbmBinNoExt -Force
         Ok "codebase-memory-mcp installed (from .coderun\codebase-memory binary)"
         $cbmInstalled = $true
       } catch { Warn "codebase-memory-mcp copy failed: $_" }
+    } elseif ($cbmZip) {
+      try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
+        $tmpExtract = Join-Path $env:TEMP "cbm_extract"
+        if (Test-Path $tmpExtract) { Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue }
+        Expand-Archive -LiteralPath $cbmZip.FullName -DestinationPath $tmpExtract -Force
+        $srcExe = Get-ChildItem -LiteralPath $tmpExtract -Recurse -Filter "codebase-memory-mcp.exe" | Select-Object -First 1
+        if ($srcExe) {
+          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinPath -Force
+          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinNoExt -Force
+          Ok "codebase-memory-mcp installed (from $($cbmZip.Name))"
+          $cbmInstalled = $true
+        } else { Warn "codebase-memory-mcp zip did not contain codebase-memory-mcp.exe" }
+        Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+      } catch { Warn "codebase-memory-mcp extraction failed: $_" }
     }
-    if (-not $cbmInstalled) { Warn "codebase-memory-mcp not found - npx fallback" }
+    # Fallback: download from GitHub releases
+    if (-not $cbmInstalled) {
+      try {
+        Info "  Downloading codebase-memory-mcp from GitHub..."
+        New-Item -ItemType Directory -Force -Path (Split-Path $cbmBinPath -Parent) | Out-Null
+        $cbmUrl = "https://github.com/nicholasgasior/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-windows-amd64.zip"
+        $cbmZipPath = Join-Path $env:TEMP "codebase-memory-mcp.zip"
+        Invoke-WebRequest -Uri $cbmUrl -OutFile $cbmZipPath -UseBasicParsing
+        $tmpExtract = Join-Path $env:TEMP "cbm_download_extract"
+        if (Test-Path $tmpExtract) { Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue }
+        Expand-Archive -LiteralPath $cbmZipPath -DestinationPath $tmpExtract -Force
+        $srcExe = Get-ChildItem -LiteralPath $tmpExtract -Recurse -Filter "codebase-memory-mcp.exe" | Select-Object -First 1
+        if ($srcExe) {
+          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinPath -Force
+          Copy-Item -LiteralPath $srcExe.FullName -Destination $cbmBinNoExt -Force
+          Ok "codebase-memory-mcp downloaded and installed"
+          $cbmInstalled = $true
+        } else { Warn "codebase-memory-mcp download zip did not contain binary" }
+        Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+      } catch { Warn "codebase-memory-mcp download failed: $_" }
+    }
+    if (-not $cbmInstalled) { Warn "codebase-memory-mcp could not be installed" }
   }
 
   # LiteLLM proxy
@@ -308,20 +333,7 @@ else {
   }
   $ErrorActionPreference = $prevEA2
 
-  # v1: DBOS sidecar NOT built -- future/workflow only, gated behind CODERUN_WORKFLOW_ENABLED=true (TASK-001)
-  if ($env:CODERUN_WORKFLOW_ENABLED -eq "true" -and (Test-Path "$Root\future\workflow\dbos\package.json")) {
-    Push-Location "$Root\future\workflow\dbos"
-    try {
-      npm install 2>&1 | Out-Null
-      npx tsc 2>&1 | Out-Null
-      npx tsc --noEmit 2>&1 | Out-Null
-      if (Test-Path "dist/main.js") { Ok "future/workflow DBOS deps + built dist/main.js" } else { Warn "future/workflow DBOS build failed - dist/main.js missing" }
-    } catch { Warn "future/workflow DBOS npm install/build failed - $_" }
-    Pop-Location
-  }
-  # legacy workflow/dbos never built in v1 (TASK-001 purge)
-  # if (Test-Path "$Root\workflow\dbos\package.json") { Warn "legacy workflow/dbos/package.json found -- v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)" }
-}
+
 
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
 if ($SkipBuild) { Info "Skipping build check (--SkipBuild)" }
@@ -389,80 +401,41 @@ try { & $installedCli doctor } catch {}
 $ErrorActionPreference = $prevEA2
 
 # 3. opencode plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
-Info "Configuring opencode plugin (global ~\.config\opencode)..."
+Info "Configuring opencode plugin..."
 $opencodeDir = Join-Path $Root ".opencode"   # legacy project dir - cleaned below
 $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
 $ocGlobalCfg = Join-Path $ocGlobalDir "opencode.jsonc"
 New-Item -ItemType Directory -Force -Path $ocGlobalDir | Out-Null
-# Copy engram binary into global opencode dir (ABSOLUTE path reference - must resolve from any project)
-$opencodeEngramDir = Join-Path $ocGlobalDir "engram"
-$opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
-New-Item -ItemType Directory -Force -Path $opencodeEngramDir | Out-Null
-# Resolve source engram binary (prefer installed user bin, else repo zip)
-$engramSrc = $null
-if (Test-Path $engramBinPath) { $engramSrc = $engramBinPath }
-elseif (Get-Command engram -ErrorAction SilentlyContinue) { $engramSrc = (Get-Command engram -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source) }
-if ($engramSrc -and (Test-Path $engramSrc)) {
-  try {
-    $doCopy = $true
-    if ((Test-Path $opencodeEngramBin) -and (Test-Path $engramSrc)) {
-      try { if ((Get-Item $engramSrc).Length -eq (Get-Item $opencodeEngramBin).Length) { $doCopy = $false; Ok "engram already at ~\.config\opencode\engram\engram(.exe)" } } catch {}
-    }
-    if ($doCopy) {
-      Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBin -Force -ErrorAction Stop
-      $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
-      Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBinNoExt -Force -ErrorAction Stop
-      Ok "engram copied to $opencodeEngramBin"
-    }
-  } catch {
-    # If file in use but already exists, treat as OK (portable copy already there)
-    if (Test-Path $opencodeEngramBin) { Ok "engram at $opencodeEngramBin (in use)" }
-    else { Warn "failed to copy engram to global opencode dir: $_" }
-  }
-} else {
-  # Fallback: copy directly from .coderun/engram zip if user bin not yet available
-  $repoZip = Get-ChildItem -LiteralPath "$Root\.coderun\engram" -Filter "*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($repoZip) {
+# Skip engram copy if already in ~/bin (the plugin resolves it from PATH)
+if (-not (Test-Path $engramBinPath)) {
+  # Only copy engram to opencode dir if not installed in ~/bin
+  $opencodeEngramDir = Join-Path $ocGlobalDir "engram"
+  $opencodeEngramBin = Join-Path $opencodeEngramDir "engram.exe"
+  $engramSrc = $null
+  if (Get-Command engram -ErrorAction SilentlyContinue) { $engramSrc = (Get-Command engram -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source) }
+  if ($engramSrc -and (Test-Path $engramSrc)) {
     try {
-      $tmp = Join-Path $env:TEMP "engram_opencode_copy"
-      if (Test-Path $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
-      Expand-Archive -LiteralPath $repoZip.FullName -DestinationPath $tmp -Force
-      $src = Get-ChildItem -LiteralPath $tmp -Recurse -Filter "engram.exe" | Select-Object -First 1
-      if ($src) {
-        try {
-          Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBin -Force -ErrorAction Stop
-          $opencodeEngramBinNoExt = Join-Path $opencodeEngramDir "engram"
-          Copy-Item -LiteralPath $src.FullName -Destination $opencodeEngramBinNoExt -Force -ErrorAction Stop
-          Ok "engram copied to $opencodeEngramBin (from zip)"
-        } catch {
-          if (Test-Path $opencodeEngramBin) { Ok "engram at $opencodeEngramBin (in use)" }
-          else { Warn "failed to copy engram to global opencode dir from zip: $_" }
-        }
-      }
-    } catch { Warn "failed to copy engram to global opencode dir from zip: $_" }
+      New-Item -ItemType Directory -Force -Path $opencodeEngramDir | Out-Null
+      Copy-Item -LiteralPath $engramSrc -Destination $opencodeEngramBin -Force -ErrorAction Stop
+      Ok "engram copied to $opencodeEngramDir"
+    } catch {}
   }
 }
-# Global config: plugin only (MCPs are NOT exposed to the agent — engram/codebase used directly by daemon)
+# Global config: plugin only
 $opencodeJsonc = @"
 {
     "`$schema": "https://opencode.ai/config.json",
     "plugin": ["opencode-coderun"]
 }
 "@
-try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode plugin GLOBAL at $ocGlobalCfg (plugin: opencode-coderun, MCPs used internally by daemon)" } catch { Warn "failed to write $ocGlobalCfg : $_" }
-
-# Remove legacy global path plugin (now npm) and local path plugin
+try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode plugin at $ocGlobalCfg" } catch { Warn "failed to write $ocGlobalCfg : $_" }
+# Remove legacy paths
 $globalPlugin = "$env:USERPROFILE\.config\opencode\plugins\coderun.ts"
-if (Test-Path $globalPlugin) { try { Remove-Item -LiteralPath $globalPlugin -Force; Info "Removed legacy global path plugin coderun.ts" } catch {} }
+if (Test-Path $globalPlugin) { try { Remove-Item -LiteralPath $globalPlugin -Force } catch {} }
 $localPlugin = Join-Path $opencodeDir "plugins\coderun.ts"
-if (Test-Path $localPlugin) { try { Remove-Item -LiteralPath $localPlugin -Force; Info "Removed legacy local path plugin .opencode/plugins/coderun.ts" } catch {} }
-
-# Migrate: remove per-project opencode config/deps (plugin is global now)
-foreach ($lc in @((Join-Path $opencodeDir "opencode.jsonc"), (Join-Path $opencodeDir "opencode.json"))) {
-  if (Test-Path $lc) { try { Remove-Item -LiteralPath $lc -Force; Info "Removed legacy project config $(Split-Path $lc -Leaf) (MCPs/plugin are global now)" } catch {} }
-}
-foreach ($lp in @((Join-Path $opencodeDir "package.json"), (Join-Path $opencodeDir "package-lock.json"))) {
-  if (Test-Path $lp) { try { Remove-Item -LiteralPath $lp -Force; Info "Removed legacy project $(Split-Path $lp -Leaf) (plugin installs globally now)" } catch {} }
+if (Test-Path $localPlugin) { try { Remove-Item -LiteralPath $localPlugin -Force } catch {} }
+foreach ($f in @((Join-Path $opencodeDir "opencode.jsonc"), (Join-Path $opencodeDir "opencode.json"), (Join-Path $opencodeDir "package.json"), (Join-Path $opencodeDir "package-lock.json"))) {
+  if (Test-Path $f) { try { Remove-Item -LiteralPath $f -Force } catch {} }
 }
 
 # Ensure npm plugin is built
@@ -481,39 +454,26 @@ if (Test-Path $pluginDir) {
       Pop-Location
     } else { Warn "npm not found - cannot build opencode-coderun (install Node.js 18+)" }
   } else { Ok "opencode-coderun dist at packages/opencode-coderun/dist/index.js" }
-  # Install npm plugin GLOBALLY (~/.config/opencode/node_modules) via file: reference to this repo
   if (Test-Cmd npm) {
-    Info "Installing opencode-coderun globally (~\.config\opencode)..."
     $pkgJson = Join-Path $ocGlobalDir "package.json"
     $pluginFileRef = "file:" + ((Join-Path $Root "packages\opencode-coderun") -replace '\\','/')
     if (-not (Test-Path $pkgJson)) {
-      $initPkg = @"
-{
-  "dependencies": {
-    "@opencode-ai/plugin": "1.18.22",
-    "opencode-coderun": "$pluginFileRef"
-  }
-}
-"@
-      try { Set-Content -LiteralPath $pkgJson -Value $initPkg -Encoding UTF8 } catch {}
+      try { Set-Content -LiteralPath $pkgJson -Value (@{ dependencies = @{ "@opencode-ai/plugin" = "1.18.22"; "opencode-coderun" = $pluginFileRef } } | ConvertTo-Json -Depth 10) -Encoding UTF8 } catch {}
     } else {
       try {
         $j = Get-Content -LiteralPath $pkgJson -Raw | ConvertFrom-Json
         if (-not $j.dependencies) { $j | Add-Member -NotePropertyName dependencies -NotePropertyValue @{} }
-        # Always refresh the file: ref (repo may have moved)
-        if ($j.dependencies.PSObject.Properties["opencode-coderun"]) { $j.dependencies."opencode-coderun" = $pluginFileRef }
-        else { $j.dependencies | Add-Member -NotePropertyName "opencode-coderun" -NotePropertyValue $pluginFileRef }
-        $needsSave = $false
-        if (-not $j.dependencies.PSObject.Properties["@opencode-ai/plugin"]) { $j.dependencies | Add-Member -NotePropertyName "@opencode-ai/plugin" -NotePropertyValue "1.18.22"; $needsSave = $true } else { $needsSave = $true }
-        if ($needsSave) { $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJson -Encoding UTF8 }
+        $j.dependencies."opencode-coderun" = $pluginFileRef
+        if (-not $j.dependencies.PSObject.Properties["@opencode-ai/plugin"]) { $j.dependencies | Add-Member -NotePropertyName "@opencode-ai/plugin" -NotePropertyValue "1.18.22" }
+        $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJson -Encoding UTF8
       } catch {}
     }
     Push-Location $ocGlobalDir
-    try { & npm install --silent 2>&1 | Out-Null; if (Test-Path "node_modules\opencode-coderun\dist\index.js") { Ok "opencode-coderun installed to ~\.config\opencode\node_modules (global)" } else { Warn "opencode-coderun npm install failed - try: cd ~\.config\opencode; npm install" } } catch { Warn "opencode-coderun npm install failed: $_" }
+    try { & npm install --silent 2>&1 | Out-Null; if (Test-Path "node_modules\opencode-coderun\dist\index.js") { Ok "opencode-coderun plugin installed" } else { Warn "opencode-coderun npm install failed" } } catch { Warn "opencode-coderun npm install failed: $_" }
     Pop-Location
-  } else { Warn "npm not found - skipping global opencode plugin install (install Node.js 18+)" }
+  }
 } else { Warn "packages/opencode-coderun not found - skipping npm plugin install" }
-Info "Restart opencode to load global plugin 'opencode-coderun' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527, 30s fail-open). Plugin loads in EVERY project (global ~\.config\opencode). MCPs (engram, codebase-memory) used internally by daemon as fallback tools."
+Info "Restart opencode to load plugin (daemon http://127.0.0.1:9527)"
 
 # 4. Start daemon - coderun must be in RUNNING state after installation
 # TASK-037: launch the daemon from ~\.coderun\bin (installed copy) so the runtime keeps
@@ -552,6 +512,5 @@ if ($daemonUp) {
   $ErrorActionPreference = $prevEA3
 }
 
-Info "Done (v1) - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
+Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
 Info "Docs: mkdocs serve  |  promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
-Info "Opt-in workflow: `$env:CODERUN_WORKFLOW_ENABLED='true'; bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

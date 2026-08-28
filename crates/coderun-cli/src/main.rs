@@ -190,7 +190,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     println!("═══════════════════════════════════════");
 
     // ── Step 1: Scaffold ─────────────────────────────────────────────
-    println!("[1/7] Scaffold (.coderun/, config, skills, database)");
+    println!("[1/8] Scaffold (.coderun/, config, skills, database)");
     let coderun_dir = PathBuf::from(".coderun");
     std::fs::create_dir_all(&coderun_dir)
         .map_err(|e| format!("Failed to create .coderun directory: {}", e))?;
@@ -213,7 +213,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         .map_err(|e| format!("Failed to initialize database: {}", e))?;
 
     // ── Step 2: Repository discovery ─────────────────────────────────
-    println!("[2/7] Repository discovery (languages, frameworks, commands)");
+    println!("[2/8] Repository discovery (languages, frameworks, commands)");
     let discovery = discover_repository(&project_root);
     println!(
         "      languages: {}",
@@ -254,8 +254,23 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         }
     }
 
-    // ── Step 3: Parser validation ────────────────────────────────────
-    println!("[3/7] Parser validation (verify tree-sitter grammars)");
+    // ── Step 3: Download tree-sitter grammars ──────────────────────
+    println!("[3/8] Downloading tree-sitter grammars");
+    let lang_names: Vec<&str> = discovery.languages.iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| tree_sitter_language_pack::has_language(name))
+        .collect();
+    if lang_names.is_empty() {
+        println!("      (no downloadable grammars found)");
+    } else {
+        match tree_sitter_language_pack::download(&lang_names) {
+            Ok(count) => println!("      ✓ {}/{} grammars downloaded", count, lang_names.len()),
+            Err(e) => println!("      ⚠ Download failed: {}", e),
+        }
+    }
+
+    // ── Step 4: Parser validation ────────────────────────────────────
+    println!("[4/8] Parser validation (verify tree-sitter grammars)");
     let mut parser_status: Vec<(String, bool, String)> = Vec::new();
     for (lang_name, _count) in &discovery.languages {
         if let Some(id) = coderun_repo_intel::registry::LanguageId::from_str(lang_name) {
@@ -281,8 +296,8 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         println!("        {} {:<20} {}", icon, lang, status);
     }
 
-    // ── Step 4: Indexing ─────────────────────────────────────────────
-    println!("[4/7] Indexing (full-text BM25 + symbol extraction + dependency graph)");
+    // ── Step 5: Indexing ─────────────────────────────────────────────
+    println!("[5/8] Indexing (full-text BM25 + symbol extraction + dependency graph)");
     let event_bus = coderun_events::EventBus::new();
     let mut repo_intel = coderun_repo_intel::RepositoryIntelligence::new(
         project_root.clone(),
@@ -301,7 +316,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
 
     // ── Step 5: Knowledge Hub + Skills ───────────────────────────────
-    println!("[5/7] Knowledge Hub initialization + skill loading");
+    println!("[6/8] Knowledge Hub initialization + skill loading");
     let (knowledge_seeded, _readme) = ingest_seed_documents(&project_root, &db);
     let mut knowledge_hub = coderun_knowledge::KnowledgeHub::new(
         coderun_storage::Database::open(&db_path)
@@ -323,7 +338,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     println!("      ✓ knowledge: {} entries seeded, {} skills loaded", knowledge_seeded, skills_loaded);
 
     // ── Step 6: Validation (smoke test all components) ───────────────
-    println!("[6/7] Validation queries (smoke test)");
+    println!("[7/8] Validation queries (smoke test)");
     let repo_id = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
 
     // Tantivy (via RepositoryIntelligence::validate_index)
@@ -361,7 +376,7 @@ fn cmd_init(wizard: bool, no_community_skills: bool) -> Result<(), String> {
     println!("      Skills:    {} loaded", skills_loaded);
 
     // ── Step 7: Status report ────────────────────────────────────────
-    println!("[7/7] Repository profile");
+    println!("[8/8] Repository profile");
     let profile = build_profile_json(
         &project_name,
         &discovery,
@@ -1536,7 +1551,7 @@ fn cmd_doctor() -> Result<(), String> {
     // Check tree-sitter (now shows per-language parser status)
     print!("Tree-sitter:     ");
     {
-        use coderun_repo_intel::registry::{LANGUAGE_REGISTRY, get_ts_language};
+        use coderun_repo_intel::registry::{LANGUAGE_REGISTRY, get_ts_parser};
         let mut ready = 0;
         let mut total = 0;
         for def in LANGUAGE_REGISTRY {
@@ -1544,7 +1559,7 @@ fn cmd_doctor() -> Result<(), String> {
                 continue;
             }
             total += 1;
-            if get_ts_language(def.id).is_some() {
+            if get_ts_parser(def.id).is_some() {
                 ready += 1;
             }
         }

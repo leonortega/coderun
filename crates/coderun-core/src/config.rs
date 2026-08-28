@@ -151,7 +151,7 @@ impl Default for DatabaseConfig {
 
 impl Default for IndexConfig {
     fn default() -> Self {
-        // v0.6.0: default = 4 langs; go/java/c/cpp behind --features extended-languages (V0_6_0_PLAN.md:2.2)
+        // Default 4 langs; 371 languages available via tree-sitter-language-pack (no feature gate needed)
         Self {
             path: "~/.coderun/index/".to_string(),
             languages: vec![
@@ -476,14 +476,6 @@ impl Config {
             .into());
         }
 
-        // Extended languages warning (v1: only rust/ts/js/py default)
-        let extended = ["go", "java", "c", "cpp"];
-        for lang in &self.index.languages {
-            if extended.contains(&lang.as_str()) {
-                tracing::warn!(language = %lang, "language requires --features extended-languages; fallback regex will be used");
-            }
-        }
-
         Ok(())
     }
 
@@ -712,18 +704,12 @@ socket_path = "/test/sock"
         let config = Config::default();
         assert_eq!(config.index.languages.len(), 4);
         assert_eq!(config.index.languages, vec!["rust", "typescript", "javascript", "python"]);
-        // Extended languages trigger warning but not error
-        let mut with_extended = Config::default();
-        with_extended.index.languages.push("go".to_string());
-        with_extended.index.languages.push("java".to_string());
-        assert!(with_extended.validate().is_ok(), "extended languages should warn, not fail");
-    }
-
-    #[test]
-    fn test_v060_languages_default_docs_sync() {
-        // Ensures docs still claim 4 default; config must match docs/01-architecture/RUNTIME.md
-        let cfg = Config::default();
-        assert!(!cfg.index.languages.contains(&"cpp".to_string()));
-        assert!(!cfg.index.languages.contains(&"go".to_string()));
+        // With tree-sitter-language-pack, all languages are available — no feature gate needed
+        let mut with_all_langs = Config::default();
+        with_all_langs.index.languages.push("go".to_string());
+        with_all_langs.index.languages.push("java".to_string());
+        with_all_langs.index.languages.push("kotlin".to_string());
+        with_all_langs.index.languages.push("swift".to_string());
+        assert!(with_all_langs.validate().is_ok(), "all languages should be valid with tree-sitter-language-pack");
     }
 }

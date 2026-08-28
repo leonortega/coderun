@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Coderun first-class installer (Unix: Linux/macOS, bash)
-# V1 scope: local AI runtime only (DBOS/workflows in future/workflow, opt-in CODERUN_WORKFLOW_ENABLED=true)
-# Tools are FIRST-CLASS (no optional except LSP, no Temporal) + uses prebuilt coderun (no compile/test).
+# Tools are FIRST-CLASS + uses prebuilt coderun (no compile/test).
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external]
-# Note: --skip-build is deprecated (build always skipped, prebuilt at target/release/coderun is used)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKIP_BUILD=false; SKIP_EXTERNAL=false
 for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; esac; done
 info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
-info "Coderun installer (DBOS/workflow future-only)"
+info "Coderun installer"
 
 # 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~/.coderun/bin)
 # and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
@@ -106,10 +104,7 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
    fi
    if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else pip3 install --user mkdocs mkdocs-material pymdown-extensions >/dev/null 2>&1; if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else warn "mkdocs install failed - try: pip3 install --user mkdocs mkdocs-material pymdown-extensions"; fi; fi
    rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "eslint/promptfoo check"
-     # v1: DBOS sidecar NOT built — future/workflow only, gated behind CODERUN_WORKFLOW_ENABLED=true (TASK-001)
-     if [ "${CODERUN_WORKFLOW_ENABLED:-false}" = "true" ] && [ -f "$ROOT/future/workflow/dbos/package.json" ]; then (cd "$ROOT/future/workflow/dbos" && npm install >/dev/null 2>&1 && npx tsc >/dev/null 2>&1 && npx tsc --noEmit >/dev/null 2>&1 && [ -f dist/main.js ] && ok "future/workflow DBOS built" || warn "future DBOS build failed"); fi
-     # legacy workflow/dbos never built in v1 (TASK-001 purge)
-      if [ -f "$ROOT/workflow/dbos/package.json" ]; then warn "legacy workflow/dbos/package.json found — v1 excludes workflow/dbos (use future/workflow/dbos with CODERUN_WORKFLOW_ENABLED=true)"; fi
+
 fi
 
 # 1. Use prebuilt coderun (no compile/test - use repository binary)
@@ -257,6 +252,5 @@ else
   if [ "$DAEMON_UP" = yes ]; then ok "coderun daemon RUNNING (http://127.0.0.1:9527, from $INSTALLED_DAEMON)"; else warn "daemon not responding on :9527 within 20s - start manually: $INSTALLED_DAEMON"; fi
 fi
 
-info "Done (v1) - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
+info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
 info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
-info "Opt-in workflow: CODERUN_WORKFLOW_ENABLED=true bash future/workflow/dbos/build.sh (future only) | cargo build --features workflow"

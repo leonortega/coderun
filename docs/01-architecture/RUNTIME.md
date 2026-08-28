@@ -172,7 +172,7 @@ max_connections = 5                   # Connection pool size
 
 [index]
 path = "~/.coderun/index/"           # Tantivy index directory
-languages = ["rust", "typescript", "javascript", "python"]  # + ["go","java","c","cpp"] behind --features extended-languages (V0_6_0_PLAN.md:2.2)
+languages = ["rust", "typescript", "javascript", "python"]  # 111 languages supported via arborium; add any from arborium's language list
 
 [knowledge]
 memory_enabled = true                 # Enable engram memory
