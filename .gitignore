@@ -93,6 +93,9 @@ yarn.lock
 *.d
 *.dSYM/
 
+# === Experiments (contain their own target/ build artifacts) ===
+experiments/
+
 # === Misc ===
 *.log
 *.tmp

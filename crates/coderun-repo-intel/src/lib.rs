@@ -2,6 +2,7 @@ pub mod parser;
 pub mod graph;
 pub mod lsp;
 pub mod registry;
+pub mod structural;
 pub mod watcher;
 
 use std::collections::HashMap;
@@ -451,145 +452,9 @@ impl RepositoryIntelligence {
         Ok(results)
     }
 
-    /// Structural search via ast-grep CLI — primary method, falls back to tree-sitter+regex.
-    /// Pattern examples: `function $NAME($$$) { $$$ }`, `class $C { $$$ }`, `fn $FUNC($$$) { $$$ }`
-    pub fn search_structural(
-        &self,
-        pattern: &str,
-        language_filter: Option<&str>,
-        max_results: usize,
-    ) -> Result<SearchResults, String> {
-        // Try ast-grep CLI first
-        if let Ok(results) = self.search_structural_ast_grep(pattern, language_filter, max_results) {
-            if !results.results.is_empty() {
-                return Ok(results);
-            }
-        }
-        // Fallback to tree-sitter+regex
-        self.search_structural_fallback(pattern, language_filter, max_results)
-    }
-
-    fn search_structural_ast_grep(
-        &self,
-        pattern: &str,
-        language_filter: Option<&str>,
-        max_results: usize,
-    ) -> Result<SearchResults, String> {
-        use std::process::Command;
-
-        let mut cmd = Command::new("ast-grep");
-        cmd.arg("-p").arg(pattern);
-        cmd.arg("--json");
-        if let Some(lang) = language_filter {
-            cmd.arg("-l").arg(lang);
-        }
-        cmd.arg("--max-results").arg(max_results.to_string());
-        cmd.current_dir(&self.repo_path);
-
-        let output = cmd.output().map_err(|e| format!("ast-grep execution failed: {}", e))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("ast-grep failed: {}", stderr));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut results = Vec::new();
-
-        // Parse ast-grep JSON output: {"file": "...", "range": {"start": {"line": N}}, "text": "..."}
-        for line in stdout.lines() {
-            if line.trim().is_empty() { continue; }
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                let file = val["file"].as_str().unwrap_or("").to_string();
-                let line_num = val["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
-                let text = val["text"].as_str().unwrap_or("").to_string();
-                let path = std::path::Path::new(&file);
-                let path_str = path.strip_prefix(&self.repo_path)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string();
-                results.push(SearchResult {
-                    path: path_str,
-                    line: line_num,
-                    content: text,
-                    score: 1.0,
-                });
-                if results.len() >= max_results { break; }
-            }
-        }
-
-        let total = results.len();
-        Ok(SearchResults { results, total_count: total })
-    }
-
-    fn search_structural_fallback(
-        &self,
-        pattern: &str,
-        language_filter: Option<&str>,
-        max_results: usize,
-    ) -> Result<SearchResults, String> {
-        // Heuristic: map pattern keywords to tree-sitter node kinds
-        let pattern_lower = pattern.to_lowercase();
-        let want_fn = pattern_lower.contains("function") || pattern_lower.contains("fn ") || pattern_lower.contains("def ");
-        let want_class = pattern_lower.contains("class") || pattern_lower.contains("struct") || pattern_lower.contains("interface");
-        let want_loop = pattern_lower.contains("for") || pattern_lower.contains("while") || pattern_lower.contains("loop");
-
-        let mut results = Vec::new();
-        let walker = WalkBuilder::new(&self.repo_path).hidden(false).git_ignore(true).build();
-        for entry in walker {
-            let entry = match entry { Ok(e) => e, Err(_) => continue };
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) { continue; }
-            let path = entry.path();
-            let path_str = path.strip_prefix(&self.repo_path).unwrap_or(path).to_string_lossy().to_string();
-            if let Some(lang) = language_filter {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if detect_language(ext).as_deref() != Some(lang) { continue; }
-            }
-            if is_likely_binary(path) { continue; }
-            let content = match std::fs::read_to_string(path) { Ok(c) => c, Err(_) => continue };
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let lang = detect_language(ext).unwrap_or_else(|| "text".to_string());
-            // Try tree-sitter structural match
-            let mut matched = false;
-            if ["rust", "python", "javascript", "typescript"].contains(&lang.as_str()) {
-                let symbols = parser::extract_symbols_ast(&content, &lang);
-                for sym in &symbols {
-                    let is_fn = sym.kind == "function" || sym.kind == "method";
-                    let is_class = sym.kind == "class" || sym.kind == "struct" || sym.kind == "interface";
-                    if (want_fn && is_fn) || (want_class && is_class) || (want_loop && sym.kind == "loop") || (!want_fn && !want_class && !want_loop) {
-                        results.push(SearchResult { path: path_str.clone(), line: sym.line_start as usize, content: format!("{} {} @ {}:{}", sym.kind, sym.name, path_str, sym.line_start), score: 0.9 });
-                        matched = true;
-                        if results.len() >= max_results { break; }
-                    }
-                }
-            }
-            // Fallback: regex contains of pattern keywords (strip ast-grep metavariables)
-            if !matched {
-                let keywords: Vec<String> = pattern.split(|c: char| !c.is_alphanumeric()).filter(|s| s.len() > 2 && !["function","class","struct","interface","fn"].contains(s)).map(|s| s.to_lowercase()).collect();
-                let lower_content = content.to_lowercase();
-                let mut score = 0.0;
-                for kw in &keywords { if lower_content.contains(kw) { score += 1.0; } }
-                if score > 0.0 && keywords.len() > 0 {
-                    let norm = score / keywords.len() as f64;
-                    if norm > 0.3 {
-                        // find first line containing a keyword
-                        for (i, line) in content.lines().enumerate() {
-                            let ll = line.to_lowercase();
-                            if keywords.iter().any(|k| ll.contains(k)) {
-                                results.push(SearchResult { path: path_str.clone(), line: i+1, content: line.trim().to_string(), score: norm });
-                                break;
-                            }
-                        }
-                    }
-                } else if keywords.is_empty() && (want_fn || want_class) {
-                    // pattern with only metavariables — already handled via symbols; no fallback
-                }
-            }
-            if results.len() >= max_results { break; }
-        }
-        results.truncate(max_results);
-        let total = results.len();
-        Ok(SearchResults { results, total_count: total })
-    }
+    // NOTE: search_structural() CLI shell-out removed in P2.
+    // Structural search is now handled entirely by AstGrepBackend (in-process ast-grep-core).
+    // See: crates/coderun-repo-intel/src/structural/ + crates/coderun-context/src/retrieval/structural.rs
 
     /// Full-text BM25 search via tantivy (spec §3 — tantivy/BM25, in-process, memory-mapped)
     /// `repository_id: Some(id)` scopes hits to one repository (TASK-030/F-1); `None` searches all.
@@ -1389,19 +1254,8 @@ export async function fetchData() {
         assert_eq!(results.results[0].path, "src/main.rs");
     }
 
-    #[test]
-    fn test_search_structural_finds_pattern() {
-        // ast-grep structural search: pattern `fn $FUNC` should match rust functions via tree-sitter
-        let dir = std::env::temp_dir().join(format!("coderun_struct_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("sample.rs"), "pub fn hello() {}\nfn world() {}\nstruct Foo;").unwrap();
-        let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
-        let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
-        let res = ri.search_structural("fn $FUNC", None, 10).unwrap();
-        assert!(!res.results.is_empty(), "structural search should find fn patterns");
-        assert!(res.results.iter().any(|r| r.content.contains("hello") || r.content.contains("world") || r.content.contains("function")));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // NOTE: test_search_structural_finds_pattern removed in P2.
+    // Structural search is now tested via AstGrepBackend in structural/ast_grep_adapter.rs.
 
     #[test]
     fn test_search_fulltext_via_tantivy_fallback() {
@@ -1421,18 +1275,8 @@ export async function fetchData() {
 
     // ── v0.5.0 first-class tool tests ──────────────────────────────────
 
-    #[test]
-    fn test_search_structural_delegates_to_fallback_when_sg_core_not_wired() {
-        // With sg-core not yet wired, search_structural() delegates to search_structural_fallback() (WARN branch)
-        let dir = std::env::temp_dir().join(format!("coderun_struct_fallback_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("sample.py"), "def hello(): pass\nclass Foo: pass\n").unwrap();
-        let db = coderun_storage::Database::open(&PathBuf::from(":memory:")).unwrap();
-        let ri = RepositoryIntelligence::new(dir.clone(), db, EventBus::new());
-        let res = ri.search_structural("class $C", None, 10).unwrap();
-        assert!(!res.results.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // NOTE: test_search_structural_delegates_to_fallback_when_sg_core_not_wired removed in P2.
+    // Structural search is now handled entirely by AstGrepBackend.
 
     #[test]
     fn test_mkdocs_ingestion_on_index() {

@@ -71,6 +71,10 @@ clap = { version = "4", features = ["derive"] }
 notify = "6"
 git2 = "0.21"
 
+# Structural search — ast-grep pattern matching (Level 3 retrieval)
+ast-grep-core = "0.45"
+ast-grep-language = "0.45"
+
 # Internal crates
 coderun-core = { path = "crates/coderun-core" }
 coderun-events = { path = "crates/coderun-events" }

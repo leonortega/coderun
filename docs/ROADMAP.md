@@ -61,7 +61,7 @@
 
 **Released:** August 24, 2026 | **Tests:** 166
 
-- ast-grep (`sg-core`) first-class, heuristic deleted as primary
+- Structural search: `AstGrepBackend` (ast-grep-core) + `StructuralRetriever` + `CombinedRetriever` intent routing + `QueryPlanner`
 - *engram deterministic reads — removed (see ENGRAM_CBM_REMOVAL.md, SQLite local)*
 - *FlashRank via `ort` int8, TF-IDF fallback only on model load fail — removed in v0.7.6 (see FLASHRANK_REMOVAL.md, offline eval only)*
 - *codebase-memory-mcp probe — removed (see ENGRAM_CBM_REMOVAL.md, local AST+regex)*
@@ -150,7 +150,7 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 |------|------|--------|
 | tree-sitter | AST parsing | ✅ First-class |
 | ripgrep | Text search | ✅ First-class |
-| ast-grep (`sg-core`) | Structural search | ✅ First-class |
+| tree-sitter Query API | Structural search (in-process `StructuralRetriever`) | ✅ First-class |
 | tantivy | BM25 full-text index | ✅ First-class |
 | tiktoken-rs | Local token counting | ✅ First-class |
 | RTK | Tool output compression | ✅ First-class (binary) |

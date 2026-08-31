@@ -71,7 +71,7 @@ graph TB
 |--------|----------------------|---------------|
 | Adapter Layer | Bridge agent and daemon | intercept_before_generation, intercept_before_tool |
 | Context Engine | Build token-budgeted Context Packs | BuildContext(task) |
-| Repository Intelligence | Incremental AST parsing and search | index_repository, search_code, search_structural |
+| Repository Intelligence | Incremental AST parsing and search | index_repository, search_code, search_symbols |
 | Knowledge Hub | Store and retrieve all knowledge | store, retrieve, match_skills |
 | Skill Engine | Deterministic tag-based skill matching | activate_skills, detect_conflicts |
 | Model Router | Heuristic model tier selection | select_model |
@@ -313,7 +313,7 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 | Language | Rust (>= 1.75) | Context Engine, daemon, all modules (`coderun-workflow` new) |
 | Agent IPC | UDS + MessagePack primary (`rmp-serde`+`tokio::net::UnixListener`) + HTTP/JSON fallback (`axum`) on `127.0.0.1:9527` | Daemon ↔ Agent; `POST /hook`, `GET /metrics`, `POST /workflow/*` |
 | AST Parsing | tree-sitter **111 languages** via arborium bundle (no feature flags) | `repo-intel/src/parser.rs` |
-| Structural Search | `sg-core` gated `search_structural()` first-class, `search_structural_fallback()` only on `Err` | `repo-intel/src/lib.rs:352` |
+| Structural Search | In-process `AstGrepBackend` (ast-grep-core + tree-sitter-language-pack) via `StructuralRetriever` | `retrieval/structural.rs` + `repo-intel/src/structural/` |
 | Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |
 | Full-text Index | tantivy `MmapDirectory` (in-process) | `storage/src/tantivy_index.rs` + `search_fulltext()` wiring |
 | Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (local AST+regex) | `repo-intel/src/graph.rs` |

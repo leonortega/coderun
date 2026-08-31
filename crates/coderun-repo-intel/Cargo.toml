@@ -30,6 +30,12 @@ ignore = "0.4"
 # Tree-sitter for AST parsing — 371 languages via tree-sitter-language-pack
 tree-sitter-language-pack = "1"
 
+# Structural search — ast-grep pattern matching (Level 3 retrieval)
+# Only ast-grep-core is needed; ast-grep-language provides LanguageExt trait.
+# Grammar source: tree-sitter-language-pack (single source, no duplication).
+ast-grep-core = "0.45"
+ast-grep-language = "0.45"
+
 # First-class Git trigger (v0.5.0): notify + git2 primary, polling fallback
 notify = { version = "6", optional = true }
 git2 = { version = "0.19", optional = true }

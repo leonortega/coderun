@@ -5,7 +5,7 @@ An AI Runtime that enhances coding agents with contextual intelligence. Coderun 
 ## Features
 
 - **Context Engine** — Assembles contextual information from your codebase for better AI responses (`BuildContext` — `skills → docs → code` + `FROZEN PREFIX END` + dedup, requires 30s budget, fail-open)
-- **Repository Intelligence** — Incremental indexing: tree-sitter AST (**111 languages** via arborium) + ripgrep + tantivy BM25 + `sg-core` ast-grep structural + dependency graph (`graph.rs`)
+- **Repository Intelligence** — Incremental indexing: tree-sitter AST (**111 languages** via arborium) + ripgrep + tantivy BM25 + structural search (tree-sitter Query API, `StructuralRetriever`) + dependency graph (`graph.rs`)
 - **Repository Context** — Minimal v1: Tree-sitter + Tantivy BM25 (engram/codebase-memory-mcp/FlashRank removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md`/`FLASHRANK_REMOVAL.md`; Knowledge Hub/MkDocs/LiteLLM deferred — see `docs/00-project/V1_MINIMAL_STACK_PLAN.md:2`)
 - **Skill Engine** — Deterministic tag-based skill matching from community formats (Claude/Cursor/Continue/agentskills.io) — canonical `Skill {priority,specificity}` + `max_skills_per_request=5` + conflict detection (optional, not on hot-path if absent)
 - **Model Router** — Deferred for v1 minimal (heuristic `capable→balanced→fast` kept as optional no-LiteLLM fallback; see `V1_MINIMAL_STACK_PLAN.md:2.6`)
@@ -554,7 +554,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | tree-sitter | AST parsing for **111 languages** via arborium bundle | ✅ Integrated `repo-intel/src/parser.rs` |
 | ripgrep | Fast text search (`grep-searcher`+`ignore`) | ✅ Integrated `repo-intel/src/lib.rs` |
 | tantivy | BM25 in-process MmapDirectory + `tantivy_index.rs` wiring | ✅ Integrated (repo-intel `search_fulltext` + storage `005`) |
-| ast-grep | Structural search `search_structural()` `sg-core` gated | ✅ Integrated `sg-core` first-class (`search_structural_fallback` only on Err) |
+| ast-grep | Structural search via in-process `AstGrepBackend` (ast-grep-core + tree-sitter-language-pack) | ✅ Integrated — `CombinedRetriever` routes structural queries via `QueryIntent` |
 | engram | Cross-session memory HTTP `2s` timeout, fail-open local `LIKE` | ❌ Removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (SQLite+tantivy local) |
 | codebase-memory-mcp | Dependency graph probe `npx` / `search_graph --json` 10s timeout | ❌ Removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (local AST+regex) |
 | FlashRank (`ort`) | Removed from v1 runtime per benchmark evaluation — see `docs/01-architecture/FLASHRANK_REMOVAL.md` | ❌ Removed (offline eval only) |

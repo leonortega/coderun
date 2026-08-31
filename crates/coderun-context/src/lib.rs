@@ -8,7 +8,10 @@ use coderun_knowledge::KnowledgeHub;
 use coderun_repo_intel::RepositoryIntelligence;
 use tracing::{debug, info, warn};
 
+pub mod retrieval;
+
 // â”€â”€ Stop words for symbol-match boosting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#[allow(dead_code)]
 const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "do", "does", "did", "will", "would", "could",
@@ -31,6 +34,7 @@ fn prof(mark: &str, start: Instant) {
 }
 
 /// Check if a path looks like a valid file (not a junk token like "TODO", "No", "This")
+#[allow(dead_code)]
 fn is_valid_file_path(path: &str) -> bool {
     // Must not be too short (junk tokens are usually 1-5 chars)
     if path.len() < 5 {
@@ -185,242 +189,74 @@ impl ContextEngine {
         context_hints: &Option<ContextHints>,
     ) -> Result<(String, String, Vec<coderun_core::SearchResult>, coderun_core::RetrievalStatus), String> {
         let _p0 = Instant::now();
-        // ── Proactive detection (P0 #3): verify index exists and is populated ──
-        let doc_count = match repo_intel.validate_index() {
-            Ok(s) => s.doc_count,
-            Err(ref e) if e == "index not built" => {
-                return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::IndexNotBuilt));
-            }
-            Err(ref e) if e == "index is empty" => {
-                0 // Fall through to search; ripgrep fallback may still find content
-            }
-            Err(_) => {
-                return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::IndexUnavailable));
-            }
-        };
+        // ── Retrieval Engine boundary: Context no longer knows how relevance is calculated ──
+        // All ranking (field weights, file-class, directory, symbol-match, code-behind, graph)
+        // lives behind `Retriever::retrieve` → `Evidence` (see `retrieval/`).
+        use crate::retrieval::{RetrievalPolicy, RetrievalQuery, Retriever, CombinedRetriever};
 
-        let max_files = config.max_files;
-        prof("code_search.validate_index", _p0);
+        let policy = RetrievalPolicy {
+            candidate_k: if config.candidate_k > 0 { config.candidate_k } else { config.max_files * 3 },
+            max_files: config.max_files,
+            ..Default::default()
+        };
+        let mut q = RetrievalQuery::new(query, repository_id);
+        if let Some(hints) = context_hints.as_ref() {
+            if let Some(lang) = hints.language.as_deref().filter(|s| !s.is_empty()) {
+                q = q.with_language(lang.to_string());
+            }
+        }
+
+        let engine = CombinedRetriever::default();
+        let retrieval = engine.retrieve(&q, repo_intel, &policy);
+        prof("code_search.retrieval", _p0);
+        let status = retrieval.status.clone();
+
+        // ── Context assembly: turn Evidence into the legacy (docs, code, scored) triple ──
+        // This is the ONLY place Context Engine knows about evidence; it does not re-rank.
         let max_lines = config.max_lines_per_file;
-
-        // Large-repo auto-tune: 53k files need candidate_k 200 + max_files 50 to beat rg K=50 (bench-precision.ps1:14)
-        // Defaults 100/20 are for small repos; bump when doc_count>5000 unless explicitly configured via CLI/env/config
-        let mut effective_max_files = max_files;
-        if doc_count > 5000 && effective_max_files == 20 {
-            effective_max_files = 50;
-        }
-        let mut candidate_k = if config.candidate_k > 0 { config.candidate_k } else { effective_max_files * 3 };
-        if doc_count > 5000 && candidate_k == 100 {
-            candidate_k = 200;
-        }
-        let mut bm25_results: Vec<coderun_core::SearchResult> = Vec::new();
-        let mut used_fallback = false;
-        let search_results = match repo_intel.search_fulltext(query, None, candidate_k, Some(repository_id)) {
-            Ok(sr) if sr.total_count > 0 => sr,
-            Ok(_) => {
-                used_fallback = true;
-                match repo_intel.search_text(query, None, candidate_k) {
-                    Ok(sr) if sr.total_count > 0 => sr,
-                    Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
-                    Err(e) => return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
-                }
-            }
-            Err(e) => {
-                used_fallback = true;
-                match repo_intel.search_text(query, None, candidate_k) {
-                    Ok(sr) if sr.total_count > 0 => sr,
-                    Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
-                    Err(_) => return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
-                }
-            }
-        };
-
-        let status = if search_results.total_count > 0 {
-            if used_fallback {
-                coderun_core::RetrievalStatus::FallbackUsed("tantivyâ†’ripgrep".to_string())
-            } else {
-                coderun_core::RetrievalStatus::Found(search_results.total_count)
-            }
-        } else {
-            coderun_core::RetrievalStatus::NoMatch
-        };
-
-        let mut seen_bm25 = std::collections::HashSet::new();
-        for result in &search_results.results {
-            if seen_bm25.insert(result.path.clone()) {
-                if is_valid_file_path(&result.path) {
-                    bm25_results.push(result.clone());
-                }
-            }
-        }
-
-        let mut symbol_results: Vec<coderun_core::SearchResult> = Vec::new();
-        prof("code_search.bm25", _p0);
-        let mut seen_sym = std::collections::HashSet::new();
-        if let Ok(syms) = repo_intel.search_symbols(query, max_files * 2) {
-            for sym in syms {
-                if seen_sym.insert(sym.path.clone()) {
-                    symbol_results.push(sym);
-                }
-            }
-        }
-
-        prof("code_search.symbols", _p0);
-        let query_tokens: Vec<String> = query
-            .split_whitespace()
-            .flat_map(|t| {
-                let w = t.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>();
-                if w.len() < 2 || STOP_WORDS.contains(&w.as_str()) {
-                    return Vec::new();
-                }
-                // Split PascalCase: "CheckoutModel" -> ["checkoutmodel", "checkout", "model"]
-                let mut parts = vec![w.clone()];
-                let mut current = String::new();
-                let mut prev_lower = false;
-                for c in w.chars() {
-                    if c.is_uppercase() && prev_lower && !current.is_empty() {
-                        parts.push(current.to_lowercase());
-                        current.clear();
-                    }
-                    current.push(c);
-                    prev_lower = c.is_lowercase();
-                }
-                if !current.is_empty() && current != w {
-                    parts.push(current.to_lowercase());
-                }
-                parts
-            })
-            .filter(|t| t.len() >= 2 && !STOP_WORDS.contains(&t.as_str()))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        if !query_tokens.is_empty() {
-            for result in &mut bm25_results {
-                // P0 fix: content not fetched for candidates (lazy-load). Boost via symbols + path fields instead.
-                let haystack = format!("{} {}", result.content, result.path).to_lowercase();
-                let symbols_hay = result.content.to_lowercase(); // content is now empty; keep for compat but use path/symbols
-                let _ = symbols_hay;
-                let mut symbol_match_count = 0;
-                for token in &query_tokens {
-                    // Check path tokens and symbols (smaller than full content, but correlated with BM25 score)
-                    if haystack.contains(token.as_str()) {
-                        symbol_match_count += 1;
-                    }
-                }
-                if symbol_match_count > 0 {
-                    let boost = 1.0 + (symbol_match_count as f32 / query_tokens.len() as f32) * 1.5;
-                    result.score *= boost as f64;
-                }
-            }
-        }
-
-        // Merge BM25 + symbol results: keep max score per path
-        let mut all_by_path: std::collections::HashMap<String, coderun_core::SearchResult> = std::collections::HashMap::new();
-        for result in bm25_results.into_iter().chain(symbol_results.into_iter()) {
-            let entry = all_by_path.entry(result.path.clone()).or_insert(result.clone());
-            if result.score > entry.score {
-                *entry = result;
-            }
-        }
-
-        prof("code_search.merge", _p0);
-        let mut merged: Vec<(String, f64)> = all_by_path.iter().map(|(p, r)| (p.clone(), r.score)).collect();
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // ── P1 #7: Code-behind pairing (.cshtml → .cshtml.cs, .razor → .razor.cs) ──
-        let code_behind_pairs: Vec<(String, String)> = merged.iter()
-            .filter_map(|(path, _)| {
-                if path.ends_with(".cshtml") {
-                    Some((path.clone(), format!("{}.cs", path)))
-                } else if path.ends_with(".razor") {
-                    Some((path.clone(), format!("{}.cs", path)))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        
-        for (view_path, code_behind_path) in code_behind_pairs {
-            // If the view file is in results, add its code-behind with a boost
-            if merged.iter().any(|(p, _)| *p == view_path) {
-                if !merged.iter().any(|(p, _)| *p == code_behind_path) {
-                    // Find the score of the view file and add code-behind with slightly lower score
-                    if let Some(view_score) = merged.iter().find(|(p, _)| *p == view_path).map(|(_, s)| *s) {
-                        merged.push((code_behind_path, view_score * 0.8));
-                    }
-                }
-            }
-        }
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // ── P1 #7: Graph-based boosting ── (deferred for large repos — see ENGRAM_CBM_REMOVAL.md)
-        // Building the dependency graph walks the repo (53k files ≈ seconds). For v1, only
-        // boost via graph when explicitly enabled or repo is small (<5k files), matching
-        // the init deferral in crates/coderun-cli/src/main.rs:311.
-        prof("code_search.graph_enter", _p0);
-        let graph_enabled = std::env::var("CODERUN_BUILD_GRAPH").ok().as_deref() == Some("1");
-        let large_repo = doc_count > 5000;
-        if merged.len() >= 2 && (graph_enabled || !large_repo) {
-            let high_scoring_files: HashSet<String> = merged.iter()
-                .take(3)
-                .map(|(p, _)| p.clone())
-                .collect();
-
-            // Build dependency graph for the repo (small repos only or forced)
-            if let Ok(_repo_path) = repo_intel.repo_path().canonicalize() {
-                if let Ok(graph) = repo_intel.build_dependency_graph() {
-                    // For each result, check if it's connected to high-scoring files
-                    for (path, score) in &mut merged {
-                        if high_scoring_files.contains(path) {
-                            continue; // Skip high-scoring files themselves
-                        }
-                        
-                        // Check if this file depends on any high-scoring file
-                        let deps = graph.dependencies_of(path);
-                        let dependents = graph.dependents_of(path);
-                        
-                        let connected_to_high = deps.iter().any(|d| high_scoring_files.contains(d))
-                            || dependents.iter().any(|d| high_scoring_files.contains(d));
-                        
-                        if connected_to_high {
-                            *score *= 1.2; // 20% boost for connected files
-                        }
-                    }
-                }
-            }
-            merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        }
-
-
-
         let mut docs_results = Vec::new();
         let mut code_results = Vec::new();
         let mut scored = Vec::new();
-        let mut seen_files = std::collections::HashSet::new();
 
-        for (path, rrf_score) in merged {
-            if seen_files.len() >= effective_max_files { break; }
-            if seen_files.insert(path.clone()) {
-                if let Some(result) = all_by_path.get(&path) {
-                    let mut final_result = result.clone();
-                    final_result.score = rrf_score * 1000.0;
-                    scored.push(final_result.clone());
+        // Optional explain logging when CODERUN_RETRIEVAL_EXPLAIN=1
+        if std::env::var("CODERUN_RETRIEVAL_EXPLAIN").is_ok() {
+            for ev in &retrieval.evidence {
+                eprintln!("[retrieval] {}", ev.explain());
+            }
+            eprintln!(
+                "[retrieval] diagnostics: candidates={} took_tantivy={}ms ranking={}ms graph={}ms doc_count={}",
+                retrieval.diagnostics.candidate_count,
+                retrieval.diagnostics.tantivy_ms,
+                retrieval.diagnostics.ranking_ms,
+                retrieval.diagnostics.graph_ms,
+                retrieval.diagnostics.doc_count
+            );
+        }
 
-                    let line_start = result.line.saturating_sub(5);
-                    let line_end = result.line + max_lines.min(15);
-                    if let Ok(content) = repo_intel.get_file_content(&result.path, Some((line_start, line_end))) {
-                        let entry = format!("// {}:{}\n{}", result.path, result.line, content);
-                        if is_documentation_path(&result.path) {
-                            docs_results.push(entry);
-                        } else {
-                            code_results.push(entry);
-                        }
-                    }
+        for ev in retrieval.evidence {
+            let path_str = ev.path.to_string_lossy().to_string();
+            // Legacy SearchResult for provenance (score already *1000 in Evidence)
+            scored.push(coderun_core::SearchResult {
+                path: path_str.clone(),
+                line: ev.line,
+                content: path_str.clone(),
+                score: ev.score as f64,
+            });
+
+            // Lazy snippet extraction for Top-K only (preserves prior behavior)
+            let line_start = ev.line.saturating_sub(5);
+            let line_end = ev.line + max_lines.min(15);
+            if let Ok(content) = repo_intel.get_file_content(&path_str, Some((line_start, line_end))) {
+                let entry = format!("// {}:{}\n{}", path_str, ev.line, content);
+                if is_documentation_path(&path_str) {
+                    docs_results.push(entry);
+                } else {
+                    code_results.push(entry);
                 }
             }
         }
 
+        // Hints are NOT retrieval — they are explicit task context (files_mentioned)
         if let Some(hints) = context_hints {
             if let Some(files) = &hints.files_mentioned {
                 for file in files {
