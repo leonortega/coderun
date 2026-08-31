@@ -1582,7 +1582,7 @@ fn cmd_doctor() -> Result<(), String> {
         println!("⚠ No parent dir for {}", sock.display());
     }
     
-    // Check tree-sitter (now shows per-language parser status)
+    // Check tree-sitter — split global vs repo detected (V1: docs don't need parser)
     print!("Tree-sitter:     ");
     {
         use coderun_repo_intel::registry::{LANGUAGE_REGISTRY, get_ts_parser};
@@ -1598,10 +1598,64 @@ fn cmd_doctor() -> Result<(), String> {
             }
         }
         if ready > 0 {
-            println!("✓ OK ({}/{} parsers ready)", ready, total);
+            println!("✓ OK (global {}/{} parsers ready)", ready, total);
         } else {
             println!("⚠ No parsers loaded");
         }
+    }
+    // Repository detected languages (files → languages → grammars, lexical fallback for docs/config)
+    {
+        println!();
+        println!("  Repository detected languages");
+        println!("  ─────────────────────────────");
+        let repo_path = project_root.clone();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut docs_count = 0usize;
+        let mut config_count = 0usize;
+        let mut source_count = 0usize;
+        if let Ok(walker) = std::fs::read_dir(&repo_path) {
+            let _ = walker; // placeholder to avoid unused
+        }
+        // Use repo-intel walker to sample repo files
+        let db_tmp = coderun_storage::Database::open(&std::path::PathBuf::from(":memory:")).ok();
+        if let Some(db) = db_tmp {
+            let ri = coderun_repo_intel::RepositoryIntelligence::new(repo_path.clone(), db, coderun_events::EventBus::new());
+            let langs = ri.detect_repo_languages();
+            for (ext, cnt) in langs.iter().take(12) {
+                println!("    {:<18} {:>6} files", ext, cnt);
+            }
+            // Also show file-class breakdown from current index if available
+            let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".coderun").join("index");
+            if let Ok(idx) = coderun_storage::tantivy_index::TantivyIndex::open(&idx_path.to_string_lossy()) {
+                if let Ok(reader) = idx.reader() {
+                    if let Ok(stats) = idx.stats(&reader) {
+                        println!("  Indexing capability");
+                        println!("  ────────────────────");
+                        println!("    Tantivy docs: {} total", stats.doc_count);
+                    }
+                }
+            }
+            // Count docs/config/source from repo-intel classify
+            let walk = ri.walk_directory_for_doctor(&repo_path);
+            for p in walk.iter().take(5000) {
+                let cls = coderun_repo_intel::registry::classify_file(p);
+                match cls {
+                    coderun_repo_intel::registry::FileClass::Documentation => docs_count += 1,
+                    coderun_repo_intel::registry::FileClass::Config => config_count += 1,
+                    coderun_repo_intel::registry::FileClass::Source | coderun_repo_intel::registry::FileClass::Test => source_count += 1,
+                    _ => {}
+                }
+                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    *counts.entry(ext.to_lowercase()).or_insert(0) += 1;
+                }
+            }
+            if docs_count > 0 || config_count > 0 {
+                println!("    Documentation: {} files (lexical, no parser needed)", docs_count);
+                println!("    Configuration: {} files (lexical, no parser needed)", config_count);
+                println!("    Source: {} files (Tree-sitter where available, lexical fallback otherwise)", source_count);
+            }
+        }
+        println!();
     }
     
     // Check tantivy (new)

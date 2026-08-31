@@ -18,7 +18,7 @@ fn index_cache() -> &'static RwLock<HashMap<String, Arc<TantivyIndex>>> {
 
 // ── Schema Definition ────────────────────────────────────────────────────
 
-/// Schema for code search index
+/// Schema for code search index — V1: title for docs (first Markdown heading) + file_class
 pub struct CodeIndexSchema {
     pub schema: Schema,
     /// Tokenized path (TEXT) — for search matching
@@ -27,6 +27,7 @@ pub struct CodeIndexSchema {
     pub raw_path_field: Field,
     pub filename_field: Field,
     pub content_field: Field,
+    pub title_field: Field,
     pub language_field: Field,
     pub symbols_field: Field,
     /// Individual symbol names (TEXT, tokenized) — for symbol-specific queries
@@ -55,6 +56,7 @@ impl CodeIndexSchema {
         // V1 0.8.1: content not STORED (latency + index size on 53k) — lazy via get_file_content for Top 20
         // Old indexes with STORED content still readable (fallback to empty), but new indexes require re-index (rm -rf index)
         let content_field = schema_builder.add_text_field("content", TEXT);
+        let title_field = schema_builder.add_text_field("title", TEXT | STORED);
         let language_field = schema_builder.add_text_field("language", STRING | STORED | FAST);
         let symbols_field = schema_builder.add_text_field("symbols", TEXT | STORED);
         let symbol_name_field = schema_builder.add_text_field("symbol_name", TEXT | STORED);
@@ -68,6 +70,7 @@ impl CodeIndexSchema {
             raw_path_field,
             filename_field,
             content_field,
+            title_field,
             language_field,
             symbols_field,
             symbol_name_field,
@@ -437,6 +440,21 @@ impl TantivyIndex {
         tokens.join(" ")
     }
 
+    /// Extract first Markdown heading as title for docs (V1: no Tree-sitter for *.md)
+    pub fn extract_markdown_title(content: &str) -> String {
+        for line in content.lines() {
+            let t = line.trim();
+            if let Some(stripped) = t.strip_prefix("# ") {
+                let title = stripped.trim();
+                if !title.is_empty() { return title.to_string(); }
+            } else if let Some(stripped) = t.strip_prefix("## ") {
+                let title = stripped.trim();
+                if !title.is_empty() { return title.to_string(); }
+            }
+        }
+        String::new()
+    }
+
     /// Add a document to the index, stamped with its repository scope (TASK-030)
     pub fn add_document(
         &self,
@@ -448,6 +466,24 @@ impl TantivyIndex {
         symbol_kinds: &[String],
         repository_id: &str,
         file_class: &str,
+    ) -> Result<(), String> {
+        // Backward compat: title auto-extracted for Documentation
+        let title = if file_class == "Documentation" { Self::extract_markdown_title(content) } else { String::new() };
+        self.add_document_with_title(writer, path, content, language, symbols, symbol_kinds, repository_id, file_class, &title)
+    }
+
+    /// Add document with explicit title (V1 docs: first heading)
+    pub fn add_document_with_title(
+        &self,
+        writer: &mut IndexWriter,
+        path: &str,
+        content: &str,
+        language: &str,
+        symbols: &[String],
+        symbol_kinds: &[String],
+        repository_id: &str,
+        file_class: &str,
+        title: &str,
     ) -> Result<(), String> {
         // Preprocess: split PascalCase in content and symbols for better BM25 matching
         let processed_content = preprocess_code_content(content);
@@ -474,6 +510,7 @@ impl TantivyIndex {
             self.schema.raw_path_field => path,
             self.schema.filename_field => filename,
             self.schema.content_field => processed_content.as_str(),
+            self.schema.title_field => title,
             self.schema.language_field => language,
             self.schema.symbols_field => symbols_text.as_str(),
             self.schema.symbol_name_field => symbols.join(" ").as_str(),
@@ -600,6 +637,7 @@ impl TantivyIndex {
             &self.index,
             vec![
                 self.schema.content_field,
+                self.schema.title_field,
                 self.schema.symbols_field,
                 self.schema.symbol_name_field,
                 self.schema.path_field,
@@ -607,8 +645,9 @@ impl TantivyIndex {
             ],
         );
         query_parser.set_field_boost(self.schema.symbol_name_field, 3.0);
-        query_parser.set_field_boost(self.schema.symbols_field, 2.0);
+        query_parser.set_field_boost(self.schema.title_field, 2.5);
         query_parser.set_field_boost(self.schema.path_field, 2.5);
+        query_parser.set_field_boost(self.schema.symbols_field, 2.0);
         query_parser.set_field_boost(self.schema.filename_field, 2.0);
 
         let user_query = query_parser

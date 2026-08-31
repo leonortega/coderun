@@ -273,7 +273,12 @@ impl RepositoryIntelligence {
             };
 
             // Extract symbols once (tree-sitter + fallback) — reused for DB + tantivy (Phase1 dedup)
-            let extracted = extract_symbols(&content, &self.patterns, language.as_deref());
+            // V1: docs/config are lexical only — no Tree-sitter needed (first-class Markdown indexing)
+            let extracted = if matches!(file_class, FileClass::Documentation | FileClass::Config) {
+                Vec::new()
+            } else {
+                extract_symbols(&content, &self.patterns, language.as_deref())
+            };
             let sym_names: Vec<String> = extracted.iter().map(|s| s.name.clone()).collect();
             let sym_kinds: Vec<String> = extracted.iter().map(|s| s.kind.clone()).collect();
 
@@ -917,6 +922,11 @@ impl RepositoryIntelligence {
             }
         }
         counts
+    }
+
+    /// Public helper for `doctor` — list repo files (sample) for file-class breakdown.
+    pub fn walk_directory_for_doctor(&self, dir: &Path) -> Vec<PathBuf> {
+        self.walk_directory(dir).unwrap_or_default()
     }
 }
 
