@@ -63,6 +63,8 @@ pub struct ContextConfig {
     pub max_files: usize,
     pub max_lines_per_file: usize,
     pub cache_order: Vec<String>,
+    /// Candidate pool size before deterministic ranking (20/50/100/200, default 100 → Top 20)
+    pub candidate_k: usize,
 }
 
 impl Default for ContextConfig {
@@ -76,6 +78,7 @@ impl Default for ContextConfig {
                 "docs_context".to_string(),
                 "code_context".to_string(),
             ],
+            candidate_k: 100,
         }
     }
 }
@@ -183,13 +186,23 @@ impl ContextEngine {
         prof("code_search.validate_index", _p0);
         let max_lines = config.max_lines_per_file;
 
+        // Large-repo auto-tune: 53k files need candidate_k 200 + max_files 50 to beat rg K=50 (bench-precision.ps1:14)
+        // Defaults 100/20 are for small repos; bump when doc_count>5000 unless explicitly configured via CLI/env/config
+        let mut effective_max_files = max_files;
+        if doc_count > 5000 && effective_max_files == 20 {
+            effective_max_files = 50;
+        }
+        let mut candidate_k = if config.candidate_k > 0 { config.candidate_k } else { effective_max_files * 3 };
+        if doc_count > 5000 && candidate_k == 100 {
+            candidate_k = 200;
+        }
         let mut bm25_results: Vec<coderun_core::SearchResult> = Vec::new();
         let mut used_fallback = false;
-        let search_results = match repo_intel.search_fulltext(query, None, max_files * 3, Some(repository_id)) {
+        let search_results = match repo_intel.search_fulltext(query, None, candidate_k, Some(repository_id)) {
             Ok(sr) if sr.total_count > 0 => sr,
             Ok(_) => {
                 used_fallback = true;
-                match repo_intel.search_text(query, None, max_files * 3) {
+                match repo_intel.search_text(query, None, candidate_k) {
                     Ok(sr) if sr.total_count > 0 => sr,
                     Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
                     Err(e) => return Ok((String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
@@ -197,7 +210,7 @@ impl ContextEngine {
             }
             Err(e) => {
                 used_fallback = true;
-                match repo_intel.search_text(query, None, max_files * 3) {
+                match repo_intel.search_text(query, None, candidate_k) {
                     Ok(sr) if sr.total_count > 0 => sr,
                     Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
                     Err(_) => return Ok((String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
@@ -369,7 +382,7 @@ impl ContextEngine {
         let mut seen_files = std::collections::HashSet::new();
 
         for (path, rrf_score) in merged {
-            if seen_files.len() >= max_files { break; }
+            if seen_files.len() >= effective_max_files { break; }
             if seen_files.insert(path.clone()) {
                 if let Some(result) = all_by_path.get(&path) {
                     let mut final_result = result.clone();

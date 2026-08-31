@@ -426,6 +426,7 @@ if (-not $doRemoveExternal) {
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
 
   if (Test-Cmd pip) {
+    # V1 minimal: litellm/mkdocs deferred — only remove if present (installed via -WithOptional)
     foreach ($pipPkg in @("litellm","mkdocs","mkdocs-material","pymdown-extensions","markdown")) {
       $shown = $false
       try { pip show $pipPkg 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $shown = $true } } catch {}

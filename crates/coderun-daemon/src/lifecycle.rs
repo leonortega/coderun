@@ -101,6 +101,7 @@ impl DaemonState {
             max_files: config.context.max_files,
             max_lines_per_file: config.context.max_lines_per_file,
             cache_order: config.context.cache_order.clone(),
+            candidate_k: config.context.candidate_k,
         };
         let context_engine = coderun_context::ContextEngine::new(
             repo_intel,

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Coderun first-class installer (Unix: Linux/macOS, bash)
-# Tools are FIRST-CLASS + uses prebuilt coderun (no compile/test).
-# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external]
+# Coderun installer v0.8.0 minimal (Unix: Linux/macOS, bash)
+# Minimal v1: Tree-sitter+Tantivy+SQLite+Git + ast-grep/RTK optional; MkDocs/LiteLLM deferred per V1_MINIMAL_STACK_PLAN.md:2
+# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external] [--with-optional]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SKIP_BUILD=false; SKIP_EXTERNAL=false
-for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; esac; done
+SKIP_BUILD=false; SKIP_EXTERNAL=false; WITH_OPTIONAL=false
+for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; --with-optional) WITH_OPTIONAL=true;; esac; done
 info(){ echo -e "\033[36m[coderun]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
 
 info "Coderun installer"
@@ -45,7 +45,8 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
   # engram removed — see ENGRAM_CBM_REMOVAL.md
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
   # codebase-memory-mcp removed — see ENGRAM_CBM_REMOVAL.md
-  pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm"
+  # LiteLLM deferred per V1_MINIMAL_STACK_PLAN.md:2.6 — only with --with-optional
+  if [ "$WITH_OPTIONAL" = true ]; then pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm (optional)"; else echo "  [SKIP] litellm deferred (use --with-optional)"; fi
    # RTK - extract from .coderun/rtk/*.tar.gz (Linux) -> ~/.coderun/bin/rtk (NO COMPILE). Unified bin.
    RTK_BIN="$HOME/.coderun/bin/rtk"
    if [ -f "$HOME/bin/rtk" ] && [ ! -f "$RTK_BIN" ]; then mkdir -p "$(dirname "$RTK_BIN")"; cp -f "$HOME/bin/rtk" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "migrated legacy ~/bin/rtk -> $RTK_BIN" || true; fi
@@ -69,7 +70,8 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
      if command -v rustup >/dev/null 2>&1; then rustup update stable 2>/dev/null; rustup default stable 2>/dev/null; fi
      cargo install --git https://github.com/rtk-ai/rtk --locked 2>/dev/null && ok "rtk (cargo git)" || cargo install rtk --locked 2>/dev/null && ok "rtk (crates.io)" || warn "rtk cargo install failed (or drop a prebuilt rtk into .coderun/rtk/)"
    fi
-   if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else pip3 install --user mkdocs mkdocs-material pymdown-extensions >/dev/null 2>&1; if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else warn "mkdocs install failed - try: pip3 install --user mkdocs mkdocs-material pymdown-extensions"; fi; fi
+   # MkDocs deferred per V1_MINIMAL_STACK_PLAN.md:2.4 — plain markdown, no site build required
+   if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version) (optional, present)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m, optional)"; else if [ "$WITH_OPTIONAL" = true ]; then pip3 install --user mkdocs mkdocs-material pymdown-extensions >/dev/null 2>&1; if command -v mkdocs >/dev/null 2>&1; then ok "mkdocs $(mkdocs --version)"; elif python3 -m mkdocs --version >/dev/null 2>&1; then ok "mkdocs $(python3 -m mkdocs --version) (python3 -m)"; else warn "mkdocs install failed - try: pip3 install --user mkdocs mkdocs-material pymdown-extensions"; fi; else echo "  [SKIP] mkdocs deferred (use --with-optional)"; fi; fi
    rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "eslint/promptfoo check"
 
 fi
@@ -210,4 +212,4 @@ else
 fi
 
 info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
-info "Docs: mkdocs serve | promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
+info "Docs: docs/*.md plain (mkdocs optional: mkdocs serve) | promptfoo eval --config eval/promptfooconfig.yaml (optional: --with-optional) | coderun doctor"

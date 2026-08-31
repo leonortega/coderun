@@ -52,7 +52,9 @@ impl CodeIndexSchema {
         let path_field = schema_builder.add_text_field("path", TEXT | STORED);
         let raw_path_field = schema_builder.add_text_field("raw_path", STRING | STORED);
         let filename_field = schema_builder.add_text_field("filename", TEXT | STORED);
-        let content_field = schema_builder.add_text_field("content", TEXT | STORED);
+        // V1 0.8.1: content not STORED (latency + index size on 53k) — lazy via get_file_content for Top 20
+        // Old indexes with STORED content still readable (fallback to empty), but new indexes require re-index (rm -rf index)
+        let content_field = schema_builder.add_text_field("content", TEXT);
         let language_field = schema_builder.add_text_field("language", STRING | STORED | FAST);
         let symbols_field = schema_builder.add_text_field("symbols", TEXT | STORED);
         let symbol_name_field = schema_builder.add_text_field("symbol_name", TEXT | STORED);
@@ -139,7 +141,7 @@ const STOP_WORDS: &[&str] = &[
     "and", "but", "or", "if", "while", "that", "this", "it", "its",
     "what", "which", "who", "whom", "where", "implemented", "find",
     "show", "get", "set", "make", "create", "update", "delete", "remove",
-    "add", "list", "the", "in", "is", "it",
+    "add", "list", "type", "the", "in", "is", "it",
 ];
 
 /// Split PascalCase/camelCase identifiers into constituent words.
@@ -352,7 +354,7 @@ fn sanitize_code_query(query: &str) -> String {
     // Extract meaningful keywords, splitting PascalCase identifiers
     let mut all_terms: Vec<String> = Vec::new();
     for word in cleaned.split_whitespace() {
-        let w = word.trim_matches(|c: char| c.is_alphanumeric() || c == '_');
+        let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
         if w.len() < 2 || STOP_WORDS.contains(&w.to_lowercase().as_str()) {
             continue;
         }
@@ -403,12 +405,35 @@ impl TantivyIndex {
                 .map_err(|e| format!("Failed to create index directory: {}", e))?;
         }
 
-        let index = Index::open_or_create(
+        let index = match Index::open_or_create(
             tantivy::directory::MmapDirectory::open(path)
                 .map_err(|e| format!("Failed to open index directory: {}", e))?,
             schema.schema.clone(),
-        )
-        .map_err(|e| format!("Failed to open tantivy index: {}", e))?;
+        ) {
+            Ok(idx) => idx,
+            Err(e) => {
+                // Schema drift (e.g. 0.8.0 content STORED→TEXT) — old index incompatible; recreate
+                let msg = e.to_string();
+                if msg.contains("schema") || msg.contains("Schema") {
+                    tracing::warn!(path = index_path, error = %msg, "Tantivy schema mismatch — recreating index (re-index required)");
+                    // invalidate cache entry if any
+                    if let Ok(mut cache) = index_cache().write() {
+                        cache.remove(index_path);
+                    }
+                    std::fs::remove_dir_all(path).ok();
+                    std::fs::create_dir_all(path)
+                        .map_err(|e2| format!("Failed to recreate index directory after schema mismatch: {}", e2))?;
+                    Index::open_or_create(
+                        tantivy::directory::MmapDirectory::open(path)
+                            .map_err(|e2| format!("Failed to reopen index directory: {}", e2))?,
+                        schema.schema.clone(),
+                    )
+                    .map_err(|e2| format!("Failed to open tantivy index after recreate: {} (orig: {})", e2, msg))?
+                } else {
+                    return Err(format!("Failed to open tantivy index: {}", e));
+                }
+            }
+        };
 
         info!(path = index_path, "Tantivy index opened");
 
@@ -652,6 +677,9 @@ impl TantivyIndex {
 
         // Sanitize query: escape Tantivy special chars, extract meaningful keywords
         let sanitized = sanitize_code_query(query);
+        if std::env::var("CODERUN_PROFILE").is_ok() {
+            eprintln!("[profile] tantivy.sanitized: '{}' -> '{}'", query, sanitized);
+        }
 
         // Build query with field boosts:
         // - symbols_field: 2.0x (symbol name matches are most relevant)
@@ -709,12 +737,13 @@ impl TantivyIndex {
             Box::new(BooleanQuery::new(must_clauses))
         };
 
-        // Fetch extra results to account for file-class filtering — candidateK configurable (P1 sweep 20/50/100/200)
-        // Env CODERUN_CANDIDATE_K overrides; default is max_results*3 capped at 200 (deterministic ranking before Top20)
+        // Candidate pool size: max_results is candidateK (20/50/100/200) — env CODERUN_CANDIDATE_K overrides config/CLI
+        // Previously max_results*3; now caller passes candidateK directly (default 100 → Top 20 after ranking)
         let fetch_limit = std::env::var("CODERUN_CANDIDATE_K")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or_else(|| (max_results * 3).min(200));
+            .unwrap_or(max_results)
+            .min(200);
         let _search_start = std::time::Instant::now();
         let top_docs = searcher
             .search(&full_query, &TopDocs::with_limit(fetch_limit).order_by_score())

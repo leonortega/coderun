@@ -66,6 +66,12 @@ enum Commands {
         /// Expected files for diagnostic classification (comma-separated paths)
         #[arg(long, value_delimiter = ',')]
         expected_files: Option<Vec<String>>,
+        /// Candidate pool size before ranking (20/50/100/200, default 100 from config). Env CODERUN_CANDIDATE_K overrides config.
+        #[arg(long)]
+        candidate_k: Option<usize>,
+        /// Max files in final Context Pack (20 default, use 50 for large-repo eval to match rg K=50). Env CODERUN_MAX_FILES overrides.
+        #[arg(long)]
+        max_files: Option<usize>,
     },
     
     /// Show daemon status and metrics
@@ -150,7 +156,7 @@ fn main() {
         Commands::Serve { port, socket } => cmd_serve(port, socket),
         Commands::Init { wizard, community_skills, no_community_skills } => cmd_init(wizard, community_skills, no_community_skills),
         Commands::Index { watch } => cmd_index(watch),
-        Commands::Preview { prompt, session, no_cache, diag, expected_files } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref()),
+        Commands::Preview { prompt, session, no_cache, diag, expected_files, candidate_k, max_files } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref(), candidate_k, max_files),
         Commands::Status => cmd_status(),
         Commands::Skills { action } => cmd_skills(action),
         Commands::Config { action } => cmd_config(action),
@@ -331,6 +337,29 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
             .unwrap_or(0)
     };
     drop(repo_intel);
+    // Autoconfigure large-repo tuning: persist candidate_k/max_files for next preview/daemon (V1_FIX_PLAN_0_8_1.md:31)
+    // Runtime also auto-tunes if still defaults (crates/coderun-context/src/lib.rs:189 doc_count>5000 → 100→200/20→50)
+    if stats.files_indexed > 5000 {
+        if let Ok(raw) = std::fs::read_to_string(&config_path) {
+            if let Ok(mut cfg) = coderun_core::Config::from_toml(&raw) {
+                let mut changed = false;
+                if cfg.context.candidate_k == 100 {
+                    cfg.context.candidate_k = 200;
+                    changed = true;
+                }
+                if cfg.context.max_files == 20 {
+                    cfg.context.max_files = 50;
+                    changed = true;
+                }
+                if changed {
+                    if let Ok(toml) = cfg.to_toml() {
+                        let _ = std::fs::write(&config_path, toml);
+                        println!("      ↳ large repo detected ({} files) → config candidate_k={} max_files={} (override via --candidate-k/--max-files or CODERUN_CANDIDATE_K)", stats.files_indexed, cfg.context.candidate_k, cfg.context.max_files);
+                    }
+                }
+            }
+        }
+    }
     let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
 
@@ -1086,7 +1115,7 @@ fn cmd_index(watch: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected_files: Option<&[String]>) -> Result<(), String> {
+fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected_files: Option<&[String]>, candidate_k: Option<usize>, max_files: Option<usize>) -> Result<(), String> {
     // Try daemon first (UDS then HTTP), fallback to local BuildContext
     // For v0.3.0 we implement real preview: build context locally if daemon not running.
     let effective_session = if no_cache { String::new() } else { session.to_string() };
@@ -1118,9 +1147,12 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
             .unwrap_or_default();
         let ctx_config = coderun_context::ContextConfig {
             max_tokens: core_config.context.max_tokens,
-            max_files: core_config.context.max_files,
+            max_files: max_files
+                .or_else(|| std::env::var("CODERUN_MAX_FILES").ok().and_then(|v| v.parse().ok()))
+                .unwrap_or(core_config.context.max_files),
             max_lines_per_file: core_config.context.max_lines_per_file,
-            cache_order: core_config.context.cache_order,
+            cache_order: core_config.context.cache_order.clone(),
+            candidate_k: candidate_k.unwrap_or(core_config.context.candidate_k),
         };
         let _t2 = Instant::now();
         let ctx = coderun_context::ContextEngine::new(repo_intel, kh, event_bus.clone(), ctx_config);

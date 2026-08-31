@@ -1,14 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Coderun first-class installer (Windows PowerShell 5.1)
-  Installs ALL stack tools as first-class + uses prebuilt coderun (no compile/test).
-  Idempotent - re-run to update.
+  Coderun installer v0.8.0 minimal (Windows PowerShell 5.1)
+  Installs minimal v1 stack + uses prebuilt coderun (no compile/test). Idempotent - re-run to update.
 
 .DESCRIPTION
-  Tools: Rust, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
-         ast-grep, LiteLLM, RTK, MkDocs, analyzers (clippy/eslint), promptfoo
+  Minimal v1: Rust, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
+         ast-grep, RTK (optional), analyzers (clippy/eslint)
+  Deferred/optional: LiteLLM, MkDocs, promptfoo - install only with -WithOptional
   Prebuilt: target/release/coderun.exe + coderun-daemon.exe are used directly (no cargo build/test).
+  Skills: default OFF per V1_MINIMAL_STACK_PLAN.md:2 - use coderun init --community-skills to opt-in.
 
 .PARAMETER SkipBuild
   Deprecated - build is always skipped (prebuilt binary at target/release/coderun.exe is used). Kept for compat.
@@ -20,7 +21,7 @@
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -SkipExternal
 #>
-param([switch]$SkipBuild, [switch]$SkipExternal)
+param([switch]$SkipBuild, [switch]$SkipExternal, [switch]$WithOptional)
 
 $ErrorActionPreference = "Stop"
 # Always English in scripts (avoid localized ShouldProcess/WhatIf)
@@ -32,6 +33,7 @@ function Test-Cmd($cmd) { $null -ne (Get-Command $cmd -ErrorAction SilentlyConti
 function Info($m) { Write-Host "[coderun] $m" -ForegroundColor Cyan }
 function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
+function Skip($m) { Write-Host "  [SKIP] $m" -ForegroundColor DarkGray }
 function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
 Info "Coderun installer"
@@ -117,8 +119,8 @@ else {
     # codebase-memory-mcp removed — see ENGRAM_CBM_REMOVAL.md (local AST+regex)
   }
 
-  # LiteLLM proxy
-  if (Test-Cmd pip) { try { pip show litellm 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { pip install "litellm[proxy]" 2>&1 | Out-Null }; Ok "litellm pip" } catch { Warn "litellm pip install failed" } }
+  # LiteLLM proxy - deferred per V1_MINIMAL_STACK_PLAN.md:2.6 (optional, only with -WithOptional)
+  if ($WithOptional -and (Test-Cmd pip)) { try { pip show litellm 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { pip install "litellm[proxy]" 2>&1 | Out-Null }; Ok "litellm pip (optional)" } catch { Warn "litellm pip install failed" } } elseif ($WithOptional) { Warn "pip not found - skip litellm (optional)" } else { Skip "litellm deferred (use -WithOptional to install)" }
 
   # RTK - extract from .coderun\rtk\*.zip (Windows) -> ~\.coderun\bin\rtk.exe (NO COMPILE). Unified bin.
   $rtkBinPath = Join-Path $env:USERPROFILE ".coderun\bin\rtk.exe"
@@ -165,18 +167,21 @@ else {
     if (-not $rtkOk) { Warn "rtk cargo install failed - built-ins fallback (or drop a prebuilt rtk.exe into .coderun\rtk\)" }
   }
 
-  # MkDocs (docs) - pymdownx is provided by pymdown-extensions
+  # MkDocs (docs) - deferred per V1_MINIMAL_STACK_PLAN.md:2.4 (plain markdown, no site build required)
+  # Install only with -WithOptional; detection still reports if already present.
   $mkdocsOk = $false
   $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-  if (Test-Cmd mkdocs) { try { $v = mkdocs --version 2>&1 | Out-String; if ($v -match "mkdocs") { Ok "mkdocs $($v.Trim())"; $mkdocsOk = $true } } catch {} }
+  if (Test-Cmd mkdocs) { try { $v = mkdocs --version 2>&1 | Out-String; if ($v -match "mkdocs") { Ok "mkdocs $($v.Trim()) (optional, present)"; $mkdocsOk = $true } } catch {} }
   if (-not $mkdocsOk) {
     try {
       $v = & python -m mkdocs --version 2>&1 | Out-String
-      if ($LASTEXITCODE -eq 0 -and $v -match "mkdocs") { Ok "mkdocs $($v.Trim()) (python -m)"; $mkdocsOk = $true }
+      if ($LASTEXITCODE -eq 0 -and $v -match "mkdocs") { Ok "mkdocs $($v.Trim()) (python -m, optional)"; $mkdocsOk = $true }
     } catch {}
   }
   if (-not $mkdocsOk) {
-    Info "  Installing mkdocs (pymdown-extensions provides pymdownx)..."
+    if (-not $WithOptional) { Skip "mkdocs deferred (use -WithOptional to install)" }
+    else {
+      Info "  Installing mkdocs (pymdown-extensions provides pymdownx) - optional..."
     try { & python -m pip install --upgrade pip *>&1 | Out-Null } catch {}
     # WindowsApps pip can have corrupted mkdocs metadata (ValueError) - force reinstall
     try { & python -m pip uninstall -y mkdocs *>&1 | Out-Null } catch {}
@@ -213,7 +218,8 @@ else {
         elseif ($LASTEXITCODE -eq 0 -and $v3t) { Ok "mkdocs installed (pip)"; $mkdocsOk = $true }
       } catch {}
     }
-    if (-not $mkdocsOk) { Warn "mkdocs install failed - try: python -m pip install --user --force-reinstall mkdocs mkdocs-material pymdown-extensions (ensure Python Scripts on PATH)" }
+      if (-not $mkdocsOk) { Warn "mkdocs install failed - try: python -m pip install --user --force-reinstall mkdocs mkdocs-material pymdown-extensions (ensure Python Scripts on PATH)" }
+    }
   }
   $ErrorActionPreference = $prevEA
 
@@ -371,6 +377,46 @@ if (Test-Path $pluginDir) {
   }
 } else { Warn "packages/opencode-coderun not found - skipping npm plugin install" }
 
+# 3a. coderun-mcp MCP server (agent-agnostic: Codex, Copilot, Claude) — stdio -> http proxy to daemon
+$mcpDir = Join-Path $Root "packages\coderun-mcp"
+$mcpDist = Join-Path $mcpDir "dist\index.js"
+if (Test-Path $mcpDir) {
+  if (-not (Test-Path $mcpDist)) {
+    if (Test-Cmd npm) {
+      Info "Building coderun-mcp MCP server..."
+      Push-Location $mcpDir
+      try {
+        & npm install --silent 2>&1 | Out-Null
+        & npm run build --silent 2>&1 | Out-Null
+        if (Test-Path $mcpDist) { Ok "coderun-mcp built to packages/coderun-mcp/dist" } else { Warn "coderun-mcp build failed - run: cd packages/coderun-mcp; npm install; npm run build" }
+      } catch { Warn "coderun-mcp build failed: $_" }
+      Pop-Location
+    } else { Warn "npm not found - cannot build coderun-mcp" }
+  } else { Ok "coderun-mcp dist at packages/coderun-mcp/dist/index.js" }
+  # Write Codex config ~/.codex/config.toml mcp_servers.coderun
+  $codexDir = Join-Path $env:USERPROFILE ".codex"
+  $codexCfg = Join-Path $codexDir "config.toml"
+  try {
+    New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+    $mcpCmd = "node `"$mcpDist`""
+    $codexEntry = "`n[mcp_servers.coderun]`ncommand = `"node`"`nargs = [`"$mcpDist`"]`n"
+    if (-not (Test-Path $codexCfg) -or -not ((Get-Content -LiteralPath $codexCfg -Raw -ErrorAction SilentlyContinue) -match "mcp_servers.coderun")) {
+      Add-Content -LiteralPath $codexCfg -Value $codexEntry -Encoding UTF8
+      Ok "Codex MCP config at $codexCfg (mcp_servers.coderun stdio)"
+    } else { Skip "Codex MCP already configured at $codexCfg" }
+  } catch { Warn "failed to write Codex MCP config: $_" }
+  # Write VS Code Copilot .vscode/mcp.json at repo root (if .vscode exists)
+  $vscodeMcp = Join-Path $Root ".vscode\mcp.json"
+  try {
+    $mcpJson = @{ servers = @{ coderun = @{ command = "node"; args = @($mcpDist); env = @{ CODERUN_DAEMON_URL = "http://127.0.0.1:9527" } } } } | ConvertTo-Json -Depth 10
+    if (-not (Test-Path $vscodeMcp)) {
+      New-Item -ItemType Directory -Force -Path (Split-Path $vscodeMcp -Parent) | Out-Null
+      Set-Content -LiteralPath $vscodeMcp -Value $mcpJson -Encoding UTF8
+      Ok "VS Code MCP at $vscodeMcp"
+    } else { Skip "VS Code mcp.json already exists at $vscodeMcp" }
+  } catch { Warn "failed to write VS Code mcp.json: $_" }
+} else { Warn "packages/coderun-mcp not found - skipping MCP server install" }
+
 # 3b. opencode global skill: coderun -> ~/.config/opencode/skills/coderun (opencode discovers via skill tool — not ~/.coderun/skills)
 $srcSkillDir = Join-Path $Root ".opencode\skills\coderun"
 $dstSkillDir = Join-Path $env:USERPROFILE ".config\opencode\skills\coderun"
@@ -422,4 +468,4 @@ if ($daemonUp) {
 }
 
 Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | coderun preview 'add auth' | curl http://127.0.0.1:9527/metrics | coderun doctor"
-Info "Docs: mkdocs serve  |  promptfoo eval --config eval/promptfooconfig.yaml  |  coderun doctor"
+Info "Docs: docs/*.md plain (mkdocs optional: mkdocs serve) | promptfoo eval --config eval/promptfooconfig.yaml (optional: -WithOptional) | coderun doctor"

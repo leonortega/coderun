@@ -67,6 +67,9 @@ pub struct ContextConfig {
     pub max_files: usize,
     pub max_lines_per_file: usize,
     pub cache_order: Vec<String>,
+    /// Candidate pool size before deterministic ranking (P1 sweep 20/50/100/200, default 100 → Top 20)
+    /// Env CODERUN_CANDIDATE_K overrides; CLI --candidate-k overrides config.
+    pub candidate_k: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +191,7 @@ impl Default for ContextConfig {
                 "docs_context".to_string(),
                 "code_context".to_string(),
             ],
+            candidate_k: 100,
         }
     }
 }
@@ -347,6 +351,16 @@ impl Config {
                 self.context.max_tokens = n;
             }
         }
+        if let Ok(val) = std::env::var("CODERUN_CANDIDATE_K") {
+            if let Ok(n) = val.parse() {
+                self.context.candidate_k = n;
+            }
+        }
+        if let Ok(val) = std::env::var("CODERUN_MAX_FILES") {
+            if let Ok(n) = val.parse() {
+                self.context.max_files = n;
+            }
+        }
         if let Ok(val) = std::env::var("CODERUN_LITELLM_URL") {
             self.litellm.endpoint = val;
         }
@@ -397,6 +411,13 @@ impl Config {
         if self.context.max_lines_per_file == 0 {
             return Err(ConfigError::InvalidValue {
                 field: "context.max_lines_per_file".to_string(),
+                message: "must be greater than 0".to_string(),
+            }
+            .into());
+        }
+        if self.context.candidate_k == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "context.candidate_k".to_string(),
                 message: "must be greater than 0".to_string(),
             }
             .into());
