@@ -77,49 +77,51 @@ impl CodeIndexSchema {
         }
     }
 
-    /// Get the file-class boost factor for scoring
+    /// Get the file-class boost factor for scoring — generic V1 hierarchy:
+    /// Documentation > Configuration > Source > Test (query-aware).
+    /// See V1 plan: `docs/code split + generic file-type weighting`.
     pub fn file_class_boost(file_class: &str) -> f32 {
         match file_class {
-            "Source" => 1.5,
-            "Test" => 1.0,
-            "Config" => 0.3,
-            "Documentation" => 0.2,
+            "Documentation" => 1.4,
+            "Config" => 1.2,
+            "Source" => 1.0,
+            "Test" => 0.7,
+            "Generated" => 0.5,
+            "Stylesheet" => 0.0,
             "Binary" => 0.0,
             "Vendor" => 0.0,
             "Dependency" => 0.0,
-            "Generated" => 0.1,
-            "Stylesheet" => 0.0,
             _ => 1.0,
         }
     }
 
-    /// Get directory-based boost for source code files
-    /// Domain layer (ApplicationCore) > Infrastructure > Web controllers/services > Views/Pages
+    /// Query-aware adjustment for Test files: penalize unless query is about tests.
+    /// `*test*` penalty: 0.6× unless query contains test-related terms, then 1.4× boost.
+    pub fn query_aware_test_multiplier(query: &str, file_class: &str) -> f32 {
+        if file_class != "Test" {
+            return 1.0;
+        }
+        let q = query.to_lowercase();
+        let is_test_query = q.contains("test") || q.contains("spec") || q.contains("dtslint");
+        if is_test_query { 1.4 } else { 0.6 }
+    }
+
+    /// Get directory-based boost — generic only (V1: docs/workspace, no domain-specific eShop layers).
     pub fn directory_boost(path: &str) -> f32 {
         let lower = path.to_lowercase();
-        // Domain layer — highest priority
-        if lower.contains("applicationcore") || lower.contains("domain") {
+        // Documentation & contribution files — boost for how-to queries
+        if lower.ends_with("readme.md") || lower.ends_with("contributing.md") || lower.ends_with("contributing") || lower.ends_with("claude.md") || lower.ends_with("agents.md") {
             return 1.3;
         }
-        // Infrastructure layer
-        if lower.contains("infrastructure") {
+        if lower.contains("/docs/") || lower.contains("/.github/") || lower.contains("/.coderun/") {
             return 1.2;
         }
-        // Services, controllers, configuration — business logic
-        if lower.contains("/services/") || lower.contains("/controllers/") || lower.contains("/configuration/") || lower.contains("/features/") {
+        // Workspace packages — types/foo/ pattern (DefinitelyTyped, monorepos)
+        if lower.starts_with("types/") || lower.contains("/types/") {
+            return 1.15;
+        }
+        if lower.contains("pnpm-workspace.yaml") || lower.contains("lerna.json") || lower.contains("nx.json") {
             return 1.1;
-        }
-        // Interfaces — important for understanding architecture
-        if lower.contains("/interfaces/") {
-            return 1.2;
-        }
-        // Views, Pages, Razor — UI layer, less relevant for code search
-        if lower.contains("/views/") || lower.contains("/pages/") || lower.contains(".cshtml") || lower.contains(".razor") {
-            return 0.7;
-        }
-        // Static assets — lowest priority
-        if lower.contains("/wwwroot/") {
-            return 0.3;
         }
         1.0
     }
@@ -145,8 +147,8 @@ const STOP_WORDS: &[&str] = &[
 ];
 
 /// Split PascalCase/camelCase identifiers into constituent words.
-/// "CheckoutModel" -> ["checkout", "model", "checkoutmodel"]
-/// "SetBasketModelAsync" -> ["set", "basket", "model", "async", "setbasketmodelasync"]
+/// "UserProfile" -> ["user", "profile", "userprofile"]
+    /// "SetUserModelAsync" -> ["set", "user", "model", "async", "setusermodelasync"]
 fn split_pascal_case(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -213,7 +215,7 @@ fn split_pascal_case(s: &str) -> Vec<String> {
 /// 3. Joins with OR so any keyword can match
 /// Preprocess code content for indexing: split PascalCase identifiers into
 /// constituent words so natural-language queries can match code symbols.
-/// "CheckoutModel" in source becomes "CheckoutModel checkout model checkoutmodel"
+/// "UserProfile" in source becomes "UserProfile user profile userprofile"
 fn preprocess_code_content(text: &str) -> String {
     let mut result = String::with_capacity(text.len() * 2);
     for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
@@ -235,108 +237,16 @@ fn preprocess_code_content(text: &str) -> String {
     result
 }
 
-/// Deterministic code vocabulary expansion — map natural language to code concepts.
-/// "controller" -> ["Controller"], "model" -> ["Model", "ViewModel"]
-/// No LLM, no embeddings, just a static mapping.
+/// Deterministic aliases — small, vetted set only (V1: dtslint → pnpm test etc.)
+/// Not giant OR expansion that diluted BM25.
 fn expand_code_vocabulary(term: &str) -> Vec<String> {
     let t = term.to_lowercase();
     match t.as_str() {
-        // Architecture patterns
-        "controller" => vec!["Controller".to_string()],
-        "service" => vec!["Service".to_string()],
-        "repository" => vec!["Repository".to_string(), "Repo".to_string()],
-        "repo" => vec!["Repository".to_string(), "Repo".to_string()],
-        "model" => vec!["Model".to_string(), "ViewModel".to_string()],
-        "viewmodel" => vec!["ViewModel".to_string(), "Model".to_string()],
-        "view" => vec!["View".to_string(), "Page".to_string(), "cshtml".to_string()],
-        "interface" => vec!["Interface".to_string(), "I".to_string()],
-        "dto" => vec!["Dto".to_string(), "Dto".to_string()],
-        "entity" => vec!["Entity".to_string(), "Model".to_string()],
-        "spec" => vec!["Specification".to_string(), "Spec".to_string()],
-        "specification" => vec!["Specification".to_string(), "Spec".to_string()],
-
-        // C# / ASP.NET
-        "middleware" => vec!["Middleware".to_string()],
-        "handler" => vec!["Handler".to_string()],
-        "endpoint" => vec!["Endpoint".to_string()],
-        "action" => vec!["Action".to_string(), "Endpoint".to_string()],
-        "filter" => vec!["Filter".to_string(), "Specification".to_string()],
-        "validator" => vec!["Validator".to_string(), "Validation".to_string()],
-        "configuration" => vec!["Configuration".to_string(), "Config".to_string()],
-        "config" => vec!["Configuration".to_string(), "Config".to_string()],
-        "settings" => vec!["Settings".to_string(), "Configuration".to_string()],
-        "extension" => vec!["Extensions".to_string(), "Extension".to_string()],
-
-        // File types
-        "razor" => vec!["cshtml".to_string(), "Razor".to_string()],
-        "cshtml" => vec!["cshtml".to_string(), "Page".to_string()],
-        "page" => vec!["Page".to_string(), "cshtml".to_string()],
-
-        // CRUD / operations
-        "checkout" => vec!["Checkout".to_string()],
-        "basket" => vec!["Basket".to_string(), "Cart".to_string()],
-        "cart" => vec!["Basket".to_string(), "Cart".to_string()],
-        "order" => vec!["Order".to_string()],
-        "catalog" => vec!["Catalog".to_string(), "Product".to_string()],
-        "product" => vec!["Catalog".to_string(), "Product".to_string()],
-        "auth" => vec!["Auth".to_string(), "Identity".to_string(), "Authentication".to_string()],
-        "authentication" => vec!["Auth".to_string(), "Identity".to_string(), "Authentication".to_string()],
-        "authorization" => vec!["Authorization".to_string(), "Authorize".to_string()],
-        "identity" => vec!["Identity".to_string(), "User".to_string()],
-        "user" => vec!["User".to_string(), "ApplicationUser".to_string()],
-
-        // Data access
-        "database" => vec!["Context".to_string(), "Database".to_string(), "Db".to_string()],
-        "context" => vec!["Context".to_string()],
-        "migration" => vec!["Migration".to_string()],
-        "seed" => vec!["Seed".to_string(), "Seeding".to_string()],
-        "cache" => vec!["Cache".to_string(), "Cached".to_string()],
-
-        // Testing
-        "test" => vec!["Test".to_string(), "Tests".to_string()],
-        "tests" => vec!["Tests".to_string(), "Test".to_string()],
-        "mock" => vec!["Mock".to_string(), "Fake".to_string()],
-
-        // General code concepts
-        "abstract" => vec!["Abstract".to_string(), "Base".to_string()],
-        "factory" => vec!["Factory".to_string()],
-        "builder" => vec!["Builder".to_string()],
-        "decorator" => vec!["Decorator".to_string(), "Cached".to_string()],
-        "pipeline" => vec!["Pipeline".to_string(), "Middleware".to_string()],
-        "hook" => vec!["Hook".to_string(), "Event".to_string()],
-        "event" => vec!["Event".to_string(), "Handler".to_string()],
-        "logging" => vec!["Logger".to_string(), "Logging".to_string(), "Log".to_string()],
-        "logger" => vec!["Logger".to_string(), "Log".to_string()],
-
-        // Domain-specific terms from eShopOnWeb and common codebases
-        "pagination" => vec!["Paginated".to_string(), "Paging".to_string(), "Page".to_string()],
-        "paginated" => vec!["Paginated".to_string(), "Paging".to_string()],
-        "cookie" => vec!["Cookie".to_string(), "CookieAuthentication".to_string()],
-        "token" => vec!["Token".to_string(), "Claims".to_string(), "Jwt".to_string()],
-        "roles" => vec!["Role".to_string(), "Roles".to_string(), "Authorization".to_string()],
-        "validation" => vec!["Validation".to_string(), "Validator".to_string(), "Valid".to_string()],
-        "csv" => vec!["Csv".to_string(), "Export".to_string(), "File".to_string()],
-        "export" => vec!["Export".to_string(), "Csv".to_string(), "Download".to_string()],
-        "distributed" => vec!["Distributed".to_string(), "Cache".to_string(), "Redis".to_string()],
-        "caching" => vec!["Cache".to_string(), "Cached".to_string()],
-        "api" => vec!["Api".to_string(), "Endpoint".to_string(), "Controller".to_string()],
-        "image" => vec!["Image".to_string(), "File".to_string(), "Upload".to_string()],
-        "upload" => vec!["Upload".to_string(), "File".to_string(), "Image".to_string()],
-        "comparison" => vec!["Compare".to_string(), "Comparison".to_string()],
-        "navigation" => vec!["Navigation".to_string(), "Tree".to_string(), "Menu".to_string()],
-        "audit" => vec!["Audit".to_string(), "AuditTrail".to_string(), "Log".to_string()],
-        "seeding" => vec!["Seed".to_string(), "Seeding".to_string(), "InitialData".to_string()],
-        "hosted" => vec!["HostedService".to_string(), "BackgroundService".to_string()],
-        "mediator" => vec!["Mediator".to_string(), "IRequest".to_string(), "Handler".to_string()],
-        "minimal" => vec!["Minimal".to_string(), "Map".to_string(), "WebApplication".to_string()],
-        "filtering" => vec!["Filter".to_string(), "Specification".to_string(), "Filtering".to_string()],
-        "brands" => vec!["Brand".to_string(), "CatalogBrand".to_string()],
-        "wishlist" => vec!["Wishlist".to_string(), "Wish".to_string(), "Basket".to_string()],
-        "rating" => vec!["Rating".to_string(), "Review".to_string(), "Score".to_string()],
-        "email" => vec!["Email".to_string(), "EmailSender".to_string(), "Notification".to_string()],
-        "notification" => vec!["Notification".to_string(), "Email".to_string(), "EmailSender".to_string()],
-        "state" => vec!["State".to_string(), "Status".to_string(), "StateMachine".to_string()],
-        "machine" => vec!["StateMachine".to_string(), "State".to_string()],
+        // V1 limited aliases (DefinitelyTyped + generic)
+        "dtslint" => vec!["dtslint".to_string(), "pnpm".to_string(), "test".to_string()],
+        "dts" => vec!["dts".to_string(), "index.d.ts".to_string()],
+        "type" => vec!["type".to_string(), "index.d.ts".to_string()],
+        "types" => vec!["types".to_string(), "index.d.ts".to_string()],
         _ => vec![],
     }
 }
@@ -504,7 +414,7 @@ impl TantivyIndex {
     }
 
     /// Tokenize a file path into searchable terms.
-    /// "src/ApplicationCore/Entities/Basket/Basket.cs" -> "src applicationcore entities basket basket cs"
+    /// "src/components/User/Profile.cs" -> "src components user profile cs"
     fn tokenize_path(path: &str) -> String {
         let mut tokens = Vec::new();
         for component in path.split(['/', '\\']) {
@@ -516,7 +426,7 @@ impl TantivyIndex {
                 if !tokens.contains(&lower) {
                     tokens.push(lower.clone());
                 }
-                // Split PascalCase: "ApplicationCore" -> "applicationcore", "application", "core"
+                // Split PascalCase: "UserProfile" -> "userprofile", "user", "profile"
                 for split in split_pascal_case(part) {
                     if split != lower && !tokens.contains(&split) {
                         tokens.push(split);
@@ -789,10 +699,11 @@ impl TantivyIndex {
                     .unwrap_or("Source")
                     .to_string();
 
-                // Apply file-class boost and directory boost to the BM25 score
+                // Apply file-class boost (Documentation > Config > Source > Test) + query-aware Test penalty + directory boost
                 let class_boost = CodeIndexSchema::file_class_boost(&file_class);
+                let test_multiplier = CodeIndexSchema::query_aware_test_multiplier(query, &file_class);
                 let dir_boost = CodeIndexSchema::directory_boost(&path);
-                let boosted_score = score * class_boost * dir_boost;
+                let boosted_score = score * class_boost * test_multiplier * dir_boost;
 
                 // Skip files with zero boost (Binary, Vendor, Dependency, Stylesheet)
                 if class_boost == 0.0 {

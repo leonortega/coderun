@@ -850,6 +850,74 @@ impl RepositoryIntelligence {
 
         Ok(files)
     }
+
+    /// V1 workspace awareness: extract pnpm-workspace.yaml packages (e.g. `types/*` → package dirs)
+    /// Returns list of package root dirs relative to repo. No full dependency graph — just structure metadata.
+    pub fn workspace_packages(&self) -> Vec<String> {
+        let ws_path = self.repo_path.join("pnpm-workspace.yaml");
+        if !ws_path.exists() {
+            return Vec::new();
+        }
+        let content = match std::fs::read_to_string(&ws_path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        // Simple yaml parse: look for `packages:` then `- "types/*"` lines
+        let mut packages = Vec::new();
+        let mut in_packages = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("packages:") {
+                in_packages = true;
+                continue;
+            }
+            if in_packages {
+                if trimmed.starts_with("- ") {
+                    let glob = trimmed[2..].trim().trim_matches('"').trim_matches('\'').trim();
+                    // Expand glob like `types/*` → list dirs under types/
+                    if glob.ends_with("/*") {
+                        let base = &glob[..glob.len()-2];
+                        let base_path = self.repo_path.join(base);
+                        if let Ok(entries) = std::fs::read_dir(&base_path) {
+                            for e in entries.flatten() {
+                                if e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                                    if let Some(name) = e.file_name().to_str() {
+                                        packages.push(format!("{}/{}", base, name));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        packages.push(glob.to_string());
+                    }
+                } else if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("-") {
+                    // End of packages list
+                    break;
+                }
+            }
+        }
+        debug!(workspace_packages = ?packages, "workspace awareness: extracted packages from pnpm-workspace.yaml");
+        packages
+    }
+
+    /// V1 parser coverage: auto-detect languages present in repo (files → languages → grammars)
+    /// Returns map extension → count, used to decide which grammars to load per-repo (skip AST, still lexical).
+    pub fn detect_repo_languages(&self) -> std::collections::HashMap<String, usize> {
+        let mut counts = std::collections::HashMap::new();
+        if let Ok(files) = self.walk_directory(&self.repo_path) {
+            for p in files.iter().take(5000) { // sample first 5k for speed
+                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    *counts.entry(ext.to_lowercase()).or_insert(0) += 1;
+                }
+                // Also check special filenames like Cargo.toml, package.json
+                if let Some(fname) = p.file_name().and_then(|n| n.to_str()) {
+                    if fname == "Cargo.toml" { *counts.entry("rust_manifest".to_string()).or_insert(0) += 1; }
+                    if fname == "package.json" { *counts.entry("js_manifest".to_string()).or_insert(0) += 1; }
+                }
+            }
+        }
+        counts
+    }
 }
 
 // ── Query Sanitization ───────────────────────────────────────────────────

@@ -52,6 +52,29 @@ fn is_valid_file_path(path: &str) -> bool {
     false
 }
 
+/// V1 docs/code split: Documentation files vs Code files (generic, not DefinitelyTyped-specific)
+fn is_documentation_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    // Strong docs signals
+    if lower.ends_with(".md") {
+        return true;
+    }
+    if lower.contains("/docs/") || lower.contains("/.github/") || lower.contains("/.coderun/") {
+        return true;
+    }
+    if lower.ends_with("readme") || lower.ends_with("readme.md") || lower.ends_with("contributing") || lower.ends_with("contributing.md") || lower.ends_with("changelog") || lower.ends_with("changelog.md") || lower.ends_with("claude.md") || lower.ends_with("agents.md") {
+        return true;
+    }
+    if lower.contains("readme") || lower.contains("contributing") {
+        return true;
+    }
+    // .txt/.rst/.adoc only if in docs or named docs-like (avoid misclassifying generic .txt like feature.txt in tests)
+    if (lower.ends_with(".txt") || lower.ends_with(".rst") || lower.ends_with(".adoc")) && (lower.contains("docs") || lower.contains("readme") || lower.contains("contributing")) {
+        return true;
+    }
+    false
+}
+
 
 
 // â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -160,19 +183,19 @@ impl ContextEngine {
         repository_id: &str,
         query: &str,
         context_hints: &Option<ContextHints>,
-    ) -> Result<(String, Vec<coderun_core::SearchResult>, coderun_core::RetrievalStatus), String> {
+    ) -> Result<(String, String, Vec<coderun_core::SearchResult>, coderun_core::RetrievalStatus), String> {
         let _p0 = Instant::now();
         // ── Proactive detection (P0 #3): verify index exists and is populated ──
         let doc_count = match repo_intel.validate_index() {
             Ok(s) => s.doc_count,
             Err(ref e) if e == "index not built" => {
-                return Ok((String::new(), vec![], coderun_core::RetrievalStatus::IndexNotBuilt));
+                return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::IndexNotBuilt));
             }
             Err(ref e) if e == "index is empty" => {
                 0 // Fall through to search; ripgrep fallback may still find content
             }
             Err(_) => {
-                return Ok((String::new(), vec![], coderun_core::RetrievalStatus::IndexUnavailable));
+                return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::IndexUnavailable));
             }
         };
 
@@ -199,7 +222,7 @@ impl ContextEngine {
                 match repo_intel.search_text(query, None, candidate_k) {
                     Ok(sr) if sr.total_count > 0 => sr,
                     Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
-                    Err(e) => return Ok((String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
+                    Err(e) => return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
                 }
             }
             Err(e) => {
@@ -207,7 +230,7 @@ impl ContextEngine {
                 match repo_intel.search_text(query, None, candidate_k) {
                     Ok(sr) if sr.total_count > 0 => sr,
                     Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
-                    Err(_) => return Ok((String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
+                    Err(_) => return Ok((String::new(), String::new(), vec![], coderun_core::RetrievalStatus::RetrievalFailed(e))),
                 }
             }
         };
@@ -371,7 +394,8 @@ impl ContextEngine {
 
 
 
-        let mut results = Vec::new();
+        let mut docs_results = Vec::new();
+        let mut code_results = Vec::new();
         let mut scored = Vec::new();
         let mut seen_files = std::collections::HashSet::new();
 
@@ -381,12 +405,17 @@ impl ContextEngine {
                 if let Some(result) = all_by_path.get(&path) {
                     let mut final_result = result.clone();
                     final_result.score = rrf_score * 1000.0;
-                    scored.push(final_result);
+                    scored.push(final_result.clone());
 
                     let line_start = result.line.saturating_sub(5);
                     let line_end = result.line + max_lines.min(15);
                     if let Ok(content) = repo_intel.get_file_content(&result.path, Some((line_start, line_end))) {
-                        results.push(format!("// {}:{}\n{}", result.path, result.line, content));
+                        let entry = format!("// {}:{}\n{}", result.path, result.line, content);
+                        if is_documentation_path(&result.path) {
+                            docs_results.push(entry);
+                        } else {
+                            code_results.push(entry);
+                        }
                     }
                 }
             }
@@ -396,13 +425,18 @@ impl ContextEngine {
             if let Some(files) = &hints.files_mentioned {
                 for file in files {
                     if let Ok(content) = repo_intel.get_file_content(file, Some((1, config.max_lines_per_file))) {
-                        results.push(format!("// {}\n{}", file, content));
+                        let entry = format!("// {}\n{}", file, content);
+                        if is_documentation_path(file) {
+                            docs_results.push(entry);
+                        } else {
+                            code_results.push(entry);
+                        }
                         scored.push(coderun_core::SearchResult { path: file.clone(), line: 1, content: file.clone(), score: 1.0 });
                     }
                 }
             }
         }
-        Ok((results.join("\n\n"), scored, status))
+        Ok((docs_results.join("\n\n"), code_results.join("\n\n"), scored, status))
     }
 
     fn retrieve_knowledge_scored_standalone(
@@ -505,16 +539,18 @@ impl ContextEngine {
         let code_search_duration_ms = code_search_start.elapsed().as_millis() as u64;
         prof("build_context.retrieval_join", start);
 
-        let (raw_code, code_scored, code_retrieval_status) =
+        let (raw_docs_from_code, raw_code, code_scored, code_retrieval_status) =
             code_result.map_err(|e| format!("Code search failed: {}", e))??;
         let (raw_knowledge, knowledge_scored) =
             knowledge_result.map_err(|e| format!("Knowledge search failed: {}", e))??;
         let (raw_skills, skills_scored) =
             skills_result.map_err(|e| format!("Skills search failed: {}", e))??;
 
-        // Dedup after parallel retrieval (needs self.session_fingerprints â€” cannot run in spawn_blocking)
+        // V1 docs/code split: docs from code search (Repository → Documentation) + legacy knowledge (usually empty)
+        let combined_docs = if raw_knowledge.is_empty() { raw_docs_from_code } else { format!("{}\n\n{}", raw_docs_from_code, raw_knowledge) };
+        // Dedup after parallel retrieval (needs self.session_fingerprints — cannot run in spawn_blocking)
         let code_context = self.dedup_content(&request.session_id, &raw_code);
-        let knowledge_context = self.dedup_content(&request.session_id, &raw_knowledge);
+        let knowledge_context = self.dedup_content(&request.session_id, &combined_docs);
         let skills_context = self.dedup_content(&request.session_id, &raw_skills);
 
         // Compute repository state (brief lock, post-parallel)
