@@ -423,13 +423,13 @@ async fn handle_pre_generation(
 
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.lock().await;
-    let (context_pack, routing_decision) = engine.build_context(&task).await?;
-    crate::metrics::global().inc_requests("PreGeneration", &routing_decision.tier);
+    let context_pack = engine.build_context(&task).await?;
+    crate::metrics::global().inc_requests("PreGeneration", "balanced");
     // TASK-022: wire metrics — context tokens + retrieval recall (was dead_code)
     crate::metrics::global().observe_context_tokens(context_pack.token_usage.total_tokens);
     let recall = if !context_pack.code_context.is_empty() { 0.85 } else { 0.0 };
     crate::metrics::global().set_retrieval_recall(recall);
-    tracing::info!(correlation_id=%context_pack.metadata.correlation_id, repository_state=%context_pack.repository_state, total_tokens=%context_pack.token_usage.total_tokens, recall=%recall, tier=%routing_decision.tier, "trace: context→router (context built)");
+    tracing::info!(correlation_id=%context_pack.metadata.correlation_id, repository_state=%context_pack.repository_state, total_tokens=%context_pack.token_usage.total_tokens, recall=%recall, "trace: context built");
 
     // TASK-031/F-2: zero-value rewrite suppression — when all three content sources are empty,
     // return the original untouched instead of a metadata-only skeleton (~500-700 tokens for nothing).

@@ -27,7 +27,6 @@ coderun-repo-intel.workspace = true
 coderun-knowledge.workspace = true
 coderun-skills.workspace = true
 coderun-context.workspace = true
-coderun-router.workspace = true
 coderun-optimizer.workspace = true
 criterion = { version = "0.8", features = ["async_tokio"] }
 tokio.workspace = true

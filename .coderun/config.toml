@@ -35,11 +35,6 @@ path = "~/.coderun/index/"
 [knowledge]
 max_knowledge_entries = 10000
 
-[litellm]
-endpoint = "http://localhost:4000"
-max_retries = 3
-timeout_ms = 30000
-
 [logging]
 file_path = "~/.coderun/logs/coderun.log"
 level = "info"
@@ -49,17 +44,7 @@ retention_days = 7
 [model]
 default_tier = "balanced"
 max_tokens_response = 4096
-routing_enabled = true
-
-[routing]
-balanced_model = "gpt-4o"
-capable_model = "o1"
-capable_threshold = 0.7
-fast_model = "gpt-4o-mini"
-fast_threshold = 0.3
-scope_weight = 0.3
-semantic_weight = 0.4
-structural_weight = 0.3
+routing_enabled = false
 
 [rtk]
 compression_level = "balanced"

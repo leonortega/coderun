@@ -45,8 +45,7 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
   # engram removed — see ENGRAM_CBM_REMOVAL.md
   # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
   # codebase-memory-mcp removed — see ENGRAM_CBM_REMOVAL.md
-  # LiteLLM deferred per V1_MINIMAL_STACK_PLAN.md:2.6 — only with --with-optional
-  if [ "$WITH_OPTIONAL" = true ]; then pip3 show litellm >/dev/null 2>&1 || pip3 install "litellm[proxy]" 2>/dev/null; ok "litellm (optional)"; else echo "  [SKIP] litellm deferred (use --with-optional)"; fi
+  # LiteLLM removed — see docs/01-architecture/LLM_ROUTING_REMOVAL.md (no pip install)
    # RTK - extract from .coderun/rtk/*.tar.gz (Linux) -> ~/.coderun/bin/rtk (NO COMPILE). Unified bin.
    RTK_BIN="$HOME/.coderun/bin/rtk"
    if [ -f "$HOME/bin/rtk" ] && [ ! -f "$RTK_BIN" ]; then mkdir -p "$(dirname "$RTK_BIN")"; cp -f "$HOME/bin/rtk" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "migrated legacy ~/bin/rtk -> $RTK_BIN" || true; fi

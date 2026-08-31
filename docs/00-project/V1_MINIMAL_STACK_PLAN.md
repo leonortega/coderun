@@ -33,7 +33,7 @@ CODING AGENT → read / rg / grep / glob / bash / git
 | Engram | ❌ Remove | No v1 value, operational cost > benefit — see §2.3 | Already removed `crates/coderun-knowledge/src/engram.rs` deleted |
 | MkDocs | ❌ Remove from runtime | Docs publishing only; keep `docs/*.md` without build — see §2.4 | `mkdocs.yml`, `crates/coderun-repo-intel/src/lib.rs:383` ingestion |
 | Knowledge Hub (broad) | ❌ Remove | `docs/ADRs/memory/skills` too broad; collapse to Repository Context — see §2.5 | `crates/coderun-knowledge/src/lib.rs:30` |
-| LiteLLM / Model Router | ❌ Defer | `query → model routing` not validated; strongest is `repository → context` — see §2.6 | `crates/coderun-router/src/lib.rs`, `crates/coderun-context/src/lib.rs:594` |
+| LiteLLM / Model Router | ❌ Removed | `query → model routing` removed — see `docs/01-architecture/LLM_ROUTING_REMOVAL.md` | `crates/coderun-router` deleted |
 | RRF | ❌ Remove | No demonstrated benefit — see §2.7 | — |
 | Embeddings / vector DB | ❌ Not needed | No evidence lexical insufficient — see §2.8 | — |
 | Custom reranker | ❌ Not needed | Candidate generation is the problem — see §2.9 | — |

@@ -119,8 +119,7 @@ else {
     # codebase-memory-mcp removed — see ENGRAM_CBM_REMOVAL.md (local AST+regex)
   }
 
-  # LiteLLM proxy - deferred per V1_MINIMAL_STACK_PLAN.md:2.6 (optional, only with -WithOptional)
-  if ($WithOptional -and (Test-Cmd pip)) { try { pip show litellm 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { pip install "litellm[proxy]" 2>&1 | Out-Null }; Ok "litellm pip (optional)" } catch { Warn "litellm pip install failed" } } elseif ($WithOptional) { Warn "pip not found - skip litellm (optional)" } else { Skip "litellm deferred (use -WithOptional to install)" }
+  # LiteLLM removed — see docs/01-architecture/LLM_ROUTING_REMOVAL.md (no pip install)
 
   # RTK - extract from .coderun\rtk\*.zip (Windows) -> ~\.coderun\bin\rtk.exe (NO COMPILE). Unified bin.
   $rtkBinPath = Join-Path $env:USERPROFILE ".coderun\bin\rtk.exe"

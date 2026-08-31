@@ -39,18 +39,11 @@ run_eval() {
 }
 
 case "$SUITE" in
-  model)
-    run_eval "Model Routing" "config-model-routing.yaml"
-    ;;
-  context)
-    run_eval "Context Quality" "config-context-quality.yaml"
-    ;;
-  all)
-    run_eval "Model Routing" "config-model-routing.yaml"
+  context|all)
     run_eval "Context Quality" "config-context-quality.yaml"
     ;;
   *)
-    echo "Usage: $0 [model|context|all] [--view]"
+    echo "Usage: $0 [context|all] [--view]  (model routing removed — see LLM_ROUTING_REMOVAL.md)"
     exit 1
     ;;
 esac

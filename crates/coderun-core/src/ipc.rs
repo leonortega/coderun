@@ -71,7 +71,6 @@ pub struct RewrittenMessageData {
     pub original: String,
     pub rewritten: String,
     pub context_pack: Option<ContextPack>,
-    pub routing_decision: Option<RoutingDecision>,
 }
 
 /// Payload variants for outgoing responses
@@ -291,24 +290,6 @@ pub struct TokenUsage {
     pub total_tokens: usize,
     pub budget_remaining: usize,
     pub by_source: std::collections::HashMap<String, usize>,
-}
-
-/// Model routing decision
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutingDecision {
-    pub model: String,
-    pub tier: String,
-    pub scores: RoutingScores,
-    pub reasoning: String,
-}
-
-/// Breakdown of routing scores
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutingScores {
-    pub structural: f64,
-    pub semantic: f64,
-    pub scope: f64,
-    pub final_score: f64,
 }
 
 // ── Task Types ──────────────────────────────────────────────────────────

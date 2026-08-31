@@ -8,7 +8,6 @@ members = [
     "crates/coderun-knowledge",
     "crates/coderun-skills",
     "crates/coderun-context",
-    "crates/coderun-router",
     "crates/coderun-optimizer",
     "crates/coderun-events",
     "crates/coderun-storage",
@@ -80,7 +79,6 @@ coderun-repo-intel = { path = "crates/coderun-repo-intel" }
 coderun-knowledge = { path = "crates/coderun-knowledge" }
 coderun-skills = { path = "crates/coderun-skills" }
 coderun-context = { path = "crates/coderun-context" }
-coderun-router = { path = "crates/coderun-router" }
 coderun-optimizer = { path = "crates/coderun-optimizer" }
 coderun-daemon = { path = "crates/coderun-daemon" }
 coderun-cli = { path = "crates/coderun-cli" }

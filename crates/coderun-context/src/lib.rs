@@ -2,11 +2,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use coderun_core::{ContextHints, ContextPack, RoutingDecision, TaskRequest, TokenUsage};
+use coderun_core::{ContextHints, ContextPack, TaskRequest, TokenUsage};
 use coderun_events::{EventBus, RuntimeEvent, TokenCounts};
 use coderun_knowledge::KnowledgeHub;
 use coderun_repo_intel::RepositoryIntelligence;
-use coderun_router::{ModelRouter, RouterConfig, RoutingRequest};
 use tracing::{debug, info, warn};
 
 // â”€â”€ Stop words for symbol-match boosting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -92,7 +91,6 @@ pub struct ContextEngine {
     /// ONE daemon serves many opencode windows on different repos simultaneously.
     repo_cache: Arc<Mutex<HashMap<String, Arc<Mutex<RepositoryIntelligence>>>>>,
     knowledge_hub: Arc<Mutex<KnowledgeHub>>,
-    model_router: ModelRouter,
     event_bus: EventBus,
     config: ContextConfig,
     /// Session fingerprints for deduplication (session_id → set of content hashes)
@@ -107,14 +105,10 @@ impl ContextEngine {
         event_bus: EventBus,
         config: ContextConfig,
     ) -> Self {
-        let router_config = RouterConfig::default();
-        let model_router = ModelRouter::new(router_config);
-
         Self {
             default_repo_intel: Arc::new(Mutex::new(repo_intel)),
             repo_cache: Arc::new(Mutex::new(HashMap::new())),
             knowledge_hub: Arc::new(Mutex::new(knowledge_hub)),
-            model_router,
             event_bus,
             config,
             session_fingerprints: Arc::new(Mutex::new(HashMap::new())),
@@ -449,7 +443,7 @@ impl ContextEngine {
     pub async fn build_context(
         &self,
         request: &TaskRequest,
-    ) -> Result<(ContextPack, RoutingDecision), String> {
+    ) -> Result<ContextPack, String> {
         let start = Instant::now();
         let correlation_id = coderun_core::CorrelationId::new();
 
@@ -613,16 +607,7 @@ impl ContextEngine {
             }
         }
 
-        // Step 5: Select model via Model Router (heuristic, no LLM call)
-        let routing_decision = self.select_model(
-            &request.message,
-            &code_context,
-            &knowledge_context,
-            &skills_context,
-            total_tokens,
-        );
-
-        // Step 6: Emit ContextBuilt event (async-only, never blocks hot path)
+        // Step 5: Emit ContextBuilt event (async-only, never blocks hot path)
         let latency_ms = start.elapsed().as_millis() as u64;
         self.event_bus.emit(RuntimeEvent::ContextBuilt {
             correlation_id: correlation_id.clone(),
@@ -642,7 +627,7 @@ impl ContextEngine {
         );
 
         prof("build_context.total", start);
-        Ok((context_pack, routing_decision))
+        Ok(context_pack)
     }
 
     /// Deduplicate content against session fingerprint (spec Â§3 deduplication + PRINCIPLES.md:10)
@@ -764,34 +749,6 @@ impl ContextEngine {
         (context_pack, total_tokens)
     }
 
-    /// Select model via Model Router — V1 minimal: heuristic only, no LiteLLM HTTP call
-    /// per V1_MINIMAL_STACK_PLAN.md:2.6 (deferred). Works standalone; LITELLM_URL not required.
-    fn select_model(
-        &self,
-        message: &str,
-        code_context: &str,
-        knowledge_context: &str,
-        skills_context: &str,
-        token_count: usize,
-    ) -> RoutingDecision {
-        // Zero-result safeguard: when both code and knowledge retrieval are empty,
-        // the agent has insufficient context â€” signal this to the router so it can
-        // escalate tier instead of defaulting to the cheapest model.
-        let retrieval_empty = code_context.is_empty() && knowledge_context.is_empty();
-        let request = RoutingRequest {
-            message: message.to_string(),
-            file_count: code_context.lines().count(),
-            symbol_count: 0, // Would need repo-intel integration
-            knowledge_entries: knowledge_context.lines().count(),
-            skills_matched: skills_context.matches("---").count() + 1,
-            token_count,
-            model_override: None,
-            retrieval_empty,
-        };
-
-        self.model_router.select_model(&request)
-    }
-
     /// Clear session fingerprint (e.g., on daemon restart)
     pub fn clear_session_fingerprint(&self, session_id: &str) {
         if let Ok(mut fingerprints) = self.session_fingerprints.lock() {
@@ -853,7 +810,7 @@ impl coderun_core::IContextBuilder for ContextEngine {
     async fn build_context(
         &self,
         task: &TaskRequest,
-    ) -> std::result::Result<(ContextPack, RoutingDecision), coderun_core::CoderunError> {
+    ) -> std::result::Result<ContextPack, coderun_core::CoderunError> {
         ContextEngine::build_context(self, task)
             .await
             .map_err(|e| coderun_core::CoderunError::ContextBuildFailed(e))
@@ -1396,8 +1353,8 @@ mod tests {
         let engine = ContextEngine::new(ri, kh, event_bus, ContextConfig::default());
         let task1 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
         let task2 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
-        let (pack1, routing1) = engine.build_context(&task1).await.unwrap();
-        let (pack2, routing2) = engine.build_context(&task2).await.unwrap();
+        let pack1 = engine.build_context(&task1).await.unwrap();
+        let pack2 = engine.build_context(&task2).await.unwrap();
         // Deterministic: same repo state hash, same task hash, same content (correlation_id intentionally differs, not compared)
         assert_eq!(pack1.repository_state, pack2.repository_state, "repo_state must be deterministic");
         assert_eq!(pack1.metadata.repository_state, pack2.metadata.repository_state);
@@ -1408,10 +1365,10 @@ mod tests {
         assert_eq!(pack1.docs_context, pack2.docs_context);
         assert_eq!(pack1.behavioral_skills, pack2.behavioral_skills);
         assert_eq!(pack1.token_usage.total_tokens, pack2.token_usage.total_tokens);
-        assert_eq!(routing1.tier, routing2.tier);
+        // routing removed;
         // Same session should dedup second call (different from first, empty on second)
         let task3 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
-        let (pack3, _) = engine.build_context(&task3).await.unwrap();
+        let pack3 = engine.build_context(&task3).await.unwrap();
         // dedup_content may empty repeated content for same session; pack3 may have empty sections but task_hash still same
         assert_eq!(pack3.metadata.task_hash, pack1.metadata.task_hash);
         std::env::remove_var("CODERUN_INDEX_DIR");
@@ -1517,7 +1474,7 @@ mod tests {
         );
         // Prompt scoped to repo A must surface ONLY repo A's file even though daemon CWD is repo B
         let task_a = TaskRequest { message: "eshop basket checkout flow unique_marker_alpha".to_string(), session_id: "sA".to_string(), context_hints: None, repository_id: String::new(), repository_path: Some(repo_a.to_string_lossy().to_string()), expected_files: None };
-        let (pack_a, _) = engine.build_context(&task_a).await.unwrap();
+        let pack_a = engine.build_context(&task_a).await.unwrap();
         assert!(pack_a.code_context.contains("unique_marker_alpha"), "repo A content expected, provenance was {:?}", pack_a.provenance);
         // Provenance uniqueness invariant (F-3)
         let mut keys: Vec<(String, String, String)> = pack_a.provenance.iter()
@@ -1528,7 +1485,7 @@ mod tests {
 
         // Repo-scoped query against repo B works too (same engine instance)
         let task_b = TaskRequest { message: "coderun router daemon unique_marker_beta".to_string(), session_id: "sB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
-        let (pack_b, _) = engine.build_context(&task_b).await.unwrap();
+        let pack_b = engine.build_context(&task_b).await.unwrap();
         assert!(pack_b.code_context.contains("unique_marker_beta"));
 
         std::env::remove_var("CODERUN_INDEX_DIR");
@@ -1582,7 +1539,7 @@ mod tests {
                 repository_path: Some(eshop_path.to_string_lossy().to_string()),
                 expected_files: None,
             };
-            let (pack, _routing) = engine.build_context(&task).await.unwrap();
+            let pack = engine.build_context(&task).await.unwrap();
 
             eprintln!("\n=== Query: {} ===", query);
             eprintln!("Code context length: {} chars", pack.code_context.len());

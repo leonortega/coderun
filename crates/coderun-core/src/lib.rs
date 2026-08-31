@@ -10,11 +10,11 @@ pub mod traits;
 pub use config::Config;
 pub use error::{CoderunError, ConfigError, CorrelationId, Result};
 pub use secrets::{contains_secret, redact_secrets};
-pub use traits::{IContextBuilder, IModelGateway, IWorkflowEngine, NoopWorkflowEngine};
+pub use traits::{IContextBuilder, IWorkflowEngine, NoopWorkflowEngine};
 pub use ipc::{
     AgentRequest, AgentResponse, CodeFile, ContextHints, ContextPack, HookType,
     KnowledgeEntry, OutputType, RequestPayload, ResponsePayload, RetrievalStatus,
-    RewrittenMessageData, RoutingDecision, RoutingScores, SearchResult, SearchResults,
+    RewrittenMessageData, SearchResult, SearchResults,
     SkillMatch, TaskRequest, TokenUsage, FileDiagnostic, MissType, RetrievalDiagnostic,
     repository_id_from_path,
 };

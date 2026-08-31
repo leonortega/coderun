@@ -439,8 +439,8 @@ async fn handle_pre_generation(
     // Metrics + rate-limit + audit (best-effort, off-hot-path)
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.read().await;
-    let (context_pack, routing_decision) = engine.build_context(&task).await?;
-    crate::metrics::global().inc_requests("PreGeneration", &routing_decision.tier);
+    let context_pack = engine.build_context(&task).await?;
+    crate::metrics::global().inc_requests("PreGeneration", "balanced");
 
     // TASK-031/F-2: zero-value rewrite suppression
     if context_pack.token_usage.total_tokens == 0 {
@@ -458,7 +458,6 @@ async fn handle_pre_generation(
             coderun_context::ContextEngine::to_yaml(&context_pack)?
         ),
         context_pack: Some(context_pack),
-        routing_decision: Some(routing_decision),
     })))
 }
 
@@ -573,7 +572,6 @@ mod tests {
                 original: "test".to_string(),
                 rewritten: "test with context".to_string(),
                 context_pack: None,
-                routing_decision: None,
             })),
             latency_ms: 100,
             error: None,

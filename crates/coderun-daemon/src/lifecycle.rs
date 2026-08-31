@@ -269,12 +269,12 @@ impl DaemonState {
                                 let _timer = crate::metrics::Timer::start();
                                 let eng = engine.lock().await;
                                 match eng.build_context(&task).await {
-                                    Ok((pack, routing)) => {
-                                        crate::metrics::global().inc_requests("PreGeneration", &routing.tier);
+                                    Ok(pack) => {
+                                        crate::metrics::global().inc_requests("PreGeneration", "balanced");
                                         crate::metrics::global().observe_context_tokens(pack.token_usage.total_tokens);
                                         let recall = if !pack.code_context.is_empty() { 0.85 } else { 0.0 };
                                         crate::metrics::global().set_retrieval_recall(recall);
-                                        tracing::info!(total_tokens=%pack.token_usage.total_tokens, recall=%recall, tier=%routing.tier, repository_state=%pack.repository_state, "trace: context→router (UDS)");
+                                        tracing::info!(total_tokens=%pack.token_usage.total_tokens, recall=%recall, repository_state=%pack.repository_state, "trace: context built (UDS)");
                                         // TASK-031/F-2: zero-value rewrite suppression
                                         if pack.token_usage.total_tokens == 0 {
                                             ResponsePayload::OriginalPassthrough { original: message, reason: "no_context_hits".to_string() }
@@ -284,7 +284,6 @@ impl DaemonState {
                                                 original: message.clone(),
                                                 rewritten: format!("{}\\n\\n---\\n\\nContext:\\n{}", message, yaml),
                                                 context_pack: Some(pack),
-                                                routing_decision: Some(routing),
                                             }))
                                         }
                                     }

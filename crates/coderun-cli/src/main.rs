@@ -1167,7 +1167,7 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         };
         let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
         let _t3 = Instant::now();
-        let (pack, routing) = rt.block_on(ctx.build_context(&task)).map_err(|e| e.to_string())?;
+        let pack = rt.block_on(ctx.build_context(&task)).map_err(|e| e.to_string())?;
         if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.build_context: {}ms", _t3.elapsed().as_millis()); }
         println!("Skills matched:");
         if pack.behavioral_skills.is_empty() { println!("  (none — deduped or no match)"); } else { println!("  {}", pack.behavioral_skills.lines().next().unwrap_or("").trim()); if pack.behavioral_skills.contains("FROZEN PREFIX END") { println!("  [frozen-prefix boundary present ✓]"); } }
@@ -1180,10 +1180,6 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         println!();
         println!("Token budget:");
         println!("  total: {}, remaining: {}, by_source: {:?}", pack.token_usage.total_tokens, pack.token_usage.budget_remaining, pack.token_usage.by_source);
-        println!();
-        println!("Model routing:");
-        println!("  tier: {}, model: {}, reasoning: {}", routing.tier, routing.model, routing.reasoning);
-        println!("  fallback chain: {:?}", coderun_router::fallback_chain(&routing.tier));
         println!();
         println!("Daemon URL probed: {} (if daemon running, this local preview matches daemon's BuildContext)", url);
         // Retrieval diagnostic
@@ -1660,12 +1656,7 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
-    // Check LiteLLM
-    print!("LiteLLM:         ");
-    {
-        let cfg = Config::load(&project_root).unwrap_or_default();
-        println!("✓ Configured ({} — tier routing heuristic + fallback chain, gateway probe on serve)", cfg.litellm.endpoint);
-    }
+    // LiteLLM removed — see docs/01-architecture/LLM_ROUTING_REMOVAL.md
     
     // Check RTK
     print!("RTK:             ");

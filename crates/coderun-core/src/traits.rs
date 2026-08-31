@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::ipc::{ContextPack, RoutingDecision, TaskRequest};
+use crate::ipc::{ContextPack, TaskRequest};
 use crate::config::Config;
 
 /// IContextBuilder — in-process | daemon | remote (spec §2 portability, ARCHITECTURE.md:209-241)
@@ -7,29 +7,10 @@ use crate::config::Config;
 /// Swappable behind this trait; concrete reason for Rust choice remains embedded tree-sitter crates.
 #[async_trait::async_trait]
 pub trait IContextBuilder: Send + Sync {
-    async fn build_context(&self, task: &TaskRequest) -> Result<(ContextPack, RoutingDecision)>;
+    async fn build_context(&self, task: &TaskRequest) -> Result<ContextPack>;
     fn to_yaml(pack: &ContextPack) -> Result<String>
     where
         Self: Sized;
-}
-
-/// IModelGateway — default LiteLLM (spec §2, §3 Model Router)
-/// Unifies 100+ providers behind one shape; routing/fallback built in.
-/// Heuristic tiering stays deterministic; no LLM call decides tier.
-pub trait IModelGateway: Send + Sync {
-    #[allow(clippy::too_many_arguments)]
-    fn select_model(
-        &self,
-        message: &str,
-        file_count: usize,
-        symbol_count: usize,
-        knowledge_entries: usize,
-        skills_matched: usize,
-        token_count: usize,
-        model_override: Option<&str>,
-    ) -> RoutingDecision;
-
-    fn tier_to_model(&self, tier: &str) -> String;
 }
 
 /// IWorkflowEngine — required since v0.6.0 (SQLite+Litestream, native async)

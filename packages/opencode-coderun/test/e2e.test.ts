@@ -2,13 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import { callCoderunDaemon } from "../src/index";
 
 /**
- * Canonical E2E: OpenCode → Coderun (UDS/HTTP fallback) → BuildContext → Router → LiteLLM → response
- * Uses mocked fetch to simulate daemon that would have done BuildContext+Router+LiteLLM.
+ * Canonical E2E: OpenCode → Coderun (UDS/HTTP fallback) → BuildContext → response
+ * Uses mocked fetch to simulate daemon that does BuildContext (deterministic retrieval only, no Router/LiteLLM — see LLM_ROUTING_REMOVAL.md).
  * Other adapters (Cursor, Gemini) are gated behind TIER2 flag — see adapters/tier2/README.md
  */
 
-describe("E2E: OpenCode → Coderun → BuildContext → Router → LiteLLM", () => {
-  it("enriches message via BuildContext + Router + LiteLLM (mocked daemon)", async () => {
+describe("E2E: OpenCode → Coderun → BuildContext", () => {
+  it("enriches message via BuildContext (mocked daemon, no Router/LiteLLM)", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -26,7 +26,7 @@ describe("E2E: OpenCode → Coderun → BuildContext → Router → LiteLLM", ()
             provenance: [{ path: "src/auth.rs", source: "code", retriever: "tantivy", score: 0.92, reason: "bm25" }],
             metadata: { task_hash: "abc123", correlation_id: "req_e2e123", cache_order: ["behavioral_skills","docs_context","code_context"], repository_state: "deadbeef12345678" }
           },
-          routing_decision: { model: "gpt-4o", tier: "balanced", scores: { structural: 0.4, semantic: 0.6, scope: 0.5, final_score: 0.52 }, reasoning: "balanced" }
+          // routing_decision removed — see LLM_ROUTING_REMOVAL.md (BuildContext is ContextPack only)
         },
         latency_ms: 42,
       }),
@@ -40,8 +40,6 @@ describe("E2E: OpenCode → Coderun → BuildContext → Router → LiteLLM", ()
     expect(resp!.payload.type).toBe("RewrittenMessage");
     expect(resp!.payload.rewritten).toContain("Context:");
     expect((resp as any).payload.context_pack.provenance[0].score).toBeCloseTo(0.92);
-    expect((resp as any).payload.routing_decision.tier).toBe("balanced");
-    expect((resp as any).payload.routing_decision.model).toBe("gpt-4o");
     expect(mockFetch).toHaveBeenCalledWith("http://127.0.0.1:9527/hook", expect.objectContaining({ method: "POST" }));
   });
 

@@ -17,9 +17,6 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub context: ContextConfig,
     pub model: ModelConfig,
-    pub routing: RoutingConfig,
-    pub models: ModelsConfig,
-    pub litellm: LiteLlmConfig,
     pub rtk: RtkConfig,
     pub logging: LoggingConfig,
 }
@@ -78,33 +75,6 @@ pub struct ModelConfig {
     pub default_tier: String,
     pub routing_enabled: bool,
     pub max_tokens_response: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RoutingConfig {
-    pub structural_weight: f64,
-    pub semantic_weight: f64,
-    pub scope_weight: f64,
-    pub fast_threshold: f64,
-    pub capable_threshold: f64,
-    // TASK-018: model names moved to [models] — no duplication here (ModelsConfig is sole source)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ModelsConfig {
-    pub fast: String,
-    pub balanced: String,
-    pub capable: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LiteLlmConfig {
-    pub endpoint: String,
-    pub timeout_ms: u64,
-    pub max_retries: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,39 +176,6 @@ impl Default for ModelConfig {
     }
 }
 
-impl Default for RoutingConfig {
-    fn default() -> Self {
-        Self {
-            structural_weight: 0.3,
-            semantic_weight: 0.4,
-            scope_weight: 0.3,
-            fast_threshold: 0.3,
-            capable_threshold: 0.7,
-        }
-    }
-}
-
-impl Default for ModelsConfig {
-    fn default() -> Self {
-        // TASK-018: separate model config from routing logic — [models] defines actual models, routing chooses tier
-        Self {
-            fast: "gpt-4o-mini".to_string(),
-            balanced: "gpt-4o".to_string(),
-            capable: "o1".to_string(),
-        }
-    }
-}
-
-impl Default for LiteLlmConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: "http://localhost:4000".to_string(),
-            timeout_ms: 30000,
-            max_retries: 3,
-        }
-    }
-}
-
 impl Default for RtkConfig {
     fn default() -> Self {
         Self {
@@ -325,9 +262,6 @@ impl Config {
         self.skills = other.skills;
         self.context = other.context;
         self.model = other.model;
-        self.routing = other.routing;
-        self.models = other.models;
-        self.litellm = other.litellm;
         self.rtk = other.rtk;
         self.logging = other.logging;
     }
@@ -361,9 +295,7 @@ impl Config {
                 self.context.max_files = n;
             }
         }
-        if let Ok(val) = std::env::var("CODERUN_LITELLM_URL") {
-            self.litellm.endpoint = val;
-        }
+        // CODERUN_LITELLM_URL removed with LiteLLM — see LLM_ROUTING_REMOVAL.md
     }
 
     /// Validate the configuration
@@ -432,30 +364,6 @@ impl Config {
                     "must be one of: {}",
                     valid_tiers.join(", ")
                 ),
-            }
-            .into());
-        }
-
-        // Routing weights must sum to ~1.0
-        let weight_sum = self.routing.structural_weight
-            + self.routing.semantic_weight
-            + self.routing.scope_weight;
-        if (weight_sum - 1.0).abs() > 0.01 {
-            return Err(ConfigError::InvalidValue {
-                field: "routing.*_weight".to_string(),
-                message: format!(
-                    "routing weights must sum to 1.0, got {}",
-                    weight_sum
-                ),
-            }
-            .into());
-        }
-
-        // Thresholds
-        if self.routing.fast_threshold >= self.routing.capable_threshold {
-            return Err(ConfigError::InvalidValue {
-                field: "routing.*_threshold".to_string(),
-                message: "fast_threshold must be less than capable_threshold".to_string(),
             }
             .into());
         }
@@ -556,23 +464,6 @@ default_tier = "fast"
 routing_enabled = false
 max_tokens_response = 2048
 
-[routing]
-structural_weight = 0.5
-semantic_weight = 0.3
-scope_weight = 0.2
-fast_threshold = 0.2
-capable_threshold = 0.8
-
-[models]
-fast = "gpt-4o-mini"
-balanced = "gpt-4o"
-capable = "o1"
-
-[litellm]
-endpoint = "http://custom:4000"
-timeout_ms = 10000
-max_retries = 1
-
 [rtk]
 enabled = false
 max_output_tokens = 4000
@@ -620,25 +511,6 @@ retention_days = 3
         config.model.default_tier = "ultra".to_string();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("model.default_tier"));
-    }
-
-    #[test]
-    fn test_validation_fails_weight_sum() {
-        let mut config = Config::default();
-        config.routing.structural_weight = 0.5;
-        config.routing.semantic_weight = 0.5;
-        config.routing.scope_weight = 0.5; // sum = 1.5
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("routing.*_weight"));
-    }
-
-    #[test]
-    fn test_validation_fails_threshold_order() {
-        let mut config = Config::default();
-        config.routing.fast_threshold = 0.8;
-        config.routing.capable_threshold = 0.3;
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("fast_threshold"));
     }
 
     #[test]
