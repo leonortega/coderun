@@ -87,3 +87,11 @@ coderun-optimizer = { path = "crates/coderun-optimizer" }
 coderun-daemon = { path = "crates/coderun-daemon" }
 coderun-cli = { path = "crates/coderun-cli" }
 # future/workflow — opt-in only: coderun-workflow = { path = "crates/coderun-workflow" }
+
+# ── Disk space optimization ────────────────────────────────────────────────
+[profile.dev]
+debug = false          # no DWARF debug info (saves ~30-50% of target/)
+incremental = false    # no incremental cache (saves ~2-4 GB, slightly slower rebuilds)
+
+[profile.dev.package."*"]
+debug = false          # no debug info for dependencies either
