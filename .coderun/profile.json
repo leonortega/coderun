@@ -7,7 +7,7 @@
     "cargo",
     "rust-workspace"
   ],
-  "generated_at_unix": 1787776126,
+  "generated_at_unix": 1788300843,
   "git_branch": "dev",
   "important_dirs": [
     "crates",
@@ -18,17 +18,17 @@
     "deploy"
   ],
   "index": {
-    "dependency_edges": 857,
-    "files_indexed": 341,
-    "symbols_extracted": 1713
+    "dependency_edges": 931,
+    "files_indexed": 153,
+    "symbols_extracted": 1377
   },
   "languages": [
     {
-      "files": 47,
+      "files": 60,
       "name": "rust"
     },
     {
-      "files": 33,
+      "files": 32,
       "name": "markdown"
     },
     {
@@ -36,32 +36,32 @@
       "name": "toml"
     },
     {
-      "files": 14,
+      "files": 12,
       "name": "json"
+    },
+    {
+      "files": 10,
+      "name": "shell"
+    },
+    {
+      "files": 8,
+      "name": "typescript"
     },
     {
       "files": 8,
       "name": "yaml"
     },
     {
-      "files": 7,
-      "name": "shell"
-    },
-    {
-      "files": 7,
-      "name": "typescript"
-    },
-    {
       "files": 6,
       "name": "sql"
     },
     {
-      "files": 3,
+      "files": 4,
       "name": "python"
     },
     {
       "files": 2,
-      "name": "javascript"
+      "name": "yaml"
     }
   ],
   "project": "coderun",

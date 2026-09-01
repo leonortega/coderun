@@ -150,6 +150,22 @@ enum WorkflowAction {
 // ── Main ────────────────────────────────────────────────────────────────
 
 fn main() {
+    // Initialize tracing when CODERUN_PROFILE=1 — shows phase timing from tracing::info!
+    if std::env::var("CODERUN_PROFILE").ok().as_deref() == Some("1") {
+        use tracing_subscriber::EnvFilter;
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+        match tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .with_writer(std::io::stderr)
+            .try_init()
+        {
+            Ok(()) => eprintln!("[tracing] subscriber initialized"),
+            Err(e) => eprintln!("[tracing] subscriber init failed: {}", e),
+        }
+    }
+
     let cli = Cli::parse();
     
     let result = match cli.command {
@@ -1173,7 +1189,7 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         if pack.behavioral_skills.is_empty() { println!("  (none — deduped or no match)"); } else { println!("  {}", pack.behavioral_skills.lines().next().unwrap_or("").trim()); if pack.behavioral_skills.contains("FROZEN PREFIX END") { println!("  [frozen-prefix boundary present ✓]"); } }
         println!();
         println!("Knowledge entries (docs_context):");
-        if pack.docs_context.is_empty() { println!("  (none)"); } else { for line in pack.docs_context.lines().take(5) { println!("  {}", line); } }
+        if pack.docs_context.is_empty() { println!("  (none)"); } else { for line in pack.docs_context.lines().take(20) { println!("  {}", line); } }
         println!();
         println!("Code files (code_context):");
         if pack.code_context.is_empty() { println!("  (none — no index or no match)"); } else { for line in pack.code_context.lines().take(100) { println!("  {}", line); } }

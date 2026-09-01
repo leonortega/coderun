@@ -188,10 +188,10 @@ fn integration_find_functions() {
         let patterns = QueryPlanner::plan(&sq);
         if patterns.is_empty() { continue; }
 
-        let mut total_matches = 0;
+        let mut _total_matches = 0;
         for pat in &patterns {
             if let Ok(result) = adapter.search(&pat.pattern, &tf.content) {
-                total_matches += result.match_count();
+                _total_matches += result.match_count();
             }
         }
 

@@ -164,10 +164,10 @@ impl RepositoryIntelligence {
     /// Index the repository (full or incremental) — wires tantivy BM25 in-process, incremental + MkDocs ingestion (v0.5.0)
     pub fn index_repository(&mut self) -> Result<IndexStats, String> {
         let start = Instant::now();
-        let mut files_indexed = 0;
-        let mut symbols_extracted = 0;
-        let mut files_skipped = 0;
-        let mut files_deleted = 0;
+        let mut files_indexed = 0usize;
+        let mut symbols_extracted = 0usize;
+        let mut files_skipped = 0usize;
+        let mut files_deleted = 0usize;
 
         // Open tantivy index (MmapDirectory, memory-mapped per spec §3) — optional, never fails indexing
         let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open(&default_index_path()).ok();
@@ -186,11 +186,38 @@ impl RepositoryIntelligence {
 
         let mut seen_paths = std::collections::HashSet::new();
 
-        // Phase1: begin batched transaction — avoids fsync per row (10-20x win for 63k)
-        let batch_enabled = self.db.begin_batch().is_ok();
-        let mut batch_ops: usize = 0;
+        // ── Phase 1: Walk + read + hash — collect file jobs (single loop, no parallel I/O) ──
+        // Single-loop walk+read is faster than parallel I/O for small files on Windows.
+        // DB writes are deferred to a batch after the walk to avoid SQLite contention.
+        struct FileJob {
+            path_str: String,
+            content: String,
+            #[allow(dead_code)]
+            hash: String,
+            language: Option<String>,
+            file_class: FileClass,
+            file_changed: bool,
+            is_new: bool,
+            existing_file_id: Option<i64>,
+        }
 
-        // Walk the directory tree
+        // Deferred DB writes — batched after the walk to avoid per-file SQLite overhead
+        struct DeferredInsert {
+            path: String,
+            hash: String,
+            size: i64,
+            language: Option<String>,
+        }
+        struct DeferredUpdate {
+            file_id: i64,
+            hash: String,
+            size: i64,
+        }
+        let mut deferred_inserts: Vec<DeferredInsert> = Vec::new();
+        let mut deferred_updates: Vec<DeferredUpdate> = Vec::new();
+
+        let mut file_jobs: Vec<FileJob> = Vec::new();
+
         for entry in self.walk_directory(&self.repo_path)? {
             let path = entry;
             let path_str = path.strip_prefix(&self.repo_path)
@@ -222,7 +249,7 @@ impl RepositoryIntelligence {
                 continue;
             }
 
-            // Phase2: mtime+size shortcut — skip reading unchanged files on warm re-index (most of 63k)
+            // mtime+size shortcut — skip reading unchanged files on warm re-index
             if let Some(rec) = existing_meta.get(&path_str) {
                 if is_file_unchanged_fast(&path, rec) {
                     files_indexed += 1; // counted but no I/O
@@ -230,14 +257,14 @@ impl RepositoryIntelligence {
                 }
             }
 
-            // Check binary by extension only before read (cheap) — full content check after read
+            // Check binary by extension only before read (cheap)
             if is_binary_extension(&path) {
                 debug!(path = %path_str, "Skipping binary file (extension)");
                 files_skipped += 1;
                 continue;
             }
 
-            // Compute content hash
+            // Read file content
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -247,7 +274,7 @@ impl RepositoryIntelligence {
                 }
             };
 
-            // Phase2: content-based binary detection (null bytes) — no extra fs::read
+            // Content-based binary detection (null bytes)
             if is_content_binary(&content) {
                 debug!(path = %path_str, "Skipping binary file (content)");
                 files_skipped += 1;
@@ -255,62 +282,183 @@ impl RepositoryIntelligence {
             }
 
             let hash = compute_hash(&content);
+            let size = content.len() as i64;
 
-            // Check if file has changed (incremental)
-            let file_changed = if let Some(&(id, ref existing_hash)) = existing_hashes.get(&path_str) {
+            // Determine file_changed + is_new, defer DB writes
+            let (file_changed, is_new, existing_file_id) = if let Some(&(id, ref existing_hash)) = existing_hashes.get(&path_str) {
                 if *existing_hash == hash {
-                    false
+                    (false, false, Some(id))
                 } else {
-                    // File changed — update
-                    let size = content.len() as i64;
-                    self.db.update_file(id, &hash, size)?;
-                    true
+                    // File changed — defer DB update
+                    deferred_updates.push(DeferredUpdate { file_id: id, hash: hash.clone(), size });
+                    (true, false, Some(id))
                 }
             } else {
-                // New file — insert
-                let size = content.len() as i64;
-                self.db.insert_file(&path_str, &hash, size, language.as_deref())?;
-                true
+                // New file — defer DB insert (file_id assigned later)
+                deferred_inserts.push(DeferredInsert { path: path_str.clone(), hash: hash.clone(), size, language: language.clone() });
+                (true, true, None) // existing_file_id filled in after batch insert
             };
 
-            // Extract symbols once (tree-sitter + fallback) — reused for DB + tantivy (Phase1 dedup)
-            // V1: docs/config are lexical only — no Tree-sitter needed (first-class Markdown indexing)
-            let extracted = if matches!(file_class, FileClass::Documentation | FileClass::Config) {
-                Vec::new()
-            } else {
-                extract_symbols(&content, &self.patterns, language.as_deref())
-            };
-            let sym_names: Vec<String> = extracted.iter().map(|s| s.name.clone()).collect();
-            let sym_kinds: Vec<String> = extracted.iter().map(|s| s.kind.clone()).collect();
+            file_jobs.push(FileJob {
+                path_str,
+                content,
+                hash,
+                language,
+                file_class,
+                file_changed,
+                is_new,
+                existing_file_id,
+            });
+        }
 
-            let file_id = self.db.get_file(&path_str)?
-                .map(|f| f.id)
-                .unwrap_or(0);
+        let phase1_walk_ms = start.elapsed().as_millis() as u64;
+        info!(file_jobs = file_jobs.len(), deferred_inserts = deferred_inserts.len(), deferred_updates = deferred_updates.len(), phase1_walk_ms, "Phase1: walk + read complete");
 
-            if file_id > 0 {
-                if file_changed {
-                    // V1 minimal: SQLite symbols kept for legacy search_symbols fallback only;
-                    // retrieval uses tantivy symbol_name field (field boosts) per V1_MINIMAL_STACK_PLAN.md:3
-                    // SQLite is metadata-only (files, index_state, config) — not a second search engine.
-                    for symbol in &extracted {
-                        self.db.insert_symbol(
-                            file_id,
-                            &symbol.name,
-                            &symbol.kind,
-                            symbol.line_start,
-                            symbol.line_end,
-                            None,
-                        )?;
+        // Deferred DB batch — insert all new files, then update changed files
+        // Batched in a single transaction to avoid per-file SQLite overhead
+        let t_db = Instant::now();
+        let batch_ok = self.db.begin_batch().is_ok();
+
+        // Insert new files and map path→file_id for deferred assignment
+        let mut new_file_ids: HashMap<String, i64> = HashMap::new();
+        for ins in &deferred_inserts {
+            if let Ok(fid) = self.db.insert_file(&ins.path, &ins.hash, ins.size, ins.language.as_deref()) {
+                new_file_ids.insert(ins.path.clone(), fid);
+            }
+        }
+
+        // Update changed files
+        for upd in &deferred_updates {
+            let _ = self.db.update_file(upd.file_id, &upd.hash, upd.size);
+        }
+
+        if batch_ok {
+            let _ = self.db.commit_batch();
+        }
+
+        // Assign existing_file_id for new files now that we have the IDs
+        for job in file_jobs.iter_mut() {
+            if job.existing_file_id.is_none() && job.is_new {
+                job.existing_file_id = new_file_ids.get(&job.path_str).copied();
+            }
+        }
+
+        let db_ms = t_db.elapsed().as_millis() as u64;
+        let phase1_ms = start.elapsed().as_millis() as u64;
+        info!(file_jobs = file_jobs.len(), db_ms, phase1_ms, "Phase1: DB batch complete");
+
+        // ── Phase 2: Parallel symbol extraction (CPU-bound tree-sitter parsing) ──
+        // `extract_symbols` is pure (content + patterns + language → symbols), safe to parallelize.
+        let thread_count = std::env::var("CODERUN_INDEX_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4)
+            .clamp(1, 16);
+
+        struct ExtractedResult {
+            sym_names: Vec<String>,
+            sym_kinds: Vec<String>,
+            extracted_count: usize,
+        }
+
+        let t_extract = Instant::now();
+        let extraction_results: Vec<ExtractedResult>;
+
+        if file_jobs.len() < 100 || thread_count == 1 {
+            // Small repo or single-thread: sequential extraction (no thread overhead)
+            extraction_results = file_jobs.iter().map(|job| {
+                let extracted = if matches!(job.file_class, FileClass::Documentation | FileClass::Config) {
+                    Vec::new()
+                } else {
+                    extract_symbols(&job.content, &self.patterns, job.language.as_deref())
+                };
+                let count = extracted.len();
+                ExtractedResult {
+                    sym_names: extracted.iter().map(|s| s.name.clone()).collect(),
+                    sym_kinds: extracted.iter().map(|s| s.kind.clone()).collect(),
+                    extracted_count: count,
+                }
+            }).collect();
+        } else {
+            // Large repo: parallel extraction via scoped threads
+            // Each thread gets a slice of file_jobs and extracts symbols independently.
+            // Results are collected in order (same index as file_jobs).
+            let chunk_size = (file_jobs.len() / thread_count).max(1);
+            let patterns = &self.patterns;
+
+            extraction_results = std::thread::scope(|s| {
+                let handles: Vec<_> = file_jobs.chunks(chunk_size).map(|chunk| {
+                    s.spawn(move || {
+                        chunk.iter().map(|job| {
+                            let extracted = if matches!(job.file_class, FileClass::Documentation | FileClass::Config) {
+                                Vec::new()
+                            } else {
+                                extract_symbols(&job.content, patterns, job.language.as_deref())
+                            };
+                            let count = extracted.len();
+                            ExtractedResult {
+                                sym_names: extracted.iter().map(|s| s.name.clone()).collect(),
+                                sym_kinds: extracted.iter().map(|s| s.kind.clone()).collect(),
+                                extracted_count: count,
+                            }
+                        }).collect::<Vec<_>>()
+                    })
+                }).collect();
+
+                let mut results = Vec::with_capacity(file_jobs.len());
+                for handle in handles {
+                    if let Ok(chunk_results) = handle.join() {
+                        results.extend(chunk_results);
                     }
                 }
-                symbols_extracted += extracted.len();
+                results
+            });
+        }
+
+        let extract_ms = t_extract.elapsed().as_millis() as u64;
+        info!(
+            files = file_jobs.len(),
+            threads = thread_count.min(file_jobs.len()),
+            extract_ms,
+            "Phase2: parallel symbol extraction complete"
+        );
+
+        // ── Phase 3: Sequential DB writes + tantivy upsert ──
+        // DB and tantivy writer need &mut — cannot parallelize. Sequential but fast.
+        let t_write = Instant::now();
+        let batch_enabled = self.db.begin_batch().is_ok();
+        let mut batch_ops: usize = 0;
+
+        for (job, extract_result) in file_jobs.iter().zip(extraction_results.iter()) {
+            let file_id = job.existing_file_id.unwrap_or(0);
+
+            if file_id > 0 && job.file_changed {
+                // Insert symbols into SQLite for legacy search_symbols fallback
+                // retrieval uses tantivy symbol_name field — SQLite is metadata-only
+                for (name, kind) in extract_result.sym_names.iter().zip(extract_result.sym_kinds.iter()) {
+                    let _ = self.db.insert_symbol(
+                        file_id,
+                        name,
+                        kind,
+                        0, // line_start (not critical for metadata-only SQLite)
+                        0, // line_end
+                        None,
+                    );
+                }
+                symbols_extracted += extract_result.extracted_count;
+            } else if file_id > 0 {
+                // File not changed but symbols may have been extracted for tantivy
+                symbols_extracted += extract_result.extracted_count;
             }
 
-            // Upsert into tantivy BM25 index (ALWAYS — tantivy may have been cleared)
+            // Upsert into tantivy BM25 index
+            // Skip delete_document for brand-new files — nothing to delete, saves a BooleanQuery per file
             if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                let _ = idx.delete_document(writer, &path_str, &self.repository_id);
-                let lang_str = language.as_deref().unwrap_or("text");
-                let file_class_str = match &file_class {
+                if !job.is_new {
+                    let _ = idx.delete_document(writer, &job.path_str, &self.repository_id);
+                }
+                let lang_str = job.language.as_deref().unwrap_or("text");
+                let file_class_str = match &job.file_class {
                     FileClass::Source => "Source",
                     FileClass::Test => "Test",
                     FileClass::Config => "Config",
@@ -322,7 +470,7 @@ impl RepositoryIntelligence {
                     FileClass::Stylesheet => "Stylesheet",
                     FileClass::Unknown => "Unknown",
                 };
-                let _ = idx.add_document(writer, &path_str, &content, lang_str, &sym_names, &sym_kinds, &self.repository_id, file_class_str);
+                let _ = idx.add_document(writer, &job.path_str, &job.content, lang_str, &extract_result.sym_names, &extract_result.sym_kinds, &self.repository_id, file_class_str);
             }
 
             files_indexed += 1;
@@ -333,28 +481,14 @@ impl RepositoryIntelligence {
                 let _ = self.db.commit_batch();
                 let _ = self.db.begin_batch();
                 batch_ops = 0;
-                // Tantivy intermediate commit every 1000 docs (heap stays bounded)
                 if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
                     let _ = idx.commit(writer);
-                    // re-init writer after commit? tantivy writer remains usable after commit, no re-create needed
                 }
             }
-
-            // Log progress every 100 files
-            if files_indexed % 100 == 0 {
-                info!(
-                    files_indexed = files_indexed,
-                    symbols = symbols_extracted,
-                    "Indexing progress"
-                );
-            }
-            // Phase4: per-1000 throughput log
-            if files_indexed % 1000 == 0 {
-                let elapsed = start.elapsed().as_millis() as u64;
-                let fps = if elapsed > 0 { (files_indexed as u64 * 1000) / elapsed } else { 0 };
-                info!(files_indexed, elapsed_ms = elapsed, files_per_sec = fps, "Indexing throughput");
-            }
         }
+
+        let write_ms = t_write.elapsed().as_millis() as u64;
+        info!(files = files_indexed, write_ms, "Phase3: DB + tantivy write complete");
 
         // Remove deleted files from database (and tantivy)
         for path in existing_hashes.keys() {
@@ -383,10 +517,6 @@ impl RepositoryIntelligence {
             let _ = idx.commit(writer);
         }
 
-        // V1 minimal: MkDocs ingestion removed per V1_MINIMAL_STACK_PLAN.md:2.4
-        // docs/*.md remains as plain markdown for agent `read`; not ingested into tantivy/KnowledgeHub.
-        // (was: walk docs/**/*.md → store_knowledge(category="docs") + tantivy docs:… idempotent upsert)
-
         let duration_ms = start.elapsed().as_millis() as u64;
 
         let stats = IndexStats {
@@ -410,6 +540,9 @@ impl RepositoryIntelligence {
             files_skipped = files_skipped,
             files_deleted = files_deleted,
             duration_ms = duration_ms,
+            phase1_ms = phase1_ms,
+            extract_ms = extract_ms,
+            write_ms = write_ms,
             "Repository indexing complete"
         );
 

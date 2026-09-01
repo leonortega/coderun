@@ -246,12 +246,17 @@ impl ContextEngine {
             // Lazy snippet extraction for Top-K only (preserves prior behavior)
             let line_start = ev.line.saturating_sub(5);
             let line_end = ev.line + max_lines.min(15);
-            if let Ok(content) = repo_intel.get_file_content(&path_str, Some((line_start, line_end))) {
-                let entry = format!("// {}:{}\n{}", path_str, ev.line, content);
-                if is_documentation_path(&path_str) {
-                    docs_results.push(entry);
-                } else {
-                    code_results.push(entry);
+            match repo_intel.get_file_content(&path_str, Some((line_start, line_end))) {
+                Ok(content) => {
+                    let entry = format!("// {}:{}\n{}", path_str, ev.line, content);
+                    if is_documentation_path(&path_str) {
+                        docs_results.push(entry);
+                    } else {
+                        code_results.push(entry);
+                    }
+                }
+                Err(e) => {
+                    debug!(path = %path_str, error = %e, "Failed to read file for snippet");
                 }
             }
         }
@@ -571,8 +576,8 @@ impl ContextEngine {
         token_usage_by_source.insert("behavioral_skills".to_string(), skills_used);
         total_tokens += skills_used;
 
-        // Section 2: docs_context (15% budget)
-        let docs_budget = (*token_budget as f64 * 0.15) as usize;
+        // Section 2: docs_context (25% budget)
+        let docs_budget = (*token_budget as f64 * 0.25) as usize;
         let docs_tokens = count_tokens(knowledge_context);
         let (docs_content, docs_used) = if docs_tokens <= docs_budget {
             (knowledge_context.to_string(), docs_tokens)

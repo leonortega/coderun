@@ -65,6 +65,33 @@ if ($running) {
 Info "cargo build $($buildArgs -join ' ') ..."
 & cargo build @buildArgs
 if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }
+
+# Ensure binaries end up in $Root/target/release/ (or debug/) so the installer can find them.
+# Cargo may use a global target dir (e.g. ~/.cargo/target) when CARGO_TARGET_DIR or
+# [build] target is set in .cargo/config.toml. Detect via cargo metadata and copy if needed.
+$expectedDir = Join-Path $Root "target\$mode"
+if ($NoRelease) { $expectedDir = Join-Path $Root "target\debug" }
+$coderunExpected = Join-Path $expectedDir "coderun.exe"
+if (-not (Test-Path $coderunExpected)) {
+  try {
+    $metaJson = & cargo metadata --no-deps --format-version 1 2>$null | Out-String
+    if ($LASTEXITCODE -eq 0 -and $metaJson) {
+      $cargoTargetDir = ($metaJson | ConvertFrom-Json).target_directory
+      if ($cargoTargetDir -and (Test-Path $cargoTargetDir)) {
+        $cargoModeDir = Join-Path $cargoTargetDir $mode
+        $srcCoderun = Join-Path $cargoModeDir "coderun.exe"
+        $srcDaemon = Join-Path $cargoModeDir "coderun-daemon.exe"
+        if (Test-Path $srcCoderun) {
+          New-Item -ItemType Directory -Force -Path $expectedDir | Out-Null
+          Copy-Item -LiteralPath $srcCoderun -Destination $expectedDir -Force
+          if (Test-Path $srcDaemon) { Copy-Item -LiteralPath $srcDaemon -Destination $expectedDir -Force }
+          Info "Copied binaries from cargo target dir ($cargoModeDir) -> $expectedDir"
+        }
+      }
+    }
+  } catch {}
+}
+
 if ($NoRelease) {
   Ok "target/debug/coderun.exe + coderun-daemon.exe"
 } else {

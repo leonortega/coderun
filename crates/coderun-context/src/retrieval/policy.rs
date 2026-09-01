@@ -79,10 +79,10 @@ impl FileClassWeights {
     pub fn for_intent(intent: QueryIntent) -> Self {
         match intent {
             QueryIntent::Procedural => Self {
-                documentation: 2.0,
+                documentation: 2.5,
                 config: 1.4,
                 source: 0.8,
-                test: 0.4,
+                test: 0.25,
                 ..Default::default()
             },
             QueryIntent::Debugging => Self {
@@ -465,8 +465,8 @@ mod tests {
         let p = RetrievalPolicy::default();
         let proc_docs = p.intent_file_class_boost("Documentation", QueryIntent::Procedural);
         let proc_test = p.intent_file_class_boost("Test", QueryIntent::Procedural);
-        assert!((proc_docs - 2.0).abs() < 1e-6);
-        assert!((proc_test - 0.4).abs() < 1e-6);
+        assert!((proc_docs - 2.5).abs() < 1e-6);
+        assert!((proc_test - 0.25).abs() < 1e-6);
         // debugging flips
         let dbg_src = p.intent_file_class_boost("Source", QueryIntent::Debugging);
         let dbg_test = p.intent_file_class_boost("Test", QueryIntent::Debugging);

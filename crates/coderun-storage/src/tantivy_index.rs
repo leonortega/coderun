@@ -144,9 +144,7 @@ const STOP_WORDS: &[&str] = &[
     "each", "few", "more", "most", "other", "some", "such", "no", "nor",
     "not", "only", "own", "same", "so", "than", "too", "very", "just",
     "and", "but", "or", "if", "while", "that", "this", "it", "its",
-    "what", "which", "who", "whom", "where", "implemented", "find",
-    "show", "get", "set", "make", "create", "update", "delete", "remove",
-    "add", "list", "type", "the", "in", "is", "it",
+    "what", "which", "who", "whom", "implemented",
 ];
 
 /// Split PascalCase/camelCase identifiers into constituent words.
@@ -455,6 +453,25 @@ impl TantivyIndex {
         String::new()
     }
 
+    /// Extract all Markdown headings from content for better BM25 lexical matching.
+    /// For Documentation files, headings like "#### Create a new package" should be
+    /// searchable in the content field (not just the title field), so queries like
+    /// "how to add" can match "Create a new package" via "create" + "package" terms.
+    fn extract_all_markdown_headings(content: &str) -> String {
+        let mut headings = Vec::new();
+        for line in content.lines() {
+            let t = line.trim();
+            if t.starts_with('#') {
+                // Strip all leading '#' characters and trim
+                let stripped = t.trim_start_matches('#').trim();
+                if !stripped.is_empty() {
+                    headings.push(stripped.to_string());
+                }
+            }
+        }
+        headings.join(" ")
+    }
+
     /// Add a document to the index, stamped with its repository scope (TASK-030)
     pub fn add_document(
         &self,
@@ -485,8 +502,22 @@ impl TantivyIndex {
         file_class: &str,
         title: &str,
     ) -> Result<(), String> {
+        // For Documentation files: prepend all markdown headings to content so BM25
+        // can match heading text (e.g., "Create a new package") in the content field,
+        // not just the title field. This fixes procedural queries like "how to add"
+        // where the query terms map to heading words like "create" + "package".
+        let effective_content = if file_class == "Documentation" && !title.is_empty() {
+            let headings = Self::extract_all_markdown_headings(content);
+            if headings.is_empty() {
+                content.to_string()
+            } else {
+                format!("{} {}", headings, content)
+            }
+        } else {
+            content.to_string()
+        };
         // Preprocess: split PascalCase in content and symbols for better BM25 matching
-        let processed_content = preprocess_code_content(content);
+        let processed_content = preprocess_code_content(&effective_content);
         // Path-aware tokenization: add path segments as searchable terms
         let path_tokens = Self::tokenize_path(path);
         let symbols_with_splits: Vec<String> = symbols.iter().flat_map(|s| {

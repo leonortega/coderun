@@ -257,6 +257,28 @@ if ($SkipBuild) { Info "Skipping build check (--SkipBuild)" }
 Info "Checking prebuilt coderun..."
 $prebuilt = Join-Path $Root "target\release\coderun.exe"
 $prebuiltDaemon = Join-Path $Root "target\release\coderun-daemon.exe"
+# Fallback: cargo may use a global target dir (e.g. ~/.cargo/target) when
+# CARGO_TARGET_DIR or [build] target is set in .cargo/config.toml.
+# Detect via cargo metadata and copy binaries to repo-local target/release/.
+if (-not (Test-Path $prebuilt)) {
+  try {
+    $metaJson = & cargo metadata --no-deps --format-version 1 2>$null | Out-String
+    if ($LASTEXITCODE -eq 0 -and $metaJson) {
+      $cargoTargetDir = ($metaJson | ConvertFrom-Json).target_directory
+      if ($cargoTargetDir -and (Test-Path $cargoTargetDir)) {
+        $cargoReleaseDir = Join-Path $cargoTargetDir "release"
+        $srcCoderun = Join-Path $cargoReleaseDir "coderun.exe"
+        $srcDaemon = Join-Path $cargoReleaseDir "coderun-daemon.exe"
+        if (Test-Path $srcCoderun) {
+          New-Item -ItemType Directory -Force -Path (Split-Path $prebuilt) | Out-Null
+          Copy-Item -LiteralPath $srcCoderun -Destination $prebuilt -Force
+          if (Test-Path $srcDaemon) { Copy-Item -LiteralPath $srcDaemon -Destination $prebuiltDaemon -Force }
+          Info "Copied binaries from cargo target dir ($cargoReleaseDir) -> target/release/"
+        }
+      }
+    }
+  } catch {}
+}
 if (Test-Path $prebuilt) { Ok "coderun at target/release/coderun.exe" } else { Warn "coderun binary not found at target/release/coderun.exe - build manually: cargo build --release"; Fail "prebuilt coderun.exe missing - expected at target/release/coderun.exe" }
 if (Test-Path $prebuiltDaemon) { Ok "coderun-daemon at target/release/coderun-daemon.exe" } else { Warn "coderun-daemon not found at target/release/coderun-daemon.exe" }
 

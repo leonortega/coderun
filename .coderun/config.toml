@@ -23,12 +23,12 @@ languages = [
     "markdown",
     "toml",
     "json",
-    "yaml",
     "shell",
     "typescript",
+    "yaml",
     "sql",
     "python",
-    "javascript",
+    "yaml",
 ]
 path = "~/.coderun/index/"
 
