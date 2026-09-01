@@ -7,7 +7,7 @@
     "cargo",
     "rust-workspace"
   ],
-  "generated_at_unix": 1788300843,
+  "generated_at_unix": 1788305187,
   "git_branch": "dev",
   "important_dirs": [
     "crates",
@@ -18,13 +18,13 @@
     "deploy"
   ],
   "index": {
-    "dependency_edges": 931,
-    "files_indexed": 153,
-    "symbols_extracted": 1377
+    "dependency_edges": 947,
+    "files_indexed": 154,
+    "symbols_extracted": 27
   },
   "languages": [
     {
-      "files": 60,
+      "files": 61,
       "name": "rust"
     },
     {
