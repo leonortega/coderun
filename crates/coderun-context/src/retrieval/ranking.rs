@@ -2,56 +2,66 @@
 //! Mirrors the ad-hoc steps in `lib.rs:268-393` + `tantivy_index.rs:86-130` + `647-652`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use crate::retrieval::evidence::{Evidence, EvidenceSource, RetrievalSignal};
 use crate::retrieval::policy::RetrievalPolicy;
 
 /// Stop words for symbol-match boosting — same list as `lib.rs:12-23`.
-const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "to", "of", "in", "for",
-    "on", "with", "at", "by", "from", "as", "into", "through", "during",
-    "before", "after", "above", "below", "between", "and", "but", "or",
-    "nor", "not", "so", "yet", "both", "either", "neither", "each",
-    "every", "all", "any", "few", "more", "most", "other", "some",
-    "such", "no", "only", "own", "same", "than", "too", "very",
-    "just", "because", "if", "when", "where", "how", "what", "which",
-    "who", "whom", "this", "that", "these", "those",
-];
+/// FIX #8: Use HashSet for O(1) lookup instead of O(n) slice scan.
+static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "can", "to", "of", "in", "for",
+        "on", "with", "at", "by", "from", "as", "into", "through", "during",
+        "before", "after", "above", "below", "between", "and", "but", "or",
+        "nor", "not", "so", "yet", "both", "either", "neither", "each",
+        "every", "all", "any", "few", "more", "most", "other", "some",
+        "such", "no", "only", "own", "same", "than", "too", "very",
+        "just", "because", "if", "when", "where", "how", "what", "which",
+        "who", "whom", "this", "that", "these", "those",
+    ].into_iter().collect()
+});
 
 /// Extract query tokens for symbol-match boosting — mirrors `lib.rs:269-296`.
+/// FIX #5: Reduced allocations by reusing buffers and avoiding unnecessary clones.
 pub fn query_tokens(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .flat_map(|t| {
-            let w = t.to_lowercase()
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_')
-                .collect::<String>();
-            if w.len() < 2 || STOP_WORDS.contains(&w.as_str()) {
-                return Vec::new();
+    let mut result: Vec<String> = Vec::with_capacity(16);
+    let mut seen: HashSet<String> = HashSet::with_capacity(16);
+    let mut current = String::with_capacity(32);
+
+    for t in query.split_whitespace() {
+        current.clear();
+        for c in t.chars() {
+            if c.is_alphanumeric() || c == '_' {
+                current.push(c.to_ascii_lowercase());
             }
-            let mut parts = vec![w.clone()];
-            let mut current = String::new();
-            let mut prev_lower = false;
-            for c in w.chars() {
-                if c.is_uppercase() && prev_lower && !current.is_empty() {
-                    parts.push(current.to_lowercase());
-                    current.clear();
+        }
+        if current.len() < 2 || STOP_WORDS.contains(current.as_str()) {
+            continue;
+        }
+        // Add the full word
+        if seen.insert(current.clone()) {
+            result.push(current.clone());
+        }
+        // Split PascalCase: "UserProfile" → ["user", "profile"]
+        let mut part_start = 0;
+        for (i, c) in current.char_indices() {
+            if i > 0 && c.is_uppercase() {
+                let part = &current[part_start..i];
+                if part.len() >= 2 && !STOP_WORDS.contains(part) && seen.insert(part.to_string()) {
+                    result.push(part.to_string());
                 }
-                current.push(c);
-                prev_lower = c.is_lowercase();
+                part_start = i;
             }
-            if !current.is_empty() && current != w {
-                parts.push(current.to_lowercase());
-            }
-            parts
-        })
-        .filter(|t| t.len() >= 2 && !STOP_WORDS.contains(&t.as_str()))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
+        }
+        let last_part = &current[part_start..];
+        if last_part != current.as_str() && last_part.len() >= 2 && !STOP_WORDS.contains(last_part) && seen.insert(last_part.to_string()) {
+            result.push(last_part.to_string());
+        }
+    }
+    result
 }
 
 /// Apply symbol-match boost to a candidate (content+path haystack).
@@ -116,14 +126,16 @@ pub fn merge_by_path(
 
 /// Add code-behind pairs (`.cshtml → .cshtml.cs`, `.razor → .razor.cs`).
 /// Mirrors `lib.rs:331-355`.
+/// FIX #3: O(n) with HashSet instead of O(n²) with repeated iter().any().
 pub fn add_code_behind(
     merged: &mut Vec<(String, f64)>,
     policy: &RetrievalPolicy,
 ) -> Vec<RetrievalSignal> {
+    // Build set of existing paths for O(1) lookup
+    let existing: HashSet<&String> = merged.iter().map(|(p, _)| p).collect();
+
     let pairs: Vec<(String, String)> = merged.iter().filter_map(|(path, _)| {
-        if path.ends_with(".cshtml") {
-            Some((path.clone(), format!("{}.cs", path)))
-        } else if path.ends_with(".razor") {
+        if path.ends_with(".cshtml") || path.ends_with(".razor") {
             Some((path.clone(), format!("{}.cs", path)))
         } else {
             None
@@ -131,15 +143,17 @@ pub fn add_code_behind(
     }).collect();
 
     let mut signals = Vec::new();
+    let mut additions: Vec<(String, f64)> = Vec::new();
     for (view_path, code_behind_path) in pairs {
-        if merged.iter().any(|(p, _)| *p == view_path) && !merged.iter().any(|(p, _)| *p == code_behind_path) {
+        if existing.contains(&view_path) && !existing.contains(&code_behind_path) {
             if let Some(view_score) = merged.iter().find(|(p, _)| *p == view_path).map(|(_, s)| *s) {
                 let new_score = view_score * policy.code_behind_multiplier as f64;
-                merged.push((code_behind_path.clone(), new_score));
+                additions.push((code_behind_path, new_score));
                 signals.push(RetrievalSignal::CodeBehindPenalty(policy.code_behind_multiplier));
             }
         }
     }
+    merged.extend(additions);
     signals
 }
 

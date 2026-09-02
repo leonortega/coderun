@@ -212,7 +212,7 @@ impl StructuralRetriever {
         let mut timed_out = false;
 
         // P1.6: Intent-aware file-class filtering
-        let intent = crate::retrieval::intent::detect_intent(&query.text);
+        let intent = query.intent();
         let skip_tests = !matches!(intent, crate::retrieval::intent::QueryIntent::Testing)
             && !query.text.to_lowercase().contains("test");
 
@@ -333,13 +333,15 @@ impl StructuralRetriever {
 
     /// Search a single file for structural matches.
     /// Returns None if the file should be skipped (binary, unsupported lang, test file).
+    /// FIX #9: timeout_ms is now documented as reserved for future per-file timeout.
+    /// Currently unused — per-file timeout is handled at the walk level via `deadline`.
     fn search_single_file(
         &self,
         path: &std::path::Path,
         path_str: &str,
         pattern: &StructuralPattern,
         skip_tests: bool,
-        _timeout_ms: u64,
+        _timeout_ms: u64, // Reserved: per-file timeout (currently using walk-level deadline)
     ) -> Option<Vec<Evidence>> {
         if is_skip_file(path_str) {
             return None;
@@ -361,20 +363,25 @@ impl StructuralRetriever {
             None => return None,
         };
 
-        let matches = match pattern {
-            StructuralPattern::AstGrepPattern(pat) => {
-                ast_grep_search(&adapter, pat, &content, path_str)
-            }
-            StructuralPattern::Inferred(kind) => {
-                let lang_name = ext_to_lang_pack_name(ext).unwrap_or("");
-                let patterns = kind.to_ast_grep_patterns(lang_name);
-                let mut all_results = Vec::new();
-                for pat in &patterns {
-                    all_results.extend(ast_grep_search(&adapter, pat, &content, path_str));
+        // FIX #2: Wrap in catch_unwind to prevent ast-grep panics from crashing retrieval.
+        // ast-grep can panic on ambiguous patterns (e.g., MultipleNode errors).
+        let matches = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match pattern {
+                StructuralPattern::AstGrepPattern(pat) => {
+                    ast_grep_search(&adapter, pat, &content, path_str)
                 }
-                all_results
+                StructuralPattern::Inferred(kind) => {
+                    let lang_name = ext_to_lang_pack_name(ext).unwrap_or("");
+                    let patterns = kind.to_ast_grep_patterns(lang_name);
+                    let mut all_results = Vec::new();
+                    for pat in &patterns {
+                        all_results.extend(ast_grep_search(&adapter, pat, &content, path_str));
+                    }
+                    all_results
+                }
             }
-        };
+        }))
+        .unwrap_or_default(); // On panic, return empty results (graceful degradation)
 
         if matches.is_empty() {
             None

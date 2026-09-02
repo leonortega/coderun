@@ -2,15 +2,17 @@
 //!
 //! Run with: `cargo test -p coderun-context -- --ignored bench_components --nocapture`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::retrieval::policy::RetrievalPolicy;
 use crate::retrieval::query::RetrievalQuery;
 use crate::retrieval::{CombinedRetriever, Retriever};
-use coderun_events::EventBus;
 use coderun_repo_intel::RepositoryIntelligence;
+#[allow(unused_imports)]
+use coderun_events::EventBus;
+#[allow(unused_imports)]
 use coderun_storage::Database;
 
 fn home_dir() -> PathBuf {
@@ -496,17 +498,17 @@ fn bench_components() {
         "├──────────────────┼────────────┼────────────┼────────────┼────────────────┤"
     );
 
-    let graph_avg_ms: f64 = graph_results.iter().map(|r| (r.with_ms as f64 - r.baseline_ms as f64)).sum::<f64>() / graph_results.len() as f64;
+    let graph_avg_ms: f64 = graph_results.iter().map(|r| r.with_ms as f64 - r.baseline_ms as f64).sum::<f64>() / graph_results.len() as f64;
     let graph_files_delta: i64 = graph_results.iter().map(|r| r.files_added as i64 - r.files_removed as i64).sum::<i64>();
     let graph_recall_delta: f64 = graph_results.iter().map(|r| r.recall_change()).sum::<f64>() / graph_results.len() as f64;
     let graph_rec = if graph_recall_delta > 0.05 { "✅ USE" } else if graph_recall_delta < -0.05 { "❌ SKIP" } else { "⚠️ NEUTRAL" };
 
-    let ck_avg_ms: f64 = candidate_k_results.iter().map(|r| (r.with_ms as f64 - r.baseline_ms as f64)).sum::<f64>() / candidate_k_results.len() as f64;
+    let ck_avg_ms: f64 = candidate_k_results.iter().map(|r| r.with_ms as f64 - r.baseline_ms as f64).sum::<f64>() / candidate_k_results.len() as f64;
     let ck_files_delta: i64 = candidate_k_results.iter().map(|r| r.files_added as i64 - r.files_removed as i64).sum::<i64>();
     let ck_recall_delta: f64 = candidate_k_results.iter().map(|r| r.recall_change()).sum::<f64>() / candidate_k_results.len() as f64;
     let ck_rec = if ck_recall_delta > 0.05 { "✅ USE" } else if ck_recall_delta < -0.05 { "❌ SKIP" } else { "⚠️ NEUTRAL" };
 
-    let exp_avg_ms: f64 = expansion_results.iter().map(|r| (r.with_ms as f64 - r.baseline_ms as f64)).sum::<f64>() / expansion_results.len() as f64;
+    let exp_avg_ms: f64 = expansion_results.iter().map(|r| r.with_ms as f64 - r.baseline_ms as f64).sum::<f64>() / expansion_results.len() as f64;
     let exp_files_delta: i64 = expansion_results.iter().map(|r| r.files_added as i64 - r.files_removed as i64).sum::<i64>();
     let exp_recall_delta: f64 = expansion_results.iter().map(|r| r.recall_change()).sum::<f64>() / expansion_results.len() as f64;
     let exp_rec = if exp_recall_delta > 0.05 { "✅ USE" } else if exp_recall_delta < -0.05 { "❌ SKIP" } else { "⚠️ NEUTRAL" };

@@ -8,7 +8,7 @@ use std::time::Instant;
 use coderun_repo_intel::RepositoryIntelligence;
 
 use crate::retrieval::evidence::{BackendMetrics, Evidence, EvidenceSource, RetrievalDiagnostics, RetrievalResult, RetrievalSignal};
-use crate::retrieval::intent::{detect_intent, QueryIntent};
+use crate::retrieval::intent::QueryIntent;
 use crate::retrieval::plan::RetrievalPlan;
 use crate::retrieval::policy::RetrievalPolicy;
 use crate::retrieval::query::RetrievalQuery;
@@ -159,7 +159,7 @@ impl CombinedRetriever {
     pub fn build_plan(&self, query: &RetrievalQuery) -> RetrievalPlan {
         use crate::retrieval::structural_plan::{QueryPlanner, StructuralQuery};
 
-        let intent = detect_intent(&query.text);
+        let intent = query.intent();
         let has_structural = crate::retrieval::structural::parse_structural_query(&query.text).is_some();
         let mut plan = RetrievalPlan::from_intent(intent, has_structural);
 
@@ -246,7 +246,7 @@ impl Retriever for TantivyRetriever {
         let t0 = Instant::now();
 
         // ── Query understanding: deterministic intent + bounded vocabulary ──
-        let intent = detect_intent(&query.text);
+        let intent = query.intent();
         let q_tokens = ranking::query_tokens(&query.text);
         let expanded_query = if q_tokens.is_empty() {
             query.text.clone()
@@ -272,29 +272,30 @@ impl Retriever for TantivyRetriever {
             }
         };        // Structural mode: "find all X" queries need exhaustive results, not top-50.
         // Detect structural intent and increase limits significantly.
+        // FIX #5: compute to_lowercase() once instead of 11 times.
+        let q_lower = query.text.to_lowercase();
         let is_structural_exhaustive = matches!(intent,
             QueryIntent::Structural
-        ) && (query.text.to_lowercase().starts_with("find all")
-            || query.text.to_lowercase().starts_with("show all")
-            || query.text.to_lowercase().starts_with("list all")
-            || query.text.to_lowercase().contains("all error")
-            || query.text.to_lowercase().contains("all config")
-            || query.text.to_lowercase().contains("all test")
-            || query.text.to_lowercase().contains("all api")
-            || query.text.to_lowercase().contains("all database")
-            || query.text.to_lowercase().contains("all enum")
-            || query.text.to_lowercase().contains("all interface")
-            || query.text.to_lowercase().contains("all type"));
+        ) && (q_lower.starts_with("find all")
+            || q_lower.starts_with("show all")
+            || q_lower.starts_with("list all")
+            || q_lower.contains("all error")
+            || q_lower.contains("all config")
+            || q_lower.contains("all test")
+            || q_lower.contains("all api")
+            || q_lower.contains("all database")
+            || q_lower.contains("all enum")
+            || q_lower.contains("all interface")
+            || q_lower.contains("all type"));
 
         let effective_max = if is_structural_exhaustive {
-            // Structural exhaustive: return up to 500 results (vs default 20-50)
-            policy.effective_max_files(doc_count).max(500).min(doc_count)
+            // FIX #4: Use configurable structural settings from policy
+            policy.structural_max_files.min(doc_count)
         } else {
             policy.effective_max_files(doc_count)
         };
         let candidate_k = if is_structural_exhaustive {
-            // Need larger candidate pool for exhaustive queries
-            policy.effective_candidate_k_for(doc_count).max(500).min(1000)
+            policy.structural_candidate_k
         } else {
             policy.effective_candidate_k_for(doc_count)
         };
@@ -409,7 +410,7 @@ impl Retriever for TantivyRetriever {
         };
         if !expanded_tokens.is_empty() {
             for (path, score, _fc, _src) in bm25_scored.iter_mut() {
-                let haystack = format!("{} {}", "", path).to_lowercase();
+                let haystack = path.to_lowercase(); // FIX #1: removed useless format!("{} {}", "", path)
                 let matched = expanded_tokens.iter().filter(|t| haystack.contains(t.as_str())).count();
                 if matched > 0 {
                     let boost = 1.0 + (matched as f32 / expanded_tokens.len() as f32) * policy.symbol_match_weight;
@@ -437,15 +438,14 @@ impl Retriever for TantivyRetriever {
         let mut graph_signals: HashMap<String, RetrievalSignal> = HashMap::new();
         if merged.len() >= 2 && graph_enabled {
             let tg = Instant::now();
-            if let Ok(repo_path) = repo_intel.repo_path().canonicalize() {
-                let _ = repo_path;
-                if let Ok(graph) = repo_intel.build_dependency_graph() {
-                    let boosted = ranking::apply_graph_boost(&mut merged, &graph, policy);
-                    for (path, sig) in boosted {
-                        graph_signals.insert(path, sig);
-                    }
-                    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // FIX #3: build_dependency_graph() uses self.repo_path internally,
+            // no need to canonicalize separately — the old code dropped the path.
+            if let Ok(graph) = repo_intel.build_dependency_graph() {
+                let boosted = ranking::apply_graph_boost(&mut merged, &graph, policy);
+                for (path, sig) in boosted {
+                    graph_signals.insert(path, sig);
                 }
+                merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             }
             graph_ms = tg.elapsed().as_millis() as u64;
         }
@@ -590,6 +590,7 @@ fn infer_file_class(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retrieval::query::RetrievalQuery;
 
     use crate::retrieval::intent::QueryIntent;
 
@@ -621,7 +622,7 @@ mod tests {
     #[test]
     fn regression_structural_pattern_query() {
         // Explicit pattern should be Structural with both lexical + structural
-        let intent = detect_intent("fn $FUNC($$$) { $$$ }");
+        let intent = RetrievalQuery::new("fn $FUNC($$$) { $$$ }", "test").intent();
         let has_structural = crate::retrieval::structural::parse_structural_query("fn $FUNC($$$) { $$$ }").is_some();
         let plan = RetrievalPlan::from_intent(intent, has_structural);
         assert!(plan.structural, "structural pattern should activate structural retriever");
@@ -631,7 +632,7 @@ mod tests {
     #[test]
     fn regression_procedural_does_not_invoke_structural() {
         // README/package queries must NOT invoke structural search
-        let intent = detect_intent("How do I add a new package?");
+        let intent = RetrievalQuery::new("How do I add a new package?", "test").intent();
         assert_eq!(intent, QueryIntent::Procedural);
         let plan = RetrievalPlan::from_intent(intent, false);
         assert!(!plan.structural, "procedural query should not invoke structural search");
@@ -640,7 +641,7 @@ mod tests {
 
     #[test]
     fn regression_find_functions_invokes_structural() {
-        let intent = detect_intent("find all functions in the codebase");
+        let intent = RetrievalQuery::new("find all functions in the codebase", "test").intent();
         assert_eq!(intent, QueryIntent::Structural);
         let plan = RetrievalPlan::from_intent(intent, true);
         assert!(plan.structural, "find all functions should invoke structural search");
@@ -649,7 +650,7 @@ mod tests {
     #[test]
     fn regression_where_is_uses_lexical() {
         // Navigation should use lexical, not structural
-        let intent = detect_intent("where is Foo implemented?");
+        let intent = RetrievalQuery::new("where is Foo implemented?", "test").intent();
         assert_eq!(intent, QueryIntent::Navigation);
         let plan = RetrievalPlan::from_intent(intent, false);
         assert!(!plan.structural, "navigation should not invoke structural search");
@@ -658,7 +659,7 @@ mod tests {
 
     #[test]
     fn regression_debugging_enriches_with_structural() {
-        let intent = detect_intent("Why does the build fail?");
+        let intent = RetrievalQuery::new("Why does the build fail?", "test").intent();
         assert_eq!(intent, QueryIntent::Debugging);
         let plan = RetrievalPlan::from_intent(intent, false);
         assert!(plan.structural, "debugging should enrich with structural");
@@ -667,13 +668,13 @@ mod tests {
 
     #[test]
     fn regression_show_all_classes_is_structural() {
-        let intent = detect_intent("show all classes");
+        let intent = RetrievalQuery::new("show all classes", "test").intent();
         assert_eq!(intent, QueryIntent::Structural);
     }
 
     #[test]
     fn regression_what_is_pnpm_is_informational() {
-        let intent = detect_intent("what is pnpm");
+        let intent = RetrievalQuery::new("what is pnpm", "test").intent();
         assert_eq!(intent, QueryIntent::Informational);
     }
 }

@@ -76,72 +76,33 @@ impl FileClassWeights {
     }
 
     /// Intent-aware override — Procedural should upweight docs, Debugging upweights source/tests, etc.
-    pub fn for_intent(intent: QueryIntent) -> Self {
-        match intent {
-            QueryIntent::Procedural => Self {
-                documentation: 2.5,
-                config: 1.4,
-                source: 0.8,
-                test: 0.25,
-                ..Default::default()
-            },
-            QueryIntent::Debugging => Self {
-                documentation: 1.0,
-                config: 1.2,
-                source: 1.5,
-                test: 1.3,
-                ..Default::default()
-            },
-            QueryIntent::Testing => Self {
-                documentation: 1.6,
-                config: 1.3,
-                source: 1.0,
-                test: 1.5,
-                ..Default::default()
-            },
-            QueryIntent::Architecture => Self {
-                documentation: 1.6,
-                config: 1.5,
-                source: 1.1,
-                test: 0.6,
-                ..Default::default()
-            },
-            QueryIntent::Configuration => Self {
-                documentation: 1.1,
-                config: 1.8,
-                source: 1.0,
-                test: 0.5,
-                ..Default::default()
-            },
-            QueryIntent::Implementation => Self {
-                documentation: 1.0,
-                config: 1.0,
-                source: 1.5,
-                test: 0.7,
-                ..Default::default()
-            },
-            QueryIntent::Navigation => Self {
-                documentation: 0.9,
-                config: 0.9,
-                source: 1.3,
-                test: 0.7,
-                ..Default::default()
-            },
-            QueryIntent::Informational => Self {
-                documentation: 1.4,
-                config: 1.1,
-                source: 1.0,
-                test: 0.6,
-                ..Default::default()
-            },
-            QueryIntent::Structural => Self {
-                documentation: 0.8,
-                config: 0.8,
-                source: 1.5,
-                test: 0.7,
-                ..Default::default()
-            },
-        }
+    /// FIX #8: Uses pre-computed static lookup to avoid allocating a new struct per call.
+    /// ORDER MUST MATCH QueryIntent enum variant order (intent.rs).
+    pub fn for_intent(intent: QueryIntent) -> &'static Self {
+        // QueryIntent order: Procedural=0, Informational=1, Implementation=2,
+        // Debugging=3, Testing=4, Configuration=5, Architecture=6, Navigation=7, Structural=8
+        static INTENT_WEIGHTS: [FileClassWeights; 9] = [
+            // Procedural (0)
+            FileClassWeights { documentation: 2.5, config: 1.4, source: 0.8, test: 0.25, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Informational (1)
+            FileClassWeights { documentation: 1.4, config: 1.1, source: 1.0, test: 0.6, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Implementation (2)
+            FileClassWeights { documentation: 1.0, config: 1.0, source: 1.5, test: 0.7, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Debugging (3)
+            FileClassWeights { documentation: 1.0, config: 1.2, source: 1.5, test: 1.3, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Testing (4)
+            FileClassWeights { documentation: 1.6, config: 1.3, source: 1.0, test: 1.5, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Configuration (5)
+            FileClassWeights { documentation: 1.1, config: 1.8, source: 1.0, test: 0.5, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Architecture (6)
+            FileClassWeights { documentation: 1.6, config: 1.5, source: 1.1, test: 0.6, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Navigation (7)
+            FileClassWeights { documentation: 0.9, config: 0.9, source: 1.3, test: 0.7, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+            // Structural (8)
+            FileClassWeights { documentation: 0.8, config: 0.8, source: 1.5, test: 0.7, generated: 0.5, stylesheet: 0.0, binary: 0.0, vendor: 0.0, dependency: 0.0 },
+        ];
+        let idx = intent as usize;
+        &INTENT_WEIGHTS[idx]
     }
 }
 
@@ -318,6 +279,12 @@ pub struct RetrievalPolicy {
     pub total_budget_ms: u64,
     /// Maximum matches per backend before early termination.
     pub max_matches_per_backend: usize,
+
+    // ── FIX #4: Structural exhaustive mode settings ──
+    /// Candidate pool size for structural exhaustive queries ("find all X").
+    pub structural_candidate_k: usize,
+    /// Max files for structural exhaustive queries ("find all X").
+    pub structural_max_files: usize,
 }
 
 impl Default for RetrievalPolicy {
@@ -340,6 +307,8 @@ impl Default for RetrievalPolicy {
             structural_budget_ms: 3000,
             total_budget_ms: 5000,
             max_matches_per_backend: 200,
+            structural_candidate_k: 500,
+            structural_max_files: 500,
         }
     }
 }

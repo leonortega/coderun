@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
+#[cfg(feature = "git-watcher")]
+use tracing::warn;
 
 /// Debounce interval for filesystem events — avoids rapid-fire during git operations.
 const DEBOUNCE_MS: u64 = 500;

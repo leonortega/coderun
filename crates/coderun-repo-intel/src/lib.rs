@@ -135,6 +135,8 @@ pub struct RepositoryIntelligence {
     file_hashes: HashMap<String, String>,
     /// Cached file count (populated during init, used for graph-build decision)
     cached_file_count: std::sync::OnceLock<usize>,
+    /// FIX #1: Cached Tantivy doc count — avoids opening index on every query.
+    cached_doc_count: std::sync::OnceLock<usize>,
 
 }
 
@@ -156,6 +158,7 @@ impl RepositoryIntelligence {
             patterns,
             file_hashes,
             cached_file_count: std::sync::OnceLock::new(),
+            cached_doc_count: std::sync::OnceLock::new(),
         }
     }
 
@@ -164,9 +167,24 @@ impl RepositoryIntelligence {
         &self.repository_id
     }
 
+    /// FIX #1: Fast doc_count check — returns cached count if available,
+    /// avoiding full index open + reader + stats on every query.
+    pub fn cached_doc_count(&self) -> Option<usize> {
+        self.cached_doc_count.get().copied()
+    }
+
     /// Validate that the index exists and is populated (P0 #2 / P0 #3 proactive detection).
     /// Returns `Ok(IndexStats)` if valid; `Err` if the index directory is missing or empty.
+    /// FIX #1: Caches doc_count in OnceLock so subsequent calls are free.
     pub fn validate_index(&self) -> Result<coderun_storage::tantivy_index::IndexStats, String> {
+        // Fast path: if we already validated, return cached stats
+        if let Some(&count) = self.cached_doc_count.get() {
+            return Ok(coderun_storage::tantivy_index::IndexStats {
+                doc_count: count,
+                index_path: default_index_path(&self.repository_id),
+            });
+        }
+
         let path = default_index_path(&self.repository_id);
         if !std::path::Path::new(&path).exists() {
             return Err("index not built".to_string());
@@ -178,6 +196,8 @@ impl RepositoryIntelligence {
         if stats.doc_count == 0 {
             return Err("index is empty".to_string());
         }
+        // Cache for next call
+        let _ = self.cached_doc_count.set(stats.doc_count);
         Ok(stats)
     }
 

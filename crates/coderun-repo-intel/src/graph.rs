@@ -38,7 +38,7 @@ impl DependencyGraph {
         for file in files {
             let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().to_string();
             if let Ok(content) = std::fs::read_to_string(file) {
-                let deps = extract_imports(&content, &rel, repo_root);
+                let deps = extract_imports(&content);
                 for dep in deps {
                     graph.add_edge(rel.clone(), dep);
                 }
@@ -196,10 +196,32 @@ fn extract_function_definitions(content: &str, _file: &str) -> Vec<(String, usiz
             if let Some(caps) = pattern.captures(line) {
                 if let Some(name_match) = caps.get(1) {
                     let name = name_match.as_str().to_string();
-                    // Simple heuristic: assume function ends at next function or end of file
-                    // In a real implementation, we'd use proper AST parsing
+                    // FIX #2: Count braces to find function end instead of fixed 50-line placeholder.
                     let line_start = line_num + 1;
-                    let line_end = line_start + 50; // Placeholder: assume functions are ~50 lines
+                    let mut brace_depth = 0i32;
+                    let mut found_open = false;
+                    let mut line_end = line_start;
+                    for subsequent_line in content.lines().skip(line_num) {
+                        line_end += 1;
+                        for ch in subsequent_line.chars() {
+                            match ch {
+                                '{' => { brace_depth += 1; found_open = true; }
+                                '}' => {
+                                    brace_depth -= 1;
+                                    if found_open && brace_depth == 0 {
+                                        // Found matching close brace — function ends here
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if found_open && brace_depth == 0 {
+                            break;
+                        }
+                    }
+                    // Safety: cap at 2000 lines to avoid runaway on malformed code
+                    let line_end = line_end.min(line_start + 2000);
                     defs.push((name, line_start, line_end));
                 }
             }
@@ -259,7 +281,8 @@ fn find_function_definition(definitions: &HashMap<String, Vec<(String, usize, us
 }
 
 /// Extract imports via simple regex (local AST+regex primary)
-fn extract_imports(content: &str, _current_file: &str, _repo_root: &Path) -> Vec<String> {
+/// FIX #4: Removed unused _current_file and _repo_root params.
+fn extract_imports(content: &str) -> Vec<String> {
     let mut deps = Vec::new();
     // Rust: use crate::foo::bar, mod foo  (TASK-011: handle mod b; → b.rs)
     // JS/TS: import ... from "path", require("path")
@@ -321,12 +344,11 @@ fn extract_imports(content: &str, _current_file: &str, _repo_root: &Path) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_extract_imports_rust() {
         let content = "use crate::graph::DependencyGraph;\nuse std::collections::HashMap;\nmod foo;";
-        let deps = extract_imports(content, "src/main.rs", &PathBuf::from("."));
+        let deps = extract_imports(content);
         assert!(deps.iter().any(|d| d.contains("graph")));
     }
 
@@ -359,7 +381,7 @@ mod tests {
     #[test]
     fn test_extract_imports_js_from_quoted() {
         let content = r#"import foo from "bar/baz"; const x = require('qux');"#;
-        let deps = extract_imports(content, "a.js", &PathBuf::from("."));
+        let deps = extract_imports(content);
         assert!(deps.iter().any(|d| d.contains("bar/baz")));
     }
 }

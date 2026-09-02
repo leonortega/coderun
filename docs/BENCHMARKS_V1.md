@@ -220,7 +220,9 @@ Grep       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 └──────────────────┴────────────┴────────────┴────────────┴────────────────┘
 ```
 
-**Index Stats:** 158 files indexed, 1,455 symbols extracted (100s build time)
+**Index Stats:** 158 files indexed, 1,455 symbols extracted (cold index — first-time build)
+
+> **Note:** 1,455 symbols is the cold-index count (all 158 files read and parsed). On warm re-indexes, the `mtime+size` shortcut skips unchanged files, so subsequent runs show 0–298 symbols (only modified files re-extracted).
 
 **Key Finding:** Query Expansion adds +18.3% recall with only +1ms overhead. This is the only component that meaningfully improves results on the coderun repo.
 
