@@ -282,6 +282,44 @@ impl Database {
         Ok(id)
     }
 
+    /// Batch insert symbols for a file — single prepared statement, faster than per-row insert_symbol.
+    /// Uses a savepoint so it works inside an existing batch transaction.
+    pub fn insert_symbols_batch(
+        &self,
+        file_id: i64,
+        symbols: &[(String, String)], // [(name, kind)]
+    ) -> Result<(), String> {
+        if symbols.is_empty() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        // Use savepoint (nested transaction) so we work inside begin_batch
+        self.conn.execute_batch("SAVEPOINT batch_sym")
+            .map_err(|e| format!("batch savepoint: {e}"))?;
+        let result = (|| {
+            let sql = "INSERT INTO symbols (file_id, name, kind, line_start, line_end, parent_id) VALUES (?1, ?2, ?3, 0, 0, NULL)";
+            let mut stmt = self.conn.prepare(sql)
+                .map_err(|e| format!("batch prepare: {e}"))?;
+            for (name, kind) in symbols {
+                stmt.execute(rusqlite::params![file_id, name, kind])
+                    .map_err(|e| format!("batch insert: {e}"))?;
+            }
+            Ok::<(), String>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE SAVEPOINT batch_sym")
+                    .map_err(|e| format!("batch release: {e}"))?;
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO SAVEPOINT batch_sym");
+                return Err(e);
+            }
+        }
+        log_slow(&format!("insert_symbols_batch ({} symbols)", symbols.len()), start);
+        Ok(())
+    }
+
     /// Get all symbols for a file
     pub fn get_symbols_for_file(&self, file_id: i64) -> Result<Vec<Symbol>, String> {
         let start = Instant::now();

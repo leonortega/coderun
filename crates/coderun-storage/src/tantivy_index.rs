@@ -393,9 +393,11 @@ impl TantivyIndex {
     #[allow(dead_code)]
     fn invalidate_reader_cache(&self) {}
 
-    /// Get a writer for indexing documents — adaptive heap for 63k repos (Phase1)
+    /// Get a writer for indexing documents — adaptive heap based on index size
     pub fn writer(&self) -> Result<IndexWriter, String> {
-        self.writer_with_heap(150_000_000)
+        // 256MB heap — larger than default (150MB) to reduce segment merges during bulk indexing.
+        // Adaptive heap was removed because creating a reader during init caused deadlocks.
+        self.writer_with_heap(256_000_000)
     }
 
     /// Get a writer with explicit heap (tests can use smaller)

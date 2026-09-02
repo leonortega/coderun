@@ -1,6 +1,6 @@
-//! DefinitelyTyped Benchmark — 50 hard queries on 53k-file TypeScript type definitions repo.
+//! Mattermost Benchmark — 50 hard queries on 9k-file Go + React codebase.
 //!
-//! Run with: `cargo test -p coderun-context -- --ignored bench_dt_50 --nocapture`
+//! Run with: `cargo test -p coderun-context -- --ignored bench_mattermost_50 --nocapture`
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -28,84 +28,86 @@ struct BenchQuery {
     category: &'static str,
 }
 
-/// 50 hard queries designed for DefinitelyTyped — a 53k-file TypeScript type definitions repo.
-/// Queries test: exact type lookup, cross-package relationships, API surface understanding,
-/// generic type patterns, and ambiguous/intent-heavy queries.
+/// 50 hard queries designed for Mattermost — a 9k-file Go + React codebase.
+/// Tests: API understanding, cross-layer (Go ↔ React), config, auth, WebSocket, channels.
 fn bench_queries() -> Vec<BenchQuery> {
     vec![
-        // ── Procedural (10) — "how to" type patterns ──
-        BenchQuery { text: "how to type a React functional component with children", grep_pattern: "PropsWithChildren|ReactNode.*children|FC.*children", category: "procedural" },
-        BenchQuery { text: "how to type an Express middleware that modifies the request", grep_pattern: "Request.*Props|augment.*Request|declare.*namespace.*Express", category: "procedural" },
-        BenchQuery { text: "how to create a type-safe event emitter", grep_pattern: "EventEmitter|TypedEvent|EventMap|on\\(.*string", category: "procedural" },
-        BenchQuery { text: "how to type a reducer with discriminated union actions", grep_pattern: "Reducer|Action.*type|discriminated|Action.*payload", category: "procedural" },
-        BenchQuery { text: "how to type a database query builder", grep_pattern: "QueryBuilder|Chainable|\\.where\\(|\\.select\\(", category: "procedural" },
-        BenchQuery { text: "how to type a configuration object with optional nested fields", grep_pattern: "DeepPartial|RecursivePartial|Options.*\\{|Config.*\\{", category: "procedural" },
-        BenchQuery { text: "how to type a plugin system with registration", grep_pattern: "Plugin|register|use\\(|middleware.*use", category: "procedural" },
-        BenchQuery { text: "how to type a Redux store with middleware", grep_pattern: "Store|Middleware|Dispatch|Enhancer", category: "procedural" },
-        BenchQuery { text: "how to type a GraphQL resolver with context", grep_pattern: "Resolver|Context.*type|IResolver|ResolveFn", category: "procedural" },
-        BenchQuery { text: "how to type a WebSocket message protocol", grep_pattern: "WebSocket.*Message|WS.*Data|Socket.*Send|Message.*type", category: "procedural" },
-        // ── Debugging (10) — "why" and "what went wrong" ──
-        BenchQuery { text: "why does the React hooks type inference fail with generic components", grep_pattern: "useHooks|Hook.*Generic|Generic.*Component.*hook", category: "debugging" },
-        BenchQuery { text: "what is the correct type for a Node.js ReadableStream in browser vs server", grep_pattern: "ReadableStream|Readable.*Web|NodeJS.*Readable|stream\\.Readable", category: "debugging" },
-        BenchQuery { text: "why is the Mongoose document type not matching the schema", grep_pattern: "Document.*Schema|Model.*Document|InferSchemaType|SchemaType", category: "debugging" },
-        BenchQuery { text: "what type should I use for a function that returns Promise or value", grep_pattern: "PromiseOrValue|Awaitable|MaybePromise|T \\| Promise", category: "debugging" },
-        BenchQuery { text: "why does TypeScript complain about this conditional type", grep_pattern: "Conditional.*Type|infer |extends.*\\?|分布式条件", category: "debugging" },
-        BenchQuery { text: "what is the correct type for a React ref callback", grep_pattern: "RefCallback|RefObject|React\\.ref|forwardRef", category: "debugging" },
-        BenchQuery { text: "why is the Express response type missing json method", grep_pattern: "Response.*json|res\\.json|Json.*method|send.*json", category: "debugging" },
-        BenchQuery { text: "what type should I use for a JWT that may be expired", grep_pattern: "JWT|jwt.*expir|token.*verify|JwtPayload", category: "debugging" },
-        BenchQuery { text: "why does the generic constraint prevent this assignment", grep_pattern: "extends.*Error|constraint.*fail|generic.*assign|not assignable", category: "debugging" },
-        BenchQuery { text: "what is the correct type for a callback that receives an error or result", grep_pattern: "Callback.*Error|ErrorFirst|node.*callback|Err.*Result", category: "debugging" },
-        // ── Structural/Find (10) — locate specific type patterns ──
-        BenchQuery { text: "find all type definitions that extend Error", grep_pattern: "extends Error|class.*Error.*{|Error.*class", category: "structural" },
-        BenchQuery { text: "find all interface definitions with index signatures", grep_pattern: "\\[key.*string\\]|\\[key.*number\\]|\\[index.*\\]|Record<", category: "structural" },
-        BenchQuery { text: "find all type definitions using template literal types", grep_pattern: "Template.*Literal|`\\$\\{|\\`.*\\$\\{", category: "structural" },
-        BenchQuery { text: "find all generic type definitions with multiple type parameters", grep_pattern: "<[A-Z],\\s*[A-Z]>|<T,\\s*U>|<K,\\s*V>", category: "structural" },
-        BenchQuery { text: "find all React component type definitions with defaultProps", grep_pattern: "defaultProps|DefaultProps|static.*default", category: "structural" },
-        BenchQuery { text: "find all Express route handler type definitions", grep_pattern: "RouteHandler|RequestHandler|Handler.*Request|router\\.", category: "structural" },
-        BenchQuery { text: "find all database model type definitions", grep_pattern: "interface.*Model|type.*Model|Model<|Schema.*type", category: "structural" },
-        BenchQuery { text: "find all configuration type definitions with nested objects", grep_pattern: "interface.*Config|Config.*\\{|Options.*\\{|Settings.*\\{", category: "structural" },
-        BenchQuery { text: "find all enum definitions with string values", grep_pattern: "enum.*=.*\"|enum.*string|const enum", category: "structural" },
-        BenchQuery { text: "find all utility type definitions (Partial, Pick, Omit)", grep_pattern: "type.*Partial|type.*Pick|type.*Omit|type.*Record", category: "structural" },
-        // ── Informational (10) — "what is" and "how does" ──
-        BenchQuery { text: "what is the type definition for the React useState hook", grep_pattern: "useState|UseState|StateHook|SetState", category: "informational" },
-        BenchQuery { text: "how is the Express application type structured", grep_pattern: "Express.*Application|Application.*type|express\\.Application", category: "informational" },
-        BenchQuery { text: "what types does the Node.js fs module expose", grep_pattern: "fs\\.|Filesystem|ReadFile|WriteFile|StatResult", category: "informational" },
-        BenchQuery { text: "how is the Axios response type structured", grep_pattern: "AxiosResponse|Response.*data|AxiosError|AxiosInstance", category: "informational" },
-        BenchQuery { text: "what types does Socket.IO expose for events", grep_pattern: "Socket.*Event|Server.*Event|io\\(|Socket\\.IO", category: "informational" },
-        BenchQuery { text: "how is the Next.js page component typed", grep_pattern: "NextPage|GetServerSideProps|PageProps|NextComponent", category: "informational" },
-        BenchQuery { text: "what types does the Jest test framework provide", grep_pattern: "jest|Describe|It.*fn|Expect.* matcher|Mock.*fn", category: "informational" },
-        BenchQuery { text: "how is the MongoDB collection type structured", grep_pattern: "Collection.*type|MongoDB.*Collection|Db.*collection|Aggregate", category: "informational" },
-        BenchQuery { text: "what types does the webpack configuration use", grep_pattern: "webpack.*Config|Module.*Rule|Plugin.*type|Loader", category: "informational" },
-        BenchQuery { text: "how is the Electron IPC type system structured", grep_pattern: "ipcRenderer|ipcMain|Electron.*Event|IpcRenderer", category: "informational" },
-        // ── Mixed/Ambiguous (10) — hard queries requiring semantic understanding ──
-        BenchQuery { text: "where is the type definition for a cancelable promise", grep_pattern: "Cancelable|Abort.*Promise|Cancel.*token|AbortController", category: "mixed" },
-        BenchQuery { text: "what type should I use for a deeply nested object path", grep_pattern: "DeepPath|PathValue|Get\\.|NestedKey|PropertyPath", category: "mixed" },
-        BenchQuery { text: "find the type definition for a retry mechanism with backoff", grep_pattern: "retry|backoff|exponential|RetryOptions", category: "mixed" },
-        BenchQuery { text: "what is the type for a React context provider with default value", grep_pattern: "createContext|Provider.*value|Context.*default|useContext", category: "mixed" },
-        BenchQuery { text: "how to type a function that accepts either a string or object", grep_pattern: "string \\| object|StringOr|string.*\\|.*\\{|Overload", category: "mixed" },
-        BenchQuery { text: "find the type for a rate limiter configuration", grep_pattern: "rate.*limit|throttle|RateLimit|tokens.*bucket", category: "mixed" },
-        BenchQuery { text: "what type should I use for a lazy-loaded component", grep_pattern: "Lazy|Suspense|lazy\\(|React\\.lazy", category: "mixed" },
-        BenchQuery { text: "find the type definition for a dependency injection container", grep_pattern: "Container|inject|Inject|IoC|Dependency.*inject", category: "mixed" },
-        BenchQuery { text: "what is the type for a serialized/deserialized object", grep_pattern: "Serializable|Serialize|Deserialize|JSON.*type|FromJSON", category: "mixed" },
-        BenchQuery { text: "find the type for a connection pool with health checks", grep_pattern: "Pool|health.*check|Connection.*pool|Pool.*options", category: "mixed" },
+        // ── Procedural (10) — "how to" patterns ──
+        BenchQuery { text: "how to add a new API endpoint", grep_pattern: "HandleFunc|router\\.|mux\\.", category: "procedural" },
+        BenchQuery { text: "how to create a new React component", grep_pattern: "export.*function|export.*const.*=.*\\(|React\\.FC", category: "procedural" },
+        BenchQuery { text: "how to add a new WebSocket event", grep_pattern: "WebSocket|ws\\.|websock|HandleWebSocket", category: "procedural" },
+        BenchQuery { text: "how to add a database migration", grep_pattern: "migrate|Migration|ALTER TABLE|CREATE TABLE", category: "procedural" },
+        BenchQuery { text: "how to add a new plugin hook", grep_pattern: "Plugin|Hook|OnActivate|MessageWillBePosted", category: "procedural" },
+        BenchQuery { text: "how to add configuration option", grep_pattern: "Config\\{|config\\.go|ConfigSettings|EnvironmentConfig", category: "procedural" },
+        BenchQuery { text: "how to add a new notification type", grep_pattern: "Notification|notify|PushNotification|emailNotification", category: "procedural" },
+        BenchQuery { text: "how to add permissions check", grep_pattern: "Permission|HasPermissionTo|CheckPermission|Permissions", category: "procedural" },
+        BenchQuery { text: "how to add rate limiting", grep_pattern: "RateLimit|rateLimiter|throttle|Limit", category: "procedural" },
+        BenchQuery { text: "how to add a new scheduled job", grep_pattern: "Job|Scheduler|cron|periodicJobs", category: "procedural" },
+        // ── Debugging (10) — "why" patterns ──
+        BenchQuery { text: "why does the WebSocket connection drop", grep_pattern: "websocket.*close|disconnect|connection.*lost|ws.*error", category: "debugging" },
+        BenchQuery { text: "why is the channel not loading", grep_pattern: "channel.*load|GetChannel|fetchChannel|channel.*error", category: "debugging" },
+        BenchQuery { text: "why does the user session expire", grep_pattern: "Session|session.*expire|TokenExpire|session.*timeout", category: "debugging" },
+        BenchQuery { text: "why is the message not being delivered", grep_pattern: "SendMessage|postMessage|delivery|message.*fail", category: "debugging" },
+        BenchQuery { text: "why does the file upload fail", grep_pattern: "upload.*fail|FileUpload|MultipartForm|file.*error", category: "debugging" },
+        BenchQuery { text: "why is the search returning wrong results", grep_pattern: "SearchPost|searchPosts|FullTextSearch|search.*index", category: "debugging" },
+        BenchQuery { text: "why does the email notification not send", grep_pattern: "EmailNotification|sendEmail|SMTP|email.*send", category: "debugging" },
+        BenchQuery { text: "why is the plugin failing to load", grep_pattern: "Plugin.*error|plugin.*activate|PluginAPI|manifest", category: "debugging" },
+        BenchQuery { text: "why does the team invite fail", grep_pattern: "Invite|joinTeam|team.*invite|AddMembers", category: "debugging" },
+        BenchQuery { text: "why is the permission denied error", grep_pattern: "PermissionDenied|Forbidden|403|not.*authorized", category: "debugging" },
+        // ── Structural (10) — find patterns ──
+        BenchQuery { text: "find all REST API handlers", grep_pattern: "HandleFunc|api\\.|Handler\\(|ServeHTTP", category: "structural" },
+        BenchQuery { text: "find all WebSocket message types", grep_pattern: "WebSocketResponse|wsResponse|wss\\.|websocket\\.Message", category: "structural" },
+        BenchQuery { text: "find all database models", grep_pattern: "type.*struct|model\\.Team|model\\.Channel|model\\.Post", category: "structural" },
+        BenchQuery { text: "find all middleware functions", grep_pattern: "Middleware|middleware|Next\\(\\)|ChainHandler", category: "structural" },
+        BenchQuery { text: "find all configuration structs", grep_pattern: "Config\\s*struct|ConfigSettings|config\\s+struct", category: "structural" },
+        BenchQuery { text: "find all error types", grep_pattern: "AppError|StatusCode|error\\(|ErrNotFound", category: "structural" },
+        BenchQuery { text: "find all hooks in the plugin system", grep_pattern: "OnActivate|OnDeactivate|MessageWillBePosted|ServeHTTP", category: "structural" },
+        BenchQuery { text: "find all scheduled tasks", grep_pattern: "Job|Scheduler|cron|schedule|periodic", category: "structural" },
+        BenchQuery { text: "find all Redux actions", grep_pattern: "dispatch|Action|ActionCreators|useDispatch", category: "structural" },
+        BenchQuery { text: "find all test files", grep_pattern: "_test\\.go|\\.test\\.|\\.spec\\.|__tests__", category: "structural" },
+        // ── Informational (10) — "what" patterns ──
+        BenchQuery { text: "what is the overall architecture", grep_pattern: "architecture|overview|design|structure", category: "informational" },
+        BenchQuery { text: "what is the authentication flow", grep_pattern: "Login|Authenticate|Session|Token.*auth", category: "informational" },
+        BenchQuery { text: "what is the channel system", grep_pattern: "Channel|channel_type|public.*channel|private.*channel", category: "informational" },
+        BenchQuery { text: "what is the plugin architecture", grep_pattern: "Plugin|plugin.*api|hook.*system|manifest", category: "informational" },
+        BenchQuery { text: "what is the message format", grep_pattern: "Post\\{|MessageFormat|markdown|message.*struct", category: "informational" },
+        BenchQuery { text: "what is the user management system", grep_pattern: "User|user.*model|UserAuth|login.*method", category: "informational" },
+        BenchQuery { text: "what is the team structure", grep_pattern: "Team|TeamMember|team.*invite|join.*team", category: "informational" },
+        BenchQuery { text: "what is the file storage backend", grep_pattern: "FileStore|S3Store|LocalStore|filestore|Storage", category: "informational" },
+        BenchQuery { text: "what is the compliance and audit system", grep_pattern: "Compliance|Audit|audit.*log|retention|eDiscovery", category: "informational" },
+        BenchQuery { text: "what is the clustering setup", grep_pattern: "Cluster|cluster.*node|gossip|peer|discovery", category: "informational" },
+        // ── Mixed (10) — complex intent ──
+        BenchQuery { text: "how does the channel member system work end to end", grep_pattern: "ChannelMember|AddMember|join.*channel|member.*count", category: "mixed" },
+        BenchQuery { text: "find where permissions are checked for post creation", grep_pattern: "CreatePost|CanPost|permission.*post|draft.*permission", category: "mixed" },
+        BenchQuery { text: "how is the notification preference stored and applied", grep_pattern: "NotificationPreference|NotifyProps|notification.*setting", category: "mixed" },
+        BenchQuery { text: "what happens when a user is deactivated", grep_pattern: "Deactivate|deactivateUser|user.*deactivate|status.*offline", category: "mixed" },
+        BenchQuery { text: "how does the real-time typing indicator work", grep_pattern: "typing|TypingIndicator|websocket.*typing|UserTyping", category: "mixed" },
+        BenchQuery { text: "find the code path for importing slack channels", grep_pattern: "SlackImport|import.*slack|SlackConverter|import.*channel", category: "mixed" },
+        BenchQuery { text: "how is the emoji system implemented", grep_pattern: "Emoji|emoji.*image|custom.*emoji|EmojiAlias", category: "mixed" },
+        BenchQuery { text: "how does rate limiting interact with the API", grep_pattern: "RateLimit|rateLimiter|api.*throttle|limit.*per", category: "mixed" },
+        BenchQuery { text: "what is the lifecycle of a slash command", grep_pattern: "SlashCommand|command.*execute|CommandArgs|openDialogURL", category: "mixed" },
+        BenchQuery { text: "how does the search indexing pipeline work", grep_pattern: "SearchIndex|indexPost|FullText|searchEngine", category: "mixed" },
     ]
 }
 
-// ── Grep Runner ──────────────────────────────────────────────────────────────
-
 fn run_grep(pattern: &str, repo_root: &std::path::Path) -> Vec<String> {
     let output = Command::new("grep")
-        .args(["-rEn", "--include=*.d.ts", "--include=*.ts", "--include=*.tsx", pattern])
-        .current_dir(repo_root)
+        .arg("-rE")
+        .arg("--include=*.go")
+        .arg("--include=*.ts")
+        .arg("--include=*.tsx")
+        .arg("--include=*.jsx")
+        .arg("-l")
+        .arg(pattern)
+        .arg(repo_root)
         .output()
         .expect("Failed to run grep");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut files: HashSet<String> = HashSet::new();
     for line in stdout.lines() {
-        if let Some(pos) = line.find(':') {
-            let file = &line[..pos];
-            files.insert(file.replace('\\', "/"));
-        }
+        if line.is_empty() { continue; }
+        // -l flag: each line is a filename (no ':')
+        files.insert(line.replace('\\', "/"));
     }
     let mut sorted: Vec<String> = files.into_iter().collect();
     sorted.sort();
@@ -199,19 +201,19 @@ fn run_bench(repo_root: &std::path::Path) -> BenchResults {
 
 #[test]
 #[ignore]
-fn bench_dt_50() {
-    let dt_root = PathBuf::from("C:/tmp/DefinitelyTyped-master");
-    if !dt_root.exists() {
-        eprintln!("DefinitelyTyped not found at {:?} — skipping", dt_root);
+fn bench_mattermost_50() {
+    let mm_root = PathBuf::from("C:/tmp/mattermost-master");
+    if !mm_root.exists() {
+        eprintln!("Mattermost not found at {:?} — skipping", mm_root);
         return;
     }
 
-    eprintln!("Running benchmark on DefinitelyTyped (53k files)...");
-    let r = run_bench(&dt_root);
+    eprintln!("Running benchmark on Mattermost (9k files)...");
+    let r = run_bench(&mm_root);
 
     println!();
     println!("═══════════════════════════════════════════════════════════════════════════════");
-    println!("  DefinitelyTyped Benchmark — 50 Hard Queries (53k .d.ts files)");
+    println!("  Mattermost Benchmark — 50 Hard Queries (9k Go + React files)");
     println!("═══════════════════════════════════════════════════════════════════════════════");
     println!();
 
@@ -230,7 +232,6 @@ fn bench_dt_50() {
             }
             m
         };
-        // Flag slow queries
         let slow = if q.retrieval_ms > 1000 { " ⚠" } else { "" };
         println!("│ {:2} │ {} │ {:6} │ {:4} │ {:4} │ {:4} │ {:4} │ {:4} │ {:.3} {}│",
             i + 1, qtext, q.category, q.retrieval_ms, q.grep_ms, q.overlap, q.retrieval_only, q.grep_only, mrr, slow);
@@ -244,7 +245,7 @@ fn bench_dt_50() {
     let tot_grp: usize = r.results.iter().map(|q| q.grep_only).sum();
 
     println!("┌──────────────────────────────────────────────────────────────────────────┐");
-    println!("│  Aggregate Metrics — DefinitelyTyped (53k files)                         │");
+    println!("│  Aggregate Metrics — Mattermost (9k Go + React files)                   │");
     println!("├─────────────────────────────┬────────────────────────────────────────────┤");
     println!("│  Total queries              │  {:<40}│", r.results.len());
     println!("│  Total wall time            │  {:<36} ms│", r.total_duration_ms);
@@ -282,40 +283,35 @@ fn bench_dt_50() {
     println!("└──────────────────┴───────┴──────────┴──────────┴──────────┴──────────┴──────────┘");
     println!();
 
-    // Speed
-    let ret_total: u64 = r.results.iter().map(|q| q.retrieval_ms).sum();
-    let grp_total: u64 = r.results.iter().map(|q| q.grep_ms).sum();
-    let speedup = if ret_total > 0 { grp_total as f64 / ret_total as f64 } else { 0.0 };
-    println!("⚡ Speed: retrieval {}ms total vs grep {}ms total → retrieval is {:.1}× {}",
-        ret_total, grp_total, if speedup > 1.0 { speedup } else { 1.0 / speedup.max(0.01) },
-        if speedup > 1.0 { "faster" } else { "slower" });
+    // Speed comparison
+    let total_ret_ms: u64 = r.results.iter().map(|q| q.retrieval_ms).sum();
+    let total_grp_ms: u64 = r.results.iter().map(|q| q.grep_ms).sum();
+    let speedup = if total_ret_ms > 0 { total_grp_ms as f64 / total_ret_ms as f64 } else { 0.0 };
+    println!("⚡ Speed: retrieval {}ms total vs grep {}ms total → retrieval is {:.1}× faster",
+        total_ret_ms, total_grp_ms, speedup);
     println!();
 
-    // Slowest queries
-    let mut by_lat: Vec<&QueryResult> = r.results.iter().filter(|q| q.retrieval_ms > 100).collect();
-    by_lat.sort_by(|a, b| b.retrieval_ms.cmp(&a.retrieval_ms));
-    if !by_lat.is_empty() {
+    // Slow queries
+    let slow: Vec<_> = r.results.iter().filter(|q| q.retrieval_ms > 100).collect();
+    if !slow.is_empty() {
         println!("⚠  Slow queries (>100ms):");
-        for q in by_lat.iter().take(5) {
+        for q in slow {
             println!("   {}ms  [{}] \"{}\"", q.retrieval_ms, q.category, q.query);
         }
-        println!();
     }
 
-    // High-novelty (retrieval finds what grep misses)
-    let mut by_novel: Vec<&QueryResult> = r.results.iter().filter(|q| q.retrieval_only > 10).collect();
-    by_novel.sort_by(|a, b| b.retrieval_only.cmp(&a.retrieval_only));
-    if !by_novel.is_empty() {
-        println!("🧠 Retrieval finds what grep misses (top 5 by novelty):");
-        for q in by_novel.iter().take(5) {
-            let sample: Vec<&str> = q.retrieval_files.iter()
-                .map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f))
-                .filter(|bn| !q.grep_files.iter().any(|gf| gf.ends_with(bn)))
-                .take(3).collect();
-            println!("   novelty={}  grep=0  \"{}\"  → {:?}", q.retrieval_only, q.query, sample);
-        }
-        println!();
+    // Novelty highlights
+    let mut novelty_ranked: Vec<_> = r.results.iter().collect();
+    novelty_ranked.sort_by(|a, b| b.retrieval_only.cmp(&a.retrieval_only));
+    println!();
+    println!("🧠 Retrieval finds what grep misses (top 5 by novelty):");
+    for q in novelty_ranked.iter().take(5) {
+        let top3: Vec<String> = q.retrieval_files.iter().take(3)
+            .map(|f| std::path::Path::new(f).file_name().unwrap_or_default().to_string_lossy().to_string())
+            .collect();
+        println!("   novelty={} grep={} \"{}\"  → [\"{}\"]",
+            q.retrieval_only, q.grep_files.len(), q.query, top3.join("\", \""));
     }
-
+    println!();
     println!("═══════════════════════════════════════════════════════════════════════════════");
 }

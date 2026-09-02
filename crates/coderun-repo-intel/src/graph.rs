@@ -1,5 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+// Pre-compiled regex patterns — avoids Regex::new per call on hot path
+static FN_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    vec![
+        regex::Regex::new(r"(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(").unwrap(),
+        regex::Regex::new(r"def\s+(\w+)\s*\(").unwrap(),
+        regex::Regex::new(r"(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(").unwrap(),
+        regex::Regex::new(r"(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:void|bool|int|long|float|double|string|var|IEnumerable|Task|ValueTask|IActionResult|ActionResult|ObjectResult)\s+(\w+)\s*\(").unwrap(),
+        regex::Regex::new(r"(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:void|boolean|int|long|float|double|String|var)\s+(\w+)\s*\(").unwrap(),
+    ]
+});
+
+static CALL_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap()
+});
 
 /// Dependency graph derived from imports (local AST + regex)
 /// Spec §3 Repository Intelligence — produce symbols, dependency graph, entry points.
@@ -175,21 +191,8 @@ fn extract_function_definitions(content: &str, _file: &str) -> Vec<(String, usiz
     // JS/TS: function name(...) { ... } or const name = (...) => { ... }
     // C#: public/private/static ReturnType Name(...) { ... }
     
-    let patterns = [
-        // Rust functions
-        regex::Regex::new(r"(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(").unwrap(),
-        // Python functions
-        regex::Regex::new(r"def\s+(\w+)\s*\(").unwrap(),
-        // JavaScript/TypeScript functions
-        regex::Regex::new(r"(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(").unwrap(),
-        // C# methods
-        regex::Regex::new(r"(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:void|bool|int|long|float|double|string|var|IEnumerable|Task|ValueTask|IActionResult|ActionResult|ObjectResult)\s+(\w+)\s*\(").unwrap(),
-        // Java methods
-        regex::Regex::new(r"(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:void|boolean|int|long|float|double|String|var)\s+(\w+)\s*\(").unwrap(),
-    ];
-    
     for (line_num, line) in content.lines().enumerate() {
-        for pattern in &patterns {
+        for pattern in FN_PATTERNS.iter() {
             if let Some(caps) = pattern.captures(line) {
                 if let Some(name_match) = caps.get(1) {
                     let name = name_match.as_str().to_string();
@@ -210,9 +213,6 @@ fn extract_function_definitions(content: &str, _file: &str) -> Vec<(String, usiz
 fn extract_function_calls(content: &str, _file: &str) -> Vec<(usize, String)> {
     let mut calls = Vec::new();
     
-    // Pattern to match function calls: identifier followed by '('
-    let call_pattern = regex::Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
-    
     // Keywords to exclude (not function calls)
     let keywords: HashSet<&str> = [
         "if", "else", "for", "while", "loop", "match", "return", "break", "continue",
@@ -223,7 +223,7 @@ fn extract_function_calls(content: &str, _file: &str) -> Vec<(usize, String)> {
     ].iter().cloned().collect();
     
     for (line_num, line) in content.lines().enumerate() {
-        for caps in call_pattern.captures_iter(line) {
+        for caps in CALL_PATTERN.captures_iter(line) {
             if let Some(name_match) = caps.get(1) {
                 let name = name_match.as_str();
                 if !keywords.contains(name) && name.len() > 1 {

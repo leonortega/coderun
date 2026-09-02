@@ -167,7 +167,7 @@ impl RepositoryIntelligence {
     /// Validate that the index exists and is populated (P0 #2 / P0 #3 proactive detection).
     /// Returns `Ok(IndexStats)` if valid; `Err` if the index directory is missing or empty.
     pub fn validate_index(&self) -> Result<coderun_storage::tantivy_index::IndexStats, String> {
-        let path = default_index_path();
+        let path = default_index_path(&self.repository_id);
         if !std::path::Path::new(&path).exists() {
             return Err("index not built".to_string());
         }
@@ -190,7 +190,8 @@ impl RepositoryIntelligence {
         let mut files_deleted = 0usize;
 
         // Open tantivy index (MmapDirectory, memory-mapped per spec §3) — optional, never fails indexing
-        let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open(&default_index_path()).ok();
+        let repo_id = self.repository_id.clone();
+        let tantivy_index = coderun_storage::tantivy_index::TantivyIndex::open(&default_index_path(&repo_id)).ok();
         let mut tantivy_writer = tantivy_index.as_ref().and_then(|idx| idx.writer().ok());
 
         // Load existing file meta — Phase2 mtime+size shortcut (avoids 63k reads on warm re-index)
@@ -453,17 +454,15 @@ impl RepositoryIntelligence {
             let file_id = job.existing_file_id.unwrap_or(0);
 
             if file_id > 0 && job.file_changed {
-                // Insert symbols into SQLite for legacy search_symbols fallback
-                // retrieval uses tantivy symbol_name field — SQLite is metadata-only
-                for (name, kind) in extract_result.sym_names.iter().zip(extract_result.sym_kinds.iter()) {
-                    let _ = self.db.insert_symbol(
-                        file_id,
-                        name,
-                        kind,
-                        0, // line_start (not critical for metadata-only SQLite)
-                        0, // line_end
-                        None,
-                    );
+                // Batch insert symbols into SQLite — single transaction, faster than per-row
+                let sym_pairs: Vec<(String, String)> = extract_result
+                    .sym_names
+                    .iter()
+                    .zip(extract_result.sym_kinds.iter())
+                    .map(|(n, k)| (n.clone(), k.clone()))
+                    .collect();
+                if let Err(e) = self.db.insert_symbols_batch(file_id, &sym_pairs) {
+                    eprintln!("Warning: batch symbol insert failed for file {}: {}", file_id, e);
                 }
                 symbols_extracted += extract_result.extracted_count;
             } else if file_id > 0 {
@@ -621,7 +620,7 @@ impl RepositoryIntelligence {
     ) -> Result<SearchResults, String> {
         // Try tantivy index at default location; fallback to ripgrep if index missing
         // P0: Use cached index + cached reader to avoid per-query MmapDirectory open (53k latency fix)
-        let index_path = default_index_path();
+        let index_path = default_index_path(&self.repository_id);
         let _st = Instant::now();
         match coderun_storage::tantivy_index::TantivyIndex::open_cached(&index_path) {
             Ok(idx) => {
@@ -1139,16 +1138,20 @@ fn is_file_unchanged_fast(path: &Path, rec: &coderun_storage::FileRecord) -> boo
 /// Default tantivy index path (spec §3 — MmapDirectory).
 /// `CODERUN_INDEX_DIR` overrides for tests/isolation (TASK-035) — keeps the shared
 /// global index from being polluted by parallel test runs.
-fn default_index_path() -> String {
+fn default_index_path(repository_id: &str) -> String {
     if let Ok(dir) = std::env::var("CODERUN_INDEX_DIR") {
         if !dir.is_empty() {
             return dir;
         }
     }
     if let Some(home) = dirs_home() {
-        home.join(".coderun").join("index").to_string_lossy().to_string()
+        home.join(".coderun")
+            .join("index")
+            .join(repository_id)
+            .to_string_lossy()
+            .to_string()
     } else {
-        ".coderun/index".to_string()
+        format!(".coderun/index/{}", repository_id)
     }
 }
 

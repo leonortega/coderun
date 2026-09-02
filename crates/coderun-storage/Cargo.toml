@@ -15,7 +15,7 @@ anyhow.workspace = true
 
 # Tantivy for BM25 full-text indexing
 tantivy = "0.26"
-tantivy-tokenizer-api = "0.2"
+tantivy-tokenizer-api = "0.7"
 
 [features]
 default = []
