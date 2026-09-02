@@ -16,6 +16,7 @@ pub mod structural;
 pub mod structural_plan;
 pub mod benchmark;
 pub mod bench_retrieval;
+pub mod bench_dt;
 #[cfg(test)]
 mod integration_tests;
 

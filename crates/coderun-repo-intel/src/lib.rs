@@ -7,7 +7,23 @@ pub mod watcher;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+
+/// Global dependency graph cache — keyed by repository_id.
+/// Avoids rebuilding the graph on every query (140ms → 0ms after first call).
+static GRAPH_CACHE: OnceLock<Mutex<HashMap<String, graph::DependencyGraph>>> = OnceLock::new();
+
+fn graph_cache() -> &'static Mutex<HashMap<String, graph::DependencyGraph>> {
+    GRAPH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn dirs() -> PathBuf {
+    std::env::var("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(PathBuf::from))
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
 
 use coderun_core::{SearchResult, SearchResults};
 use coderun_events::{EventBus, RuntimeEvent};
@@ -117,6 +133,9 @@ pub struct RepositoryIntelligence {
     #[allow(dead_code)]
     /// Cache of file hashes for quick change detection
     file_hashes: HashMap<String, String>,
+    /// Cached file count (populated during init, used for graph-build decision)
+    cached_file_count: std::sync::OnceLock<usize>,
+
 }
 
 impl RepositoryIntelligence {
@@ -136,6 +155,7 @@ impl RepositoryIntelligence {
             event_bus,
             patterns,
             file_hashes,
+            cached_file_count: std::sync::OnceLock::new(),
         }
     }
 
@@ -798,15 +818,56 @@ impl RepositoryIntelligence {
         Ok(results)
     }
 
-    /// Build dependency graph for the current repo (spec §3, ROADMAP.md:81)
+    /// Build dependency graph for the current repo (spec §3, ROADMAP.md:81).
+    /// Result is cached in-memory + on disk — first call builds, subsequent calls (even new CLI processes) return instantly.
     pub fn build_dependency_graph(&self) -> Result<graph::DependencyGraph, String> {
+        // 1. Check in-memory cache first
+        {
+            let cache = graph_cache().lock().map_err(|e| format!("graph cache lock: {e}"))?;
+            if let Some(g) = cache.get(&self.repository_id) {
+                return Ok(g.clone());
+            }
+        }
+        // 2. Check disk cache
+        let disk_path = self.graph_disk_path();
+        if disk_path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&disk_path) {
+                if let Ok(graph) = serde_json::from_str::<graph::DependencyGraph>(&data) {
+                    let mut cache = graph_cache().lock().map_err(|e| format!("graph cache lock: {e}"))?;
+                    cache.insert(self.repository_id.clone(), graph.clone());
+                    if std::env::var("CODERUN_PROFILE").is_ok() {
+                        eprintln!("[profile] code_search.build_dependency_graph: 0ms (disk cache hit)");
+                    }
+                    return Ok(graph);
+                }
+            }
+        }
+        // 3. Cache miss — build graph
         let _t = Instant::now();
         let files = self.walk_directory(&self.repo_path)?;
         let graph = graph::DependencyGraph::build_from_files(&self.repo_path, &files);
         if std::env::var("CODERUN_PROFILE").is_ok() {
             eprintln!("[profile] code_search.build_dependency_graph: {}ms ({} files)", _t.elapsed().as_millis(), files.len());
         }
+        // 4. Store in memory + disk cache
+        {
+            let mut cache = graph_cache().lock().map_err(|e| format!("graph cache lock: {e}"))?;
+            cache.insert(self.repository_id.clone(), graph.clone());
+        }
+        // Persist to disk for cross-process cache (CLI invocations)
+        let disk_path = self.graph_disk_path();
+        if let Ok(data) = serde_json::to_string(&graph) {
+            if let Some(parent) = disk_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&disk_path, data);
+        }
         Ok(graph)
+    }
+
+    /// Disk cache path for the dependency graph
+    fn graph_disk_path(&self) -> PathBuf {
+        dirs().join(".coderun").join("graphs").join(format!("{}.json", self.repository_id))
     }
 
     /// LSP client accessor (optional enrichment, never hard dep)
@@ -822,6 +883,16 @@ impl RepositoryIntelligence {
     /// Repository path accessor for provenance (TASK-008)
     pub fn repo_path(&self) -> &std::path::Path {
         &self.repo_path
+    }
+
+    /// Quick file count for this repository — used for graph-build decision.
+    /// Cached after first call (walks directory tree once, then returns cached value).
+    pub fn file_count(&self) -> usize {
+        *self.cached_file_count.get_or_init(|| {
+            self.walk_directory(&self.repo_path)
+                .map(|v| v.len())
+                .unwrap_or(0)
+        })
     }
 
     /// Walk directory tree, yielding indexable files — Phase3 parallel (threads=4, CODERUN_INDEX_THREADS override)

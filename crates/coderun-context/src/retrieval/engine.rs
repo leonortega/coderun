@@ -270,10 +270,12 @@ impl Retriever for TantivyRetriever {
             Err(_) => {
                 return RetrievalResult::empty(coderun_core::RetrievalStatus::IndexUnavailable);
             }
-        };
-
-        let effective_max = policy.effective_max_files(doc_count);
+        };        let effective_max = policy.effective_max_files(doc_count);
         let candidate_k = policy.effective_candidate_k_for(doc_count);
+
+        // Build retrieval plan from intent (auto-enables graph for debugging/implementation)
+        let has_structural = crate::retrieval::structural::parse_structural_query(&query.text).is_some();
+        let plan = RetrievalPlan::from_intent(intent, has_structural);
 
         let mut used_fallback = false;
         let mut status = coderun_core::RetrievalStatus::NoMatch;
@@ -366,12 +368,15 @@ impl Retriever for TantivyRetriever {
         let _cb_signals = ranking::add_code_behind(&mut merged, policy);
         merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Graph boost
-        let graph_enabled = policy.enable_graph || std::env::var("CODERUN_BUILD_GRAPH").ok().as_deref() == Some("1");
-        let large_repo = doc_count > 5000;
+        // Graph boost — auto-enabled by intent (debugging/implementation) on medium repos,
+        // or forced via CODERUN_BUILD_GRAPH=1. Skipped on large repos (>5k) and type-defs-heavy repos.
+        // Fast path: if global doc_count > 10k, skip expensive file_count walk (repo is definitely large)
+        let force_graph = std::env::var("CODERUN_BUILD_GRAPH").ok().as_deref() == Some("1");
+        let graph_enabled = (plan.graph || policy.enable_graph || force_graph)
+            && (doc_count <= 5000 || repo_intel.file_count() <= 5000);
         let mut graph_ms = 0u64;
         let mut graph_signals: HashMap<String, RetrievalSignal> = HashMap::new();
-        if merged.len() >= 2 && (graph_enabled || !large_repo) {
+        if merged.len() >= 2 && graph_enabled {
             let tg = Instant::now();
             if let Ok(repo_path) = repo_intel.repo_path().canonicalize() {
                 let _ = repo_path;

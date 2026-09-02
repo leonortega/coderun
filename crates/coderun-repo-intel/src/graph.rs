@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 /// Dependency graph derived from imports (local AST + regex)
 /// Spec §3 Repository Intelligence — produce symbols, dependency graph, entry points.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DependencyGraph {
     /// adjacency: file -> Vec<dep_file>
     edges: HashMap<String, Vec<String>>,
