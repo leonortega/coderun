@@ -1,7 +1,7 @@
 # 🚀 CodeRun Retrieval Engine — v1 Benchmark Report
 
 > **Date:** September 2, 2026  
-> **Engine:** CodeRun Retrieval Engine v0.8.6  
+> **Engine:** CodeRun Retrieval Engine v0.9.0  
 > **Methodology:** Each benchmark runs 50 hard queries against a real-world codebase, comparing our retrieval engine against `grep -rE` as the baseline. We measure speed (latency), quality (recall, precision, novelty), and semantic understanding.
 
 ---
