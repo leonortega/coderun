@@ -8,7 +8,7 @@ use std::time::Instant;
 use coderun_repo_intel::RepositoryIntelligence;
 
 use crate::retrieval::evidence::{BackendMetrics, Evidence, EvidenceSource, RetrievalDiagnostics, RetrievalResult, RetrievalSignal};
-use crate::retrieval::intent::detect_intent;
+use crate::retrieval::intent::{detect_intent, QueryIntent};
 use crate::retrieval::plan::RetrievalPlan;
 use crate::retrieval::policy::RetrievalPolicy;
 use crate::retrieval::query::RetrievalQuery;
@@ -270,8 +270,34 @@ impl Retriever for TantivyRetriever {
             Err(_) => {
                 return RetrievalResult::empty(coderun_core::RetrievalStatus::IndexUnavailable);
             }
-        };        let effective_max = policy.effective_max_files(doc_count);
-        let candidate_k = policy.effective_candidate_k_for(doc_count);
+        };        // Structural mode: "find all X" queries need exhaustive results, not top-50.
+        // Detect structural intent and increase limits significantly.
+        let is_structural_exhaustive = matches!(intent,
+            QueryIntent::Structural
+        ) && (query.text.to_lowercase().starts_with("find all")
+            || query.text.to_lowercase().starts_with("show all")
+            || query.text.to_lowercase().starts_with("list all")
+            || query.text.to_lowercase().contains("all error")
+            || query.text.to_lowercase().contains("all config")
+            || query.text.to_lowercase().contains("all test")
+            || query.text.to_lowercase().contains("all api")
+            || query.text.to_lowercase().contains("all database")
+            || query.text.to_lowercase().contains("all enum")
+            || query.text.to_lowercase().contains("all interface")
+            || query.text.to_lowercase().contains("all type"));
+
+        let effective_max = if is_structural_exhaustive {
+            // Structural exhaustive: return up to 500 results (vs default 20-50)
+            policy.effective_max_files(doc_count).max(500).min(doc_count)
+        } else {
+            policy.effective_max_files(doc_count)
+        };
+        let candidate_k = if is_structural_exhaustive {
+            // Need larger candidate pool for exhaustive queries
+            policy.effective_candidate_k_for(doc_count).max(500).min(1000)
+        } else {
+            policy.effective_candidate_k_for(doc_count)
+        };
 
         // Build retrieval plan from intent (auto-enables graph for debugging/implementation)
         let has_structural = crate::retrieval::structural::parse_structural_query(&query.text).is_some();
@@ -279,12 +305,19 @@ impl Retriever for TantivyRetriever {
 
         let mut used_fallback = false;
         let mut status = coderun_core::RetrievalStatus::NoMatch;
-        let search_results = match repo_intel.search_fulltext(&expanded_query, query.language.as_deref(), candidate_k, Some(&query.repository_id)) {
-            Ok(sr) if sr.total_count > 0 => {
+
+        // Phrase query fallback: Tantivy 0.26.1 panics on phrase queries with large indices
+        // ("target should be >= doc"). Catch the panic and fall back to individual term search.
+        let search_results = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            repo_intel.search_fulltext(&expanded_query, query.language.as_deref(), candidate_k, Some(&query.repository_id))
+        })) {
+            // Normal success path
+            Ok(Ok(sr)) if sr.total_count > 0 => {
                 status = coderun_core::RetrievalStatus::Found(sr.total_count);
                 sr
             }
-            Ok(_) => {
+            // Success but empty — try fallback
+            Ok(Ok(_)) => {
                 used_fallback = true;
                 let fallback_q = if has_expansion { expanded_query.clone() } else { query.text.clone() };
                 match repo_intel.search_text(&fallback_q, query.language.as_deref(), candidate_k) {
@@ -296,7 +329,8 @@ impl Retriever for TantivyRetriever {
                     Err(e) => return RetrievalResult::empty(coderun_core::RetrievalStatus::RetrievalFailed(e)),
                 }
             }
-            Err(e) => {
+            // Error from search_fulltext — try fallback
+            Ok(Err(e)) => {
                 used_fallback = true;
                 let fallback_q = if has_expansion { expanded_query.clone() } else { query.text.clone() };
                 match repo_intel.search_text(&fallback_q, query.language.as_deref(), candidate_k) {
@@ -306,6 +340,31 @@ impl Retriever for TantivyRetriever {
                     }
                     Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
                     Err(_) => return RetrievalResult::empty(coderun_core::RetrievalStatus::RetrievalFailed(e)),
+                }
+            }
+            // PANIC from Tantivy phrase query — log and fall back to ripgrep
+            Err(panic_info) => {
+                used_fallback = true;
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                tracing::warn!(
+                    query = %expanded_query,
+                    panic = %panic_msg,
+                    "Tantivy phrase query panicked — falling back to ripgrep"
+                );
+                let fallback_q = if has_expansion { expanded_query.clone() } else { query.text.clone() };
+                match repo_intel.search_text(&fallback_q, query.language.as_deref(), candidate_k) {
+                    Ok(sr) if sr.total_count > 0 => {
+                        status = coderun_core::RetrievalStatus::FallbackUsed("tantivy-panic→ripgrep".to_string());
+                        sr
+                    }
+                    Ok(_) => coderun_core::SearchResults { results: vec![], total_count: 0 },
+                    Err(e) => return RetrievalResult::empty(coderun_core::RetrievalStatus::RetrievalFailed(e)),
                 }
             }
         };

@@ -448,8 +448,21 @@ fn bench_components() {
     let db_path = home_dir().join(".coderun").join("data.db");
     let db = Database::open(&db_path).expect("Failed to open database");
     let event_bus = EventBus::new();
-    let repo_intel =
+    let mut repo_intel =
         RepositoryIntelligence::new(coderun_root.to_path_buf(), db, event_bus.clone());
+
+    // Ensure index is built — without this, validate_index returns "index not built"
+    // and every query returns empty results (the bug that caused all-zeros in v1).
+    match repo_intel.index_repository() {
+        Ok(stats) => {
+            eprintln!("Index built: {} files indexed, {} symbols extracted, {}ms",
+                stats.files_indexed, stats.symbols_extracted, stats.duration_ms);
+        }
+        Err(e) => {
+            eprintln!("WARNING: index build failed: {} — queries may return empty results", e);
+        }
+    }
+
     let retriever = CombinedRetriever::default();
 
     // 1. Graph boost evaluation
