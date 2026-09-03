@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Knocode installer v0.8.0 minimal (Unix: Linux/macOS, bash)
-# Minimal v1: Tree-sitter+Tantivy+SQLite+Git + ast-grep/RTK optional; promptfoo deferred per V1_MINIMAL_STACK_PLAN.md:2
+# Minimal v1: Git + SQLite(bundled)/tree-sitter/tantivy/tiktoken embedded + RTK optional (no Rust - prebuilt binaries; compile via scripts/compile.sh)
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external] [--with-optional]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,15 +16,8 @@ for p in knocode-daemon knocode; do
   if pgrep -x "$p" >/dev/null 2>&1; then pkill -x "$p" 2>/dev/null || true; ok "stopped $p"; fi
 done
 
-# Rust/rustup kept for the clippy analyzer (RTK now ships prebuilt - no cargo build needed)
-NEED_RUST=false
-if ! command -v rustc >/dev/null 2>&1; then NEED_RUST=true; fi
-if [ "$NEED_RUST" = true ]; then
-  info "Installing Rust stable via rustup (for clippy analyzer)..."
-  if command -v rustup >/dev/null 2>&1; then rustup update stable 2>/dev/null; rustup default stable 2>/dev/null; ok "rustc $(rustc --version) (updated)"
-  else curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>/dev/null; export PATH="$HOME/.cargo/bin:$PATH"; fi
-fi
-ok "rustc $(rustc --version)"
+# No Rust needed: knocode ships prebuilt (target/release) and the installer does not compile.
+# Source builds use scripts/compile.sh (or CI).
 command -v node >/dev/null || warn "node not found - install Node >=20 https://nodejs.org"; command -v node >/dev/null && ok "node $(node --version)"
 if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
   info "python3 not found - attempting install..."
@@ -37,7 +30,6 @@ command -v git >/dev/null || { echo "git not found"; exit 1; }; ok "$(git --vers
 
 if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-external)"; else
   info "Installing first-class external tools..."
-  command -v ast-grep >/dev/null && ok "ast-grep $(ast-grep --version)" || { info "  ast-grep via npm (@ast-grep/cli, prebuilt)..."; npm i -g @ast-grep/cli 2>/dev/null && ok "ast-grep installed" || warn "ast-grep npm install failed - fallback WARN"; }
    # RTK - download prebuilt release for this platform -> ~/.knocode/bin/rtk (NO COMPILE). Unified bin.
    RTK_BIN="$HOME/.knocode/bin/rtk"
    if [ -f "$HOME/bin/rtk" ] && [ ! -f "$RTK_BIN" ]; then mkdir -p "$(dirname "$RTK_BIN")"; cp -f "$HOME/bin/rtk" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "migrated legacy ~/bin/rtk -> $RTK_BIN" || true; fi
@@ -70,7 +62,7 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
        rm -rf "$RTK_TMP" 2>/dev/null
      fi
    fi
-   rustup component add clippy 2>/dev/null; ok "clippy"; command -v eslint >/dev/null || npm i -g eslint 2>/dev/null; command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "eslint/promptfoo check"
+   command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "promptfoo check"
 
 fi
 

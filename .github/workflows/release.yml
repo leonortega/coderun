@@ -1,0 +1,78 @@
+name: Release
+
+# Builds knocode + knocode-daemon (Windows x64) whenever a v* tag is pushed and
+# publishes them to the GitHub Release for that tag, together with the end-user
+# installer script (installers/knocode-install.ps1). The Release is created
+# automatically if it does not exist yet; re-pushing the same tag updates it.
+#
+#   git tag v0.9.0 && git push origin v0.9.0
+#   (or: cargo install cargo-release && cargo release patch)
+#
+# Releases for other platforms can be added later by extending the matrix —
+# see installers/knocode-install.ps1 for the x64-only assumption.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows-x64:
+    name: Build & publish (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          ver="$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -n 1)"
+          if [ -z "${ver}" ]; then
+            echo "::error::could not read workspace.package.version from Cargo.toml"
+            exit 1
+          fi
+          if [ "${tag}" != "v${ver}" ]; then
+            echo "::error::tag '${tag}' does not match Cargo.toml version 'v${ver}' — bump the version and re-tag"
+            exit 1
+          fi
+          echo "version=${ver}" >> "${GITHUB_ENV}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release -p knocode-cli -p knocode-daemon
+
+      - name: Smoke test binaries
+        shell: bash
+        run: |
+          ./target/release/knocode.exe --version
+          ls -l target/release/knocode.exe target/release/knocode-daemon.exe
+
+      - name: Package release archive
+        shell: pwsh
+        run: |
+          $asset = "knocode-$env:version-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -Path "target/release/knocode.exe", "target/release/knocode-daemon.exe" -DestinationPath $asset -CompressionLevel Optimal
+          Get-Item $asset | Select-Object Name, Length
+          "asset=$asset" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Knocode ${{ github.ref_name }}
+          files: |
+            ${{ env.asset }}
+            installers/knocode-install.ps1
+          draft: false
+          prerelease: false

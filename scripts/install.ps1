@@ -5,8 +5,8 @@
   Installs minimal v1 stack + uses prebuilt knocode (no compile/test). Idempotent - re-run to update.
 
 .DESCRIPTION
-  Minimal v1: Rust, Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
-         ast-grep, RTK (optional), analyzers (clippy/eslint)
+  Minimal v1: Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
+         RTK (optional) - no Rust needed (prebuilt binaries; compile via scripts/compile.*)
   Deferred/optional: promptfoo - install only with -WithOptional
   Prebuilt: target/release/knocode.exe + knocode-daemon.exe are used directly (no cargo build/test).
 
@@ -45,21 +45,9 @@ foreach ($procName in @("knocode-daemon", "knocode")) {
   }
 }
 
-# 0. Prereqs - Rust/rustup kept for the clippy analyzer (RTK now ships prebuilt - no cargo build)
-$needRustInstall = $false
-if (-not (Test-Cmd rustc)) { $needRustInstall = $true }
-if ($needRustInstall) {
-  Info "Installing Rust stable via rustup (for clippy analyzer)..."
-  try {
-    if (Test-Cmd rustup) { rustup update stable 2>&1 | Out-Null; rustup default stable 2>&1 | Out-Null; Ok "rustc $(rustc --version) (updated)" }
-    else {
-      Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile "$env:TEMP\rustup-init.exe" -UseBasicParsing
-      & "$env:TEMP\rustup-init.exe" -y --default-toolchain stable 2>&1 | Out-Null
-      $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
-    }
-  } catch { Warn "rustup update failed: $_" }
-}
-if (-not (Test-Cmd rustc)) { Fail "rustc not found after install" } else { Ok "rustc $(rustc --version)" }
+# 0. Prereqs - no Rust needed: knocode ships prebuilt (target/release) and the installer does not
+#    compile. Source builds use scripts/compile.* (or CI). Rust/clippy were removed from the
+#    installer when it stopped compiling.
 
 if (-not (Test-Cmd node)) { Warn "node not found - install Node >=20 https://nodejs.org then re-run"; } else { Ok "node $(node --version)" }
 if (-not (Test-Cmd python) -and -not (Test-Cmd python3)) {
@@ -88,20 +76,6 @@ if ($SkipExternal) { Info "Skipping external tools (--SkipExternal)" }
 else {
   Info "Installing first-class external tools..."
 
-  # ast-grep (npm @ast-grep/cli - PREBUILT, fast; provides ast-grep + sg commands)
-  if (Test-Cmd ast-grep) { Ok "ast-grep $(ast-grep --version)" }
-  elseif (Test-Cmd npm) {
-    Info "  ast-grep via npm (@ast-grep/cli, prebuilt)..."
-    try {
-      & npm i -g "@ast-grep/cli" *>&1 | Out-Null
-      $npmPrefix = $null; try { $npmPrefix = (& npm prefix -g 2>$null | Out-String).Trim() } catch {}
-      if ($npmPrefix -and (Test-Path $npmPrefix)) { $env:Path = "$npmPrefix;$env:Path" }
-      if ((Test-Cmd ast-grep) -or (Test-Cmd sg)) { Ok "ast-grep installed (npm @ast-grep/cli)" }
-      else { Warn "ast-grep npm install did not put 'ast-grep'/'sg' on PATH - heuristic fallback will WARN" }
-    } catch { Warn "ast-grep npm install failed - heuristic fallback will WARN" }
-  }
-  else { Warn "npm not found - cannot install ast-grep (heuristic fallback will WARN)" }
-  }
 
   # RTK - download prebuilt release -> ~\.knocode\bin\rtk.exe (NO COMPILE). Unified bin.
   $rtkBinPath = Join-Path $env:USERPROFILE ".knocode\bin\rtk.exe"
@@ -136,10 +110,6 @@ else {
   }
 
 
-  # analyzers
-  try { rustup component add clippy 2>&1 | Out-Null; Ok "clippy" } catch {}
-  if (Test-Cmd npm) { try { npm list -g eslint 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { npm i -g eslint 2>&1 | Out-Null }; Ok "eslint" } catch {} }
-
   # promptfoo (eval) - suppress Node ExperimentalWarning
   $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
   $env:NODE_NO_WARNINGS = "1"
@@ -163,7 +133,7 @@ else {
     } catch { Info "  promptfoo not installed (optional - for eval: npm i -g promptfoo) - $_" }
   }
   $ErrorActionPreference = $prevEA2
-
+}
 
 
 # 1. Use prebuilt knocode (no compile/test - use repository binary)
