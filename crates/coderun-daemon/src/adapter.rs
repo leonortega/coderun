@@ -247,6 +247,7 @@ async fn handle_connection(
     let session_key = match &request.payload {
         RequestPayload::MessageRewrite { session_id, .. } => session_id.clone(),
         RequestPayload::ToolOutput { tool_name, .. } => tool_name.clone(),
+        RequestPayload::Probe => "probe".to_string(),
     };
     if rate_limiter.is_rate_limited(&session_key) {
         crate::metrics::global().inc_fail_open();
@@ -258,6 +259,7 @@ async fn handle_connection(
                 original: match &request.payload {
                     RequestPayload::MessageRewrite { message, .. } => message.clone(),
                     RequestPayload::ToolOutput { content, .. } => content.clone(),
+                    RequestPayload::Probe => String::new(),
                 },
                 reason: "rate_limited".to_string(),
             },
@@ -326,7 +328,6 @@ async fn handle_request(
     let start = std::time::Instant::now();
     let correlation_id = request.correlation_id.clone();
     let hook_type = request.hook_type.clone();
-    // HMAC verification helper (workflow/webhook auth) — keep symbol used; real verification in http_server
     let _hmac_probe = crate::ratelimit::verify_hmac("", "", "");
 
     let result = match &request.payload {
@@ -358,6 +359,14 @@ async fn handle_request(
                 context.clone(),
                 &optimizer,
             )
+        }
+        RequestPayload::Probe => {
+            let m = crate::metrics::global();
+            Ok(ResponsePayload::Probe {
+                state: m.readiness_str().to_string(),
+                index_files: m.index_files(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            })
         }
     };
 
@@ -399,6 +408,7 @@ async fn handle_request(
             let original = match &request.payload {
                 RequestPayload::MessageRewrite { message, .. } => message.clone(),
                 RequestPayload::ToolOutput { content, .. } => content.clone(),
+                RequestPayload::Probe => String::new(),
             };
 
             AgentResponse {
@@ -440,7 +450,7 @@ async fn handle_pre_generation(
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.read().await;
     let context_pack = engine.build_context(&task).await?;
-    crate::metrics::global().inc_requests("PreGeneration", "balanced");
+    crate::metrics::global().inc_requests("PreGeneration");
 
     // TASK-031/F-2: zero-value rewrite suppression
     if context_pack.token_usage.total_tokens == 0 {

@@ -37,6 +37,16 @@ impl Histogram {
     }
 }
 
+/// Daemon readiness for clients that poll before sending requests.
+/// `Indexing` while the initial index (or an auto-reindex) is running,
+/// `Ready` once requests can be served without waiting on the engine lock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Readiness {
+    #[default]
+    Indexing,
+    Ready,
+}
+
 // TASK-022: metrics should answer How fast? How many tokens saved? How much context? Which model? How often fail-open? How good is retrieval?
 #[derive(Default)]
 pub struct Metrics {
@@ -47,6 +57,7 @@ pub struct Metrics {
     tokens_saved: Mutex<usize>,
     context_tokens: Mutex<Histogram>,
     retrieval_recall: Mutex<f64>,
+    readiness: Mutex<Readiness>,
 }
 
 impl Metrics {
@@ -59,12 +70,12 @@ impl Metrics {
             tokens_saved: Mutex::new(0),
             context_tokens: Mutex::new(Histogram::new(vec![100.0, 1000.0, 5000.0, 12000.0, 30000.0])),
             retrieval_recall: Mutex::new(0.0),
+            readiness: Mutex::new(Readiness::Indexing),
         }
     }
 
-    pub fn inc_requests(&self, hook_type: &str, tier: &str) {
-        let key = format!("{}_{}", hook_type, tier);
-        if let Ok(mut m) = self.requests_total.lock() { *m.entry(key).or_insert(0) += 1; }
+    pub fn inc_requests(&self, hook_type: &str) {
+        if let Ok(mut m) = self.requests_total.lock() { *m.entry(hook_type.to_string()).or_insert(0) += 1; }
     }
 
     pub fn observe_build_duration(&self, secs: f64) {
@@ -90,9 +101,35 @@ impl Metrics {
         if let Ok(mut r) = self.retrieval_recall.lock() { *r = recall; }
     }
 
+    /// Daemon readiness — `Indexing` while the initial index / an auto-reindex runs,
+    /// `Ready` once requests can be served without waiting on the engine lock.
+    pub fn set_readiness(&self, readiness: Readiness) {
+        if let Ok(mut r) = self.readiness.lock() { *r = readiness; }
+    }
+
+    pub fn readiness(&self) -> Readiness {
+        self.readiness.lock().map(|r| *r).unwrap_or(Readiness::Indexing)
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.readiness() == Readiness::Ready
+    }
+
+    /// Stable wire string for the probe payloads (`/health`, UDS `Probe`) — "indexing" | "ready".
+    pub fn readiness_str(&self) -> &'static str {
+        match self.readiness() {
+            Readiness::Ready => "ready",
+            Readiness::Indexing => "indexing",
+        }
+    }
+
+    pub fn index_files(&self) -> usize {
+        self.index_files.lock().map(|g| *g).unwrap_or(0)
+    }
+
     pub fn exposition(&self) -> String {
         let mut out = String::new();
-        out.push_str("# HELP coderun_requests_total Total requests by hook+tier\n# TYPE coderun_requests_total counter\n");
+        out.push_str("# HELP coderun_requests_total Total requests by hook\n# TYPE coderun_requests_total counter\n");
         if let Ok(m) = self.requests_total.lock() {
             for (k, v) in m.iter() {
                 out.push_str(&format!("coderun_requests_total{{key=\"{}\"}} {}\n", k, v));
@@ -106,6 +143,10 @@ impl Metrics {
         }
         if let Ok(g) = self.index_files.lock() {
             out.push_str(&format!("# HELP coderun_index_files Indexed files\n# TYPE coderun_index_files gauge\ncoderun_index_files {}\n", *g));
+        }
+        {
+            let ready = self.is_ready();
+            out.push_str(&format!("# HELP coderun_daemon_ready Daemon readiness (1 = ready, 0 = indexing)\n# TYPE coderun_daemon_ready gauge\ncoderun_daemon_ready {}\n", if ready { 1 } else { 0 }));
         }
         if let Ok(c) = self.tokens_saved.lock() {
             out.push_str(&format!("# HELP coderun_tokens_saved_total Tokens saved by optimizer\n# TYPE coderun_tokens_saved_total counter\ncoderun_tokens_saved_total {}\n", *c));
@@ -144,7 +185,7 @@ mod tests {
     #[test]
     fn test_metrics_exposition() {
         let m = Metrics::new();
-        m.inc_requests("PreGeneration", "balanced");
+        m.inc_requests("PreGeneration");
         m.observe_build_duration(0.03);
         m.inc_fail_open();
         m.set_index_files(42);
@@ -153,6 +194,25 @@ mod tests {
         assert!(exp.contains("coderun_build_context_duration_seconds"));
         assert!(exp.contains("coderun_fail_open_total"));
         assert!(exp.contains("coderun_index_files 42"));
+    }
+
+    #[test]
+    fn test_readiness_default_indexing() {
+        let m = Metrics::new();
+        assert_eq!(m.readiness(), Readiness::Indexing);
+        assert!(!m.is_ready());
+        assert!(m.exposition().contains("coderun_daemon_ready 0"));
+    }
+
+    #[test]
+    fn test_readiness_transitions() {
+        let m = Metrics::new();
+        m.set_readiness(Readiness::Ready);
+        assert!(m.is_ready());
+        assert!(m.exposition().contains("coderun_daemon_ready 1"));
+        m.set_readiness(Readiness::Indexing);
+        assert!(!m.is_ready());
+        assert!(m.exposition().contains("coderun_daemon_ready 0"));
     }
 
     #[test]

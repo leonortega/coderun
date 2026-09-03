@@ -7,14 +7,14 @@ pub mod secrets;
 pub mod traits;
 
 // Re-export commonly used types
-pub use config::Config;
+pub use config::{Config, WatchMode};
 pub use error::{CoderunError, ConfigError, CorrelationId, Result};
 pub use secrets::{contains_secret, redact_secrets};
-pub use traits::{IContextBuilder, IWorkflowEngine, NoopWorkflowEngine};
+pub use traits::IContextBuilder;
 pub use ipc::{
     AgentRequest, AgentResponse, CodeFile, ContextHints, ContextPack, HookType,
     KnowledgeEntry, OutputType, RequestPayload, ResponsePayload, RetrievalStatus,
     RewrittenMessageData, SearchResult, SearchResults,
-    SkillMatch, TaskRequest, TokenUsage, FileDiagnostic, MissType, RetrievalDiagnostic,
+    TaskRequest, TokenUsage, FileDiagnostic, MissType, RetrievalDiagnostic,
     repository_id_from_path,
 };

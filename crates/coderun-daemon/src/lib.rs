@@ -3,5 +3,6 @@
 pub mod adapter;
 pub mod http_server;
 pub mod lifecycle;
+pub mod mcp;
 pub mod metrics;
 pub mod ratelimit;

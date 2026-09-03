@@ -15,9 +15,13 @@ pub mod engine;
 pub mod structural;
 pub mod structural_plan;
 pub mod benchmark;
+#[cfg(test)]
 pub mod bench_retrieval;
+#[cfg(test)]
 pub mod bench_dt;
+#[cfg(test)]
 pub mod bench_mattermost;
+#[cfg(test)]
 pub mod bench_components;
 #[cfg(test)]
 mod integration_tests;

@@ -14,9 +14,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub index: IndexConfig,
     pub knowledge: KnowledgeConfig,
-    pub skills: SkillsConfig,
     pub context: ContextConfig,
-    pub model: ModelConfig,
     pub rtk: RtkConfig,
     pub logging: LoggingConfig,
 }
@@ -36,25 +34,61 @@ pub struct DatabaseConfig {
     pub max_connections: usize,
 }
 
+/// Auto-reindex watch mode — single source of truth shared by config, CLI and daemon.
+/// Possible values: `commit` (default) or `filesystem` (aliases `git`/`fs` accepted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchMode {
+    /// Re-index only when a new git commit lands on the current HEAD.
+    #[serde(alias = "git")]
+    Commit,
+    /// Re-index on any repository file change (debounced, via `notify`).
+    #[serde(alias = "fs")]
+    Filesystem,
+}
+
+impl Default for WatchMode {
+    fn default() -> Self {
+        Self::Commit
+    }
+}
+
+impl std::fmt::Display for WatchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Commit => write!(f, "commit"),
+            Self::Filesystem => write!(f, "filesystem"),
+        }
+    }
+}
+
+impl std::str::FromStr for WatchMode {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "commit" | "git" => Ok(Self::Commit),
+            "filesystem" | "fs" => Ok(Self::Filesystem),
+            _ => Err(format!(
+                "unknown watch mode '{}': expected 'commit' or 'filesystem'",
+                s
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IndexConfig {
     pub path: String,
     pub languages: Vec<String>,
+    /// Auto-reindex watch mode: `commit` (default) or `filesystem`.
+    pub watch_mode: WatchMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeConfig {
     pub max_knowledge_entries: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SkillsConfig {
-    pub path: String,
-    pub auto_discover: bool,
-    pub max_skills_per_request: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,14 +101,6 @@ pub struct ContextConfig {
     /// Candidate pool size before deterministic ranking (P1 sweep 20/50/100/200, default 100 → Top 20)
     /// Env CODERUN_CANDIDATE_K overrides; CLI --candidate-k overrides config.
     pub candidate_k: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ModelConfig {
-    pub default_tier: String,
-    pub routing_enabled: bool,
-    pub max_tokens_response: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +154,7 @@ impl Default for IndexConfig {
                 "javascript".to_string(),
                 "python".to_string(),
             ],
+            watch_mode: WatchMode::Commit,
         }
     }
 }
@@ -140,16 +167,6 @@ impl Default for KnowledgeConfig {
     }
 }
 
-impl Default for SkillsConfig {
-    fn default() -> Self {
-        Self {
-            path: ".coderun/skills/".to_string(),
-            auto_discover: true,
-            max_skills_per_request: 5,
-        }
-    }
-}
-
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
@@ -157,21 +174,10 @@ impl Default for ContextConfig {
             max_files: 20,
             max_lines_per_file: 500,
             cache_order: vec![
-                "behavioral_skills".to_string(),
                 "docs_context".to_string(),
                 "code_context".to_string(),
             ],
             candidate_k: 100,
-        }
-    }
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            default_tier: "balanced".to_string(),
-            routing_enabled: true,
-            max_tokens_response: 4096,
         }
     }
 }
@@ -259,9 +265,7 @@ impl Config {
         self.database = other.database;
         self.index = other.index;
         self.knowledge = other.knowledge;
-        self.skills = other.skills;
         self.context = other.context;
-        self.model = other.model;
         self.rtk = other.rtk;
         self.logging = other.logging;
     }
@@ -277,9 +281,6 @@ impl Config {
         if let Ok(val) = std::env::var("CODERUN_LOG_LEVEL") {
             self.logging.level = val;
         }
-        if let Ok(val) = std::env::var("CODERUN_MODEL_DEFAULT") {
-            self.model.default_tier = val;
-        }
         if let Ok(val) = std::env::var("CODERUN_CONTEXT_MAX_TOKENS") {
             if let Ok(n) = val.parse() {
                 self.context.max_tokens = n;
@@ -293,6 +294,12 @@ impl Config {
         if let Ok(val) = std::env::var("CODERUN_MAX_FILES") {
             if let Ok(n) = val.parse() {
                 self.context.max_files = n;
+            }
+        }
+        if let Ok(val) = std::env::var("CODERUN_WATCH_MODE") {
+            match val.parse::<WatchMode>() {
+                Ok(m) => self.index.watch_mode = m,
+                Err(e) => tracing::warn!(value = %val, error = %e, "Ignoring invalid CODERUN_WATCH_MODE"),
             }
         }
         // CODERUN_LITELLM_URL removed with LiteLLM — see LLM_ROUTING_REMOVAL.md
@@ -351,19 +358,6 @@ impl Config {
             return Err(ConfigError::InvalidValue {
                 field: "context.candidate_k".to_string(),
                 message: "must be greater than 0".to_string(),
-            }
-            .into());
-        }
-
-        // Model
-        let valid_tiers = ["fast", "balanced", "capable"];
-        if !valid_tiers.contains(&self.model.default_tier.as_str()) {
-            return Err(ConfigError::InvalidValue {
-                field: "model.default_tier".to_string(),
-                message: format!(
-                    "must be one of: {}",
-                    valid_tiers.join(", ")
-                ),
             }
             .into());
         }
@@ -448,21 +442,11 @@ languages = ["rust", "python"]
 [knowledge]
 max_knowledge_entries = 5000
 
-[skills]
-path = "/skills/"
-auto_discover = false
-max_skills_per_request = 3
-
 [context]
 max_tokens = 8000
 max_files = 10
 max_lines_per_file = 200
 cache_order = ["code_context"]
-
-[model]
-default_tier = "fast"
-routing_enabled = false
-max_tokens_response = 2048
 
 [rtk]
 enabled = false
@@ -480,8 +464,6 @@ retention_days = 3
         assert_eq!(config.daemon.max_concurrent, 5);
         assert_eq!(config.database.path, "/tmp/test.db");
         assert_eq!(config.context.max_tokens, 8000);
-        assert_eq!(config.model.default_tier, "fast");
-        assert!(!config.model.routing_enabled);
         assert!(config.validate().is_ok());
     }
 
@@ -503,14 +485,6 @@ retention_days = 3
         config.daemon.max_concurrent = 0;
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("daemon.max_concurrent"));
-    }
-
-    #[test]
-    fn test_validation_fails_invalid_tier() {
-        let mut config = Config::default();
-        config.model.default_tier = "ultra".to_string();
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("model.default_tier"));
     }
 
     #[test]
@@ -536,7 +510,36 @@ retention_days = 3
         let loaded = Config::from_toml(&toml).unwrap();
         assert_eq!(config.daemon.socket_path, loaded.daemon.socket_path);
         assert_eq!(config.context.max_tokens, loaded.context.max_tokens);
-        assert_eq!(config.model.default_tier, loaded.model.default_tier);
+    }
+
+    #[test]
+    fn test_watch_mode_default_is_commit() {
+        assert_eq!(WatchMode::default(), WatchMode::Commit);
+        let config = Config::default();
+        assert_eq!(config.index.watch_mode, WatchMode::Commit);
+        // Serializes back to the canonical "commit" string
+        let toml = config.to_toml().unwrap();
+        assert!(toml.contains("watch_mode = \"commit\""));
+    }
+
+    #[test]
+    fn test_watch_mode_parsing_and_aliases() {
+        assert_eq!("commit".parse::<WatchMode>().unwrap(), WatchMode::Commit);
+        assert_eq!("git".parse::<WatchMode>().unwrap(), WatchMode::Commit);
+        assert_eq!("filesystem".parse::<WatchMode>().unwrap(), WatchMode::Filesystem);
+        assert_eq!("fs".parse::<WatchMode>().unwrap(), WatchMode::Filesystem);
+        assert!("invalid".parse::<WatchMode>().is_err());
+        assert_eq!(WatchMode::Commit.to_string(), "commit");
+        assert_eq!(WatchMode::Filesystem.to_string(), "filesystem");
+    }
+
+    #[test]
+    fn test_watch_mode_serde_from_toml() {
+        let config = Config::from_toml("[index]\nwatch_mode = \"filesystem\"\n").unwrap();
+        assert_eq!(config.index.watch_mode, WatchMode::Filesystem);
+        // Old configs without the key fall back to the default
+        let config = Config::from_toml("[index]\nlanguages = [\"rust\"]\n").unwrap();
+        assert_eq!(config.index.watch_mode, WatchMode::Commit);
     }
 
     #[test]
@@ -558,15 +561,23 @@ socket_path = "/test/sock"
         // Save and restore env
         let original = std::env::var("CODERUN_DAEMON_SOCKET").ok();
         let original_log = std::env::var("CODERUN_LOG_LEVEL").ok();
+        let original_watch = std::env::var("CODERUN_WATCH_MODE").ok();
 
         std::env::set_var("CODERUN_DAEMON_SOCKET", "/env/sock");
         std::env::set_var("CODERUN_LOG_LEVEL", "trace");
+        std::env::set_var("CODERUN_WATCH_MODE", "filesystem");
 
         let mut config = Config::default();
         config.apply_env_overrides();
 
         assert_eq!(config.daemon.socket_path, "/env/sock");
         assert_eq!(config.logging.level, "trace");
+        assert_eq!(config.index.watch_mode, WatchMode::Filesystem);
+
+        // Invalid values are ignored (keep default)
+        std::env::set_var("CODERUN_WATCH_MODE", "bogus");
+        config.apply_env_overrides();
+        assert_eq!(config.index.watch_mode, WatchMode::Filesystem);
 
         // Restore
         match original {
@@ -576,6 +587,10 @@ socket_path = "/test/sock"
         match original_log {
             Some(v) => std::env::set_var("CODERUN_LOG_LEVEL", v),
             None => std::env::remove_var("CODERUN_LOG_LEVEL"),
+        }
+        match original_watch {
+            Some(v) => std::env::set_var("CODERUN_WATCH_MODE", v),
+            None => std::env::remove_var("CODERUN_WATCH_MODE"),
         }
     }
 

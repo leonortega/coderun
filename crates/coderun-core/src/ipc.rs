@@ -10,6 +10,8 @@ use crate::error::CorrelationId;
 pub enum HookType {
     PreGeneration,
     PreToolCall,
+    /// Readiness probe — the daemon answers without touching the engine
+    Probe,
 }
 
 // ── Request Types ───────────────────────────────────────────────────────
@@ -51,6 +53,10 @@ pub enum RequestPayload {
         #[serde(default)]
         repository_path: Option<String>,
     },
+    /// Lightweight readiness probe — the daemon answers `state`/`index_files`/`version`
+    /// without locking the engine or building context. UDS/MessagePack parity with
+    /// `GET /health`; clients poll until `state == "ready"` before sending requests.
+    Probe,
 }
 
 // ── Response Types ──────────────────────────────────────────────────────
@@ -90,6 +96,12 @@ pub enum ResponsePayload {
     OriginalPassthrough {
         original: String,
         reason: String,
+    },
+    /// Readiness probe answer — parity with `GET /health`
+    Probe {
+        state: String,
+        index_files: usize,
+        version: String,
     },
 }
 
@@ -244,7 +256,6 @@ pub enum RetrievalStatus {
 /// The assembled context pack returned to agents — stable artifact (TASK-008)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextPack {
-    pub behavioral_skills: String,
     pub docs_context: String,
     pub code_context: String,
     pub token_usage: TokenUsage,
@@ -366,18 +377,6 @@ pub struct KnowledgeEntry {
     pub relevance_score: Option<f64>,
 }
 
-// ── Skill Types ─────────────────────────────────────────────────────────
-
-/// A skill match result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillMatch {
-    pub skill_name: String,
-    pub match_score: f64,
-    pub instructions: String,
-    pub examples: Vec<String>,
-    pub constraints: Vec<String>,
-}
-
 // ── Code Types ──────────────────────────────────────────────────────────
 
 /// A code file in the context pack
@@ -441,6 +440,34 @@ mod tests {
     }
 
     #[test]
+    fn test_probe_roundtrip() {
+        // Request: unit variant — {"type":"Probe"}
+        let req = RequestPayload::Probe;
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"Probe\""));
+        let parsed: RequestPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, RequestPayload::Probe));
+        assert_eq!(serde_json::to_string(&HookType::Probe).unwrap(), "\"Probe\"");
+
+        // Response: state/index_files/version payload
+        let resp = ResponsePayload::Probe {
+            state: "indexing".to_string(),
+            index_files: 0,
+            version: "0.9.0".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: ResponsePayload = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ResponsePayload::Probe { state, index_files, version } => {
+                assert_eq!(state, "indexing");
+                assert_eq!(index_files, 0);
+                assert_eq!(version, "0.9.0");
+            }
+            _ => panic!("Expected Probe"),
+        }
+    }
+
+    #[test]
     fn test_response_payload_passthrough() {
         let resp = ResponsePayload::OriginalPassthrough {
             original: "hello".to_string(),
@@ -475,14 +502,12 @@ mod tests {
     #[test]
     fn test_context_pack_serialization() {
         let pack = ContextPack {
-            behavioral_skills: "skills section".to_string(),
             docs_context: "docs section".to_string(),
             code_context: "code section".to_string(),
             token_usage: TokenUsage {
                 total_tokens: 8000,
                 budget_remaining: 4000,
                 by_source: [
-                    ("skills".to_string(), 1000),
                     ("docs".to_string(), 2000),
                     ("code".to_string(), 5000),
                 ]

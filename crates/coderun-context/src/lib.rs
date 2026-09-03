@@ -1,4 +1,4 @@
-﻿use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -10,20 +10,6 @@ use tracing::{debug, info, warn};
 
 pub mod retrieval;
 
-// â”€â”€ Stop words for symbol-match boosting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-#[allow(dead_code)]
-const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "to", "of", "in", "for",
-    "on", "with", "at", "by", "from", "as", "into", "through", "during",
-    "before", "after", "above", "below", "between", "and", "but", "or",
-    "nor", "not", "so", "yet", "both", "either", "neither", "each",
-    "every", "all", "any", "few", "more", "most", "other", "some",
-    "such", "no", "only", "own", "same", "than", "too", "very",
-    "just", "because", "if", "when", "where", "how", "what", "which",
-    "who", "whom", "this", "that", "these", "those",
-];
 
 /// Emit per-stage timing to stderr when CODERUN_PROFILE=1 (retrieval latency diagnostics).
 /// No-op in normal operation — zero overhead when the env var is unset.
@@ -81,7 +67,7 @@ fn is_documentation_path(path: &str) -> bool {
 
 
 
-// â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Configuration ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ContextConfig {
@@ -100,7 +86,6 @@ impl Default for ContextConfig {
             max_files: 20,
             max_lines_per_file: 500,
             cache_order: vec![
-                "behavioral_skills".to_string(),
                 "docs_context".to_string(),
                 "code_context".to_string(),
             ],
@@ -109,7 +94,7 @@ impl Default for ContextConfig {
     }
 }
 
-// â”€â”€ Context Engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Context Engine ──────────────────────────────────────────────────────
 
 pub struct ContextEngine {
     /// Default repo intelligence (daemon CWD) — used when a request carries no repository_path
@@ -161,7 +146,7 @@ impl ContextEngine {
                 return Ok(ri.clone());
             }
         }
-        // Retrieval-only instance â€” DB is only needed for indexing/metadata, use throwaway in-memory store
+        // Retrieval-only instance — DB is only needed for indexing/metadata, use throwaway in-memory store
         let db = coderun_storage::Database::open(&std::path::PathBuf::from(":memory:"))?;
         let ri = Arc::new(Mutex::new(RepositoryIntelligence::new(
             canonical.clone(),
@@ -179,7 +164,7 @@ impl ContextEngine {
         Ok(ri)
     }
 
-    // â”€â”€ Standalone helpers for spawn_blocking (no &self required) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Standalone helpers for spawn_blocking (no &self required) ──────────
 
     fn search_code_scored_standalone(
         config: &ContextConfig,
@@ -297,25 +282,7 @@ impl ContextEngine {
         Ok((String::new(), vec![]))
     }
 
-    fn match_skills_scored_standalone(
-        knowledge_hub: &std::sync::MutexGuard<'_, KnowledgeHub>,
-        query: &str,
-    ) -> Result<(String, Vec<(String, f64, f64)>), String> {
-        let matches = knowledge_hub.match_skills(query, 5);
-        let formatted: Vec<String> = matches.iter().map(|m| {
-            format!("# {}\n{}\n\nExamples:\n{}\n\nConstraints:\n{}", m.skill_name, m.instructions, m.examples.join("\n"), m.constraints.join("\n"))
-        }).collect();
-        let scored = matches.into_iter().map(|m| {
-            let specificity = m.match_score;
-            (m.skill_name, m.match_score, specificity)
-        }).collect();
-        Ok((formatted.join("\n\n---\n\n"), scored))
-    }
-
-    /// Build context for a task â€” the main entry point (async; parallel retrieval via tokio::task::spawn_blocking).
-    /// Lock strategy: each spawned task acquires its own lock, enabling true parallelism across
-    /// code (repo lock), knowledge (kh lock), and skills (kh lock) retrieval phases.
-    pub async fn build_context(
+        pub async fn build_context(
         &self,
         request: &TaskRequest,
     ) -> Result<ContextPack, String> {
@@ -337,9 +304,9 @@ impl ContextEngine {
         let repo_intel = self.resolve_repo_intel(request.repository_path.as_deref())?;
         prof("build_context.resolve_repo_intel", start);
 
-        // â”€â”€ Parallel retrieval via tokio::task::spawn_blocking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ── Parallel retrieval via tokio::task::spawn_blocking ────────────
         // Each task acquires its own lock, enabling true parallelism.
-        // Code search holds repo lock; knowledge + skills hold kh lock.
+        // Code search holds repo lock; knowledge holds the kh lock.
         // TASK-030: scope all retrieval to THIS repository's stamp (shared hash formula)
         let repository_id = {
             let repo_guard = repo_intel.lock().map_err(|e| format!("Lock error: {}", e))?;
@@ -347,7 +314,6 @@ impl ContextEngine {
         };
 
         let repo_intel_clone = repo_intel.clone();
-        let kh_clone = self.knowledge_hub.clone();
         let config_clone = self.config.clone();
         let msg = request.message.clone();
         let ctx_hints = request.context_hints.clone();
@@ -361,22 +327,15 @@ impl ContextEngine {
             Self::search_code_scored_standalone(&config_clone, &repo_guard, &repo_id_for_code, &msg_for_code, &ctx_hints)
         });
 
-        let kh_clone2 = kh_clone.clone();
+        let kh_clone2 = self.knowledge_hub.clone();
         let msg2 = request.message.clone();
         let knowledge_fut = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let kh_guard = kh_clone2.lock().map_err(|e| format!("Lock error: {}", e))?;
             Self::retrieve_knowledge_scored_standalone(&kh_guard, &repo_id_for_kh, &msg2)
         });
 
-        let msg_for_skills = msg.clone();
-        let skills_fut = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let kh_guard = kh_clone.lock().map_err(|e| format!("Lock error: {}", e))?;
-            Self::match_skills_scored_standalone(&kh_guard, &msg_for_skills)
-        });
-
-        // Await all three in parallel
-        let (code_result, knowledge_result, skills_result) =
-            tokio::join!(code_fut, knowledge_fut, skills_fut);
+        // Await both in parallel
+        let (code_result, knowledge_result) = tokio::join!(code_fut, knowledge_fut);
         let code_search_duration_ms = code_search_start.elapsed().as_millis() as u64;
         prof("build_context.retrieval_join", start);
 
@@ -384,15 +343,12 @@ impl ContextEngine {
             code_result.map_err(|e| format!("Code search failed: {}", e))??;
         let (raw_knowledge, knowledge_scored) =
             knowledge_result.map_err(|e| format!("Knowledge search failed: {}", e))??;
-        let (raw_skills, skills_scored) =
-            skills_result.map_err(|e| format!("Skills search failed: {}", e))??;
 
         // V1 docs/code split: docs from code search (Repository → Documentation) + legacy knowledge (usually empty)
         let combined_docs = if raw_knowledge.is_empty() { raw_docs_from_code } else { format!("{}\n\n{}", raw_docs_from_code, raw_knowledge) };
         // Dedup after parallel retrieval (needs self.session_fingerprints — cannot run in spawn_blocking)
         let code_context = self.dedup_content(&request.session_id, &raw_code);
         let knowledge_context = self.dedup_content(&request.session_id, &combined_docs);
-        let skills_context = self.dedup_content(&request.session_id, &raw_skills);
 
         // Compute repository state (brief lock, post-parallel)
         let repo_state = {
@@ -402,14 +358,13 @@ impl ContextEngine {
 
         // Step 4: Assemble context pack with cache-aware ordering + frozen-prefix + reversible compression
         let (mut context_pack, total_tokens) = self.assemble_context_pack(
-            &skills_context,
             &knowledge_context,
             &code_context,
             &mut token_budget,
             &mut token_usage_by_source,
             code_retrieval_status,
         );
-        // TASK-007/008/009: stable artifact + provenance (deterministic) â€” real scores
+        // TASK-007/008/009: stable artifact + provenance (deterministic) — real scores
         {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
@@ -422,19 +377,6 @@ impl ContextEngine {
             context_pack.metadata.correlation_id = correlation_id.to_string();
             context_pack.metadata.repository_state = repo_state.clone();
             context_pack.repository_state = repo_state.clone();
-            // Provenance: real scores (TASK-007) â€” BM25 vs symbol match vs skill_engine:tag overlap
-            for (skill_name, score, specificity) in &skills_scored {
-                // Only include skills that actually contributed to context (dedup may have emptied but scored still valid)
-                if !skills_context.is_empty() || !skill_name.is_empty() {
-                    context_pack.provenance.push(coderun_core::ipc::ContextProvenance {
-                        path: skill_name.clone(),
-                        source: "skills".to_string(),
-                        retriever: "skill_engine".to_string(),
-                        score: *score,
-                        reason: format!("tag overlap specificity={:.2}", specificity),
-                    });
-                }
-            }
             for entry in &knowledge_scored {
                 let retriever = "tantivy";
                 let reason = "bm25".to_string();
@@ -507,7 +449,7 @@ impl ContextEngine {
         Ok(context_pack)
     }
 
-    /// Deduplicate content against session fingerprint (spec Â§3 deduplication + PRINCIPLES.md:10)
+    /// Deduplicate content against session fingerprint (spec §3 deduplication + PRINCIPLES.md:10)
     fn dedup_content(&self, session_id: &str, content: &str) -> String {
         if content.is_empty() || session_id.is_empty() {
             return content.to_string();
@@ -529,7 +471,7 @@ impl ContextEngine {
         content.to_string()
     }
 
-    /// Repository state (git HEAD) for deterministic ContextPack (TASK-008) â€” resolved per request repo (TASK-036)
+    /// Repository state (git HEAD) for deterministic ContextPack (TASK-008) — resolved per request repo (TASK-036)
     /// Accepts pre-acquired lock guard to avoid redundant lock contention.
     fn repository_state_for(&self, repo_intel: &std::sync::MutexGuard<'_, RepositoryIntelligence>) -> String {
         // Try env override first (for tests)
@@ -546,12 +488,9 @@ impl ContextEngine {
         coderun_core::repository_id_from_path(&repo_path.to_string_lossy())
     }
 
-    /// Assemble the context pack with cache-aware ordering + frozen-prefix + reversible compression
-    /// Order: skills (most stable) â†’ docs â†’ code (least stable) per PRINCIPLES.md:42-54
-    /// Frozen-prefix boundary: byte-identical skills block is cache-stable; only content after boundary changes.
+    /// Assemble the context pack with cache-aware ordering (docs before code).
     fn assemble_context_pack(
         &self,
-        skills_context: &str,
         knowledge_context: &str,
         code_context: &str,
         token_budget: &mut usize,
@@ -560,24 +499,8 @@ impl ContextEngine {
     ) -> (ContextPack, usize) {
         let mut total_tokens = 0;
 
-        // Section 1: behavioral_skills (20% budget) â€” most cache-stable
-        let skills_budget = (*token_budget as f64 * 0.20) as usize;
-        let skills_tokens = count_tokens(skills_context);
-        let (mut skills_content, skills_used) = if skills_tokens <= skills_budget {
-            (skills_context.to_string(), skills_tokens)
-        } else {
-            truncate_to_tokens(skills_context, skills_budget)
-        };
-        // Frozen-prefix boundary marker â€” only content after this line changes between calls
-        const FROZEN_BOUNDARY: &str = "\n# --- FROZEN PREFIX END (cache-stable above, variable below) ---\n";
-        if !skills_content.is_empty() && !skills_content.contains("FROZEN PREFIX END") {
-            skills_content.push_str(FROZEN_BOUNDARY);
-        }
-        token_usage_by_source.insert("behavioral_skills".to_string(), skills_used);
-        total_tokens += skills_used;
-
-        // Section 2: docs_context (25% budget)
-        let docs_budget = (*token_budget as f64 * 0.25) as usize;
+        // Section 1: docs_context (45% budget) - most cache-stable
+        let docs_budget = (*token_budget as f64 * 0.45) as usize;
         let docs_tokens = count_tokens(knowledge_context);
         let (docs_content, docs_used) = if docs_tokens <= docs_budget {
             (knowledge_context.to_string(), docs_tokens)
@@ -603,7 +526,6 @@ impl ContextEngine {
         token_usage_by_source.insert("metadata".to_string(), remaining);
 
         let context_pack = ContextPack {
-            behavioral_skills: skills_content,
             docs_context: docs_content,
             code_context: code_content,
             token_usage: TokenUsage {
@@ -633,7 +555,42 @@ impl ContextEngine {
         }
     }
 
-    /// Serialize context pack to YAML â€” compact, deterministic order (skills â†’ docs â†’ code).
+    /// Re-index a repository through this engine and refresh its cached index
+    /// handles so the NEXT query serves the new commit immediately (no stale
+    /// tantivy reader). This is the entry point the daemon's auto-reindex watcher
+    /// calls: reindexing is executed on a FRESH `RepositoryIntelligence` bound to
+    /// the same SQLite store (file-backed for the default repo), so concurrent
+    /// queries never block on this engine's repo lock for the duration of the walk.
+    /// `repository_path` defaults to the engine's daemon-CWD repository; `Some(path)`
+    /// targets that workspace's per-repo view instead.
+    pub fn reindex_repository(
+        &self,
+        repository_path: Option<&str>,
+    ) -> Result<coderun_repo_intel::IndexStats, String> {
+        // Read identity + backing-store location under a brief lock, then release it
+        // before the (potentially long) walk below.
+        let (repo_path, db_file) = {
+            let repo_intel = self.resolve_repo_intel(repository_path)?;
+            let guard = repo_intel
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
+            (guard.repo_path().to_path_buf(), guard.db_path())
+        };
+        let db = match db_file {
+            Some(path) => coderun_storage::Database::open(&path)?,
+            None => coderun_storage::Database::open(&std::path::PathBuf::from(":memory:"))?,
+        };
+        let mut intel = coderun_repo_intel::RepositoryIntelligence::new(
+            repo_path,
+            db,
+            self.event_bus.clone(),
+        );
+        // index_repository() evicts the repo's cached tantivy handle on completion,
+        // so the engine's next search reopens a fresh reader and sees the new data.
+        intel.index_repository()
+    }
+
+    /// Serialize context pack to YAML — compact, deterministic order (skills → docs → code).
     /// TASK-031/F-2: empty sections are omitted entirely; a zero-value pack serializes to an
     /// EMPTY string so the daemon can pass the prompt through byte-identical instead of
     /// paying ~500-700 tokens of metadata skeleton for no retrievable value.
@@ -654,10 +611,9 @@ impl ContextEngine {
                 out.push('\n');
             }
         };
-        block("behavioral_skills", &pack.behavioral_skills);
         block("docs_context", &pack.docs_context);
         block("code_context", &pack.code_context);
-        // Compact single-line metadata â€” only when there is actual content above
+        // Compact single-line metadata — only when there is actual content above
         out.push_str(&format!(
             "token_usage: {{total_tokens: {}, budget_remaining: {}}}\n",
             pack.token_usage.total_tokens, pack.token_usage.budget_remaining
@@ -675,7 +631,7 @@ impl ContextEngine {
         Ok(out)
     }
 
-    /// Retrieve original full content saved by reversible compression (spec Â§2)
+    /// Retrieve original full content saved by reversible compression (spec §2)
     pub fn get_original(hash: &str) -> Result<String, String> {
         let path = reversible_cache_path(hash);
         std::fs::read_to_string(&path).map_err(|e| format!("Original not found for {hash}: {e}"))
@@ -702,7 +658,7 @@ impl coderun_core::IContextBuilder for ContextEngine {
     }
 }
 
-// â”€â”€ Helpers for reversible compression â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Helpers for reversible compression ───────────────────────────────────
 
 fn reversible_cache_dir() -> std::path::PathBuf {
     if let Some(home) = dirs_home() {
@@ -723,10 +679,10 @@ fn dirs_home() -> Option<std::path::PathBuf> {
     { std::env::var("HOME").ok().map(std::path::PathBuf::from) }
 }
 
-// â”€â”€ Provenance hygiene (TASK-032/033 â€” F-3, F-4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Provenance hygiene (TASK-032/033 — F-3, F-4) ─────────────────────────
 
 /// Clean a provenance path (TASK-033/F-4): strip Windows verbatim prefixes (`\\?\`,
-/// `\\?\UNC\`) and knowledge collection prefixes (`docs:`, `adr:` â€¦) so provenance renders
+/// `\\?\UNC\`) and knowledge collection prefixes (`docs:`, `adr:` …) so provenance renders
 /// plain absolute or repo-relative paths. Category stays in the `source` field.
 fn clean_provenance_path(raw: &str) -> String {
     let mut p = raw.trim().to_string();
@@ -736,7 +692,7 @@ fn clean_provenance_path(raw: &str) -> String {
     } else if let Some(rest) = p.strip_prefix(r"\\?\") {
         p = rest.to_string();
     }
-    // Collection/category prefix like "docs:" / "adr:" â€” only when followed by an
+    // Collection/category prefix like "docs:" / "adr:" — only when followed by an
     // absolute-looking path (drive letter, backslash, slash, or another verbatim marker)
     const CATEGORIES: [&str; 7] = ["docs", "adr", "convention", "pattern", "domain", "profile", "memory"];
     for cat in CATEGORIES {
@@ -759,7 +715,7 @@ fn clean_provenance_path(raw: &str) -> String {
 }
 
 /// Dedup provenance entries by (path, source, retriever), keeping the highest score
-/// (TASK-032/F-3) â€” identical rows must render exactly once.
+/// (TASK-032/F-3) — identical rows must render exactly once.
 fn dedup_provenance(provenance: &mut Vec<coderun_core::ipc::ContextProvenance>) {
     let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
     let mut deduped: Vec<coderun_core::ipc::ContextProvenance> = Vec::with_capacity(provenance.len());
@@ -961,10 +917,10 @@ fn classify_single_miss(
     (MissType::Unclassified, "could not determine miss reason (insufficient diagnostic data)".to_string())
 }
 
-// â”€â”€ Token Counting (tiktoken-rs, never via model API) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Token Counting (tiktoken-rs, never via model API) ────────────────────
 
-/// Count tokens locally with tiktoken-rs `cl100k_base` (spec Â§3, Â§4)
-/// Fallback to char/4 heuristic only if tokenizer fails â€” logs WARN.
+/// Count tokens locally with tiktoken-rs `cl100k_base` (spec §3, §4)
+/// Fallback to char/4 heuristic only if tokenizer fails — logs WARN.
 pub fn count_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
@@ -986,7 +942,7 @@ fn estimate_tokens_heuristic(text: &str) -> usize {
     by_chars.max(by_words)
 }
 
-/// Legacy alias â€” keep for external callers that matched heuristic name
+/// Legacy alias — keep for external callers that matched heuristic name
 pub fn estimate_tokens(text: &str) -> usize {
     count_tokens(text)
 }
@@ -1019,7 +975,7 @@ fn truncate_to_tokens(text: &str, budget: usize) -> (String, usize) {
         // +1 for newline
         if current_tokens + line_tokens + 1 > budget.saturating_sub(5) {
             result.push_str(&format!(
-                "... [truncated â€” full at {} | retrieve via ContextEngine::get_original(\"{}\")]\n",
+                "... [truncated — full at {} | retrieve via ContextEngine::get_original(\"{}\")]\n",
                 cache_path.display(),
                 hash
             ));
@@ -1032,7 +988,7 @@ fn truncate_to_tokens(text: &str, budget: usize) -> (String, usize) {
     }
     if result.is_empty() {
         result = format!(
-            "... [truncated â€” full at {} | hash {}]\n",
+            "... [truncated — full at {} | hash {}]\n",
             cache_path.display(),
             hash
         );
@@ -1041,13 +997,13 @@ fn truncate_to_tokens(text: &str, budget: usize) -> (String, usize) {
     (result, current_tokens)
 }
 
-// â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Serializes tests that mutate process-global env vars / the shared tantivy index dir â€”
+    /// Serializes tests that mutate process-global env vars / the shared tantivy index dir —
     /// parallel mutation makes retrieval results non-deterministic.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1083,35 +1039,29 @@ mod tests {
         assert_eq!(config.max_tokens, 12000);
         assert_eq!(config.max_files, 20);
         assert_eq!(config.max_lines_per_file, 500);
-        assert_eq!(config.cache_order.len(), 3);
+        assert_eq!(config.cache_order.len(), 2);
     }
 
     #[test]
     fn test_cache_ordering() {
         let config = ContextConfig::default();
-        assert_eq!(config.cache_order[0], "behavioral_skills");
-        assert_eq!(config.cache_order[1], "docs_context");
-        assert_eq!(config.cache_order[2], "code_context");
+        assert_eq!(config.cache_order.len(), 2);
+        assert_eq!(config.cache_order[0], "docs_context");
+        assert_eq!(config.cache_order[1], "code_context");
     }
 
     #[test]
     fn test_token_budget_allocation() {
         let max_tokens = 12000;
-        let skills_budget = (max_tokens as f64 * 0.20) as usize;
-        let docs_budget = (max_tokens as f64 * 0.15) as usize;
+        let docs_budget = (max_tokens as f64 * 0.45) as usize;
         let code_budget = (max_tokens as f64 * 0.55) as usize;
-        let metadata_budget = max_tokens - skills_budget - docs_budget - code_budget;
-
-        assert_eq!(skills_budget, 2400);
-        assert_eq!(docs_budget, 1800);
+        assert_eq!(docs_budget, 5400);
         assert_eq!(code_budget, 6600);
-        assert_eq!(metadata_budget, 1200);
     }
 
     #[test]
     fn test_context_pack_yaml_serialization() {
         let pack = ContextPack {
-            behavioral_skills: "skills content".to_string(),
             docs_context: "docs content".to_string(),
             code_context: "code content".to_string(),
             token_usage: TokenUsage {
@@ -1127,7 +1077,6 @@ mod tests {
         };
 
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
-        assert!(yaml.contains("behavioral_skills"));
         assert!(yaml.contains("docs_context"));
         assert!(yaml.contains("code_context"));
     }
@@ -1144,8 +1093,8 @@ mod tests {
     }
 
     #[test]
-    fn test_frozen_prefix_boundary() {
-        // Directly test assemble_context_pack boundary
+    fn test_assembled_sections_docs_then_code() {
+        // assemble_context_pack orders docs before code (no skills section anymore)
         use coderun_events::EventBus;
         use coderun_knowledge::KnowledgeConfig;
         use coderun_repo_intel::RepositoryIntelligence;
@@ -1159,9 +1108,10 @@ mod tests {
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let mut budget = 12000;
         let mut usage = HashMap::new();
-        let (pack, _) = engine.assemble_context_pack("skill content line", "doc line", "code line", &mut budget, &mut usage, coderun_core::RetrievalStatus::NoMatch);
-        assert!(pack.behavioral_skills.contains("FROZEN PREFIX END"));
-        assert_eq!(engine.config.cache_order[0], "behavioral_skills");
+        let (pack, _) = engine.assemble_context_pack("doc line", "code line", &mut budget, &mut usage, coderun_core::RetrievalStatus::NoMatch);
+        assert_eq!(pack.docs_context, "doc line");
+        assert_eq!(pack.code_context, "code line");
+        assert_eq!(engine.config.cache_order[0], "docs_context");
     }
 
     #[test]
@@ -1211,10 +1161,10 @@ mod tests {
         use coderun_repo_intel::RepositoryIntelligence;
         use coderun_storage::Database;
 
-        // Deterministic: same repo+task+config â†’ same pack content even with different session_id, not deduped
+        // Deterministic: same repo+task+config → same pack content even with different session_id, not deduped
         let _env = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("coderun_det_{}", uuid::Uuid::new_v4()));
-        // Isolate from other tests' writes to the shared tantivy index â€” ripgrep fallback over
+        // Isolate from other tests' writes to the shared tantivy index — ripgrep fallback over
         // this temp repo is what must be deterministic.
         std::env::set_var("CODERUN_INDEX_DIR", dir.join("idx").to_string_lossy().to_string());
         std::env::set_var("CODERUN_REPO_STATE", "deterministic-test-head-abc123");
@@ -1240,7 +1190,6 @@ mod tests {
         // Code/docs/skills content should be equal (different session => not deduped)
         assert_eq!(pack1.code_context, pack2.code_context);
         assert_eq!(pack1.docs_context, pack2.docs_context);
-        assert_eq!(pack1.behavioral_skills, pack2.behavioral_skills);
         assert_eq!(pack1.token_usage.total_tokens, pack2.token_usage.total_tokens);
         // routing removed;
         // Same session should dedup second call (different from first, empty on second)
@@ -1260,7 +1209,7 @@ mod tests {
         assert_eq!(clean_provenance_path(r"\\?\UNC\server\share\a.rs"), r"\\server\share\a.rs");
         assert_eq!(clean_provenance_path(r"docs:\\?\C:\Leon\coderun\docs\DATA_FLOW.md"), r"C:\Leon\coderun\docs\DATA_FLOW.md");
         assert_eq!(clean_provenance_path(r"adr:C:\repos\x\docs\adr\0001.md"), r"C:\repos\x\docs\adr\0001.md");
-        // Relative paths pass through untouched â€” category prefix only stripped when absolute follows
+        // Relative paths pass through untouched — category prefix only stripped when absolute follows
         assert_eq!(clean_provenance_path("docs/guide.md"), "docs/guide.md");
         assert_eq!(clean_provenance_path("src/main.rs"), "src/main.rs");
     }
@@ -1283,9 +1232,8 @@ mod tests {
 
     #[test]
     fn test_to_yaml_zero_value_pack_is_empty() {
-        // TASK-031/F-2: no hits â†’ empty YAML â†’ daemon passes prompt through untouched
+        // TASK-031/F-2: no hits → empty YAML → daemon passes prompt through untouched
         let pack = ContextPack {
-            behavioral_skills: String::new(),
             docs_context: String::new(),
             code_context: String::new(),
             token_usage: TokenUsage { total_tokens: 0, budget_remaining: 12000, by_source: HashMap::new() },
@@ -1303,7 +1251,6 @@ mod tests {
         // TASK-031/F-2: with hits, appended block contains actual content, no empty skeletons
         use coderun_core::ipc::ContextProvenance;
         let pack = ContextPack {
-            behavioral_skills: String::new(),
             docs_context: String::new(),
             code_context: "// src/Checkout.cs:10\npublic async Task Checkout()".to_string(),
             token_usage: TokenUsage { total_tokens: 42, budget_remaining: 11958, by_source: HashMap::new() },
@@ -1316,14 +1263,13 @@ mod tests {
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
         assert!(yaml.contains("code_context"));
         assert!(yaml.contains("Checkout"));
-        assert!(!yaml.contains("behavioral_skills:"), "empty sections must be omitted");
         assert!(!yaml.contains("docs_context:"), "empty sections must be omitted");
         assert!(yaml.contains("total_tokens: 42"));
     }
 
     #[tokio::test]
     async fn test_per_repo_resolution_no_cross_repo_leak() {
-        // TASK-036/F-7 + F-1 acceptance: one engine, two repos â€” each request resolves to its own repo.
+        // TASK-036/F-7 + F-1 acceptance: one engine, two repos — each request resolves to its own repo.
         let _env = ENV_LOCK.lock().unwrap();
         std::env::set_var("CODERUN_INDEX_DIR", std::env::temp_dir().join(format!("coderun_idx_{}", uuid::Uuid::new_v4())).to_string_lossy().to_string());
         std::env::set_var("CODERUN_REPO_STATE", "per-repo-test-head");
@@ -1441,5 +1387,65 @@ mod tests {
 
         std::env::remove_var("CODERUN_INDEX_DIR");
         let _ = std::fs::remove_dir_all(&idx_dir);
+    }
+
+    #[test]
+    fn test_engine_reindex_repository_reflects_new_commits() {
+        // Daemon auto-reindex acceptance: the watcher reindexes THROUGH the engine
+        // (ContextEngine::reindex_repository), and a search on that same engine right
+        // afterwards must see a newly added file immediately (fresh tantivy handle,
+        // not a stale pre-reindex reader).
+        use coderun_events::EventBus;
+        use coderun_knowledge::{KnowledgeConfig, KnowledgeHub};
+        use coderun_repo_intel::RepositoryIntelligence;
+        use coderun_storage::Database;
+
+        let _env = ENV_LOCK.lock().unwrap();
+        std::env::set_var(
+            "CODERUN_INDEX_DIR",
+            std::env::temp_dir()
+                .join(format!("coderun_reidx_idx_{}", uuid::Uuid::new_v4()))
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        let dir = std::env::temp_dir().join(format!("coderun_reidx_repo_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn alpha_marker_one() {}\n").unwrap();
+
+        let db_path = dir.join("reidx.db");
+        let db = Database::open(&db_path).unwrap();
+        let kh_db = Database::open(&db_path).unwrap();
+        let event_bus = EventBus::new();
+        let kh = KnowledgeHub::new(kh_db, event_bus.clone(), KnowledgeConfig::default());
+        let engine = ContextEngine::new(
+            RepositoryIntelligence::new(dir.clone(), db, event_bus.clone()),
+            kh,
+            event_bus,
+            ContextConfig::default(),
+        );
+
+        // Initial index through the engine (the same call the daemon watcher makes).
+        engine.reindex_repository(None).unwrap();
+
+        // "New commit": a brand-new file appears in the repo.
+        std::fs::write(dir.join("b.rs"), "fn beta_marker_two() {}\n").unwrap();
+        engine.reindex_repository(None).unwrap();
+
+        // The engine's next search must surface the new file.
+        let guard = engine.default_repo_intel.lock().unwrap();
+        let repo_id = guard.repository_id().to_string();
+        let res = guard
+            .search_fulltext("beta_marker_two", None, 10, Some(&repo_id))
+            .unwrap();
+        let found = res.results.iter().any(|r| r.path == "b.rs" || r.path.ends_with("b.rs"));
+        assert!(
+            found,
+            "post-reindex query must find b.rs, got: {:?}",
+            res.results.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
+        );
+
+        std::env::remove_var("CODERUN_INDEX_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

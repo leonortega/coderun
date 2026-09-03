@@ -11,9 +11,8 @@ path = "src/main.rs"
 coderun-core.workspace = true
 coderun-events.workspace = true
 coderun-storage.workspace = true
-coderun-repo-intel.workspace = true
+coderun-repo-intel = { workspace = true, features = ["fs-watcher"] }
 coderun-knowledge.workspace = true
-coderun-skills.workspace = true
 coderun-context.workspace = true
 coderun-optimizer.workspace = true
 tokio.workspace = true
@@ -31,5 +30,3 @@ prometheus = { version = "0.14", optional = true }
 
 [features]
 default = []
-# v1: workflow preserved in future/workflow — not part of default workspace
-workflow = []

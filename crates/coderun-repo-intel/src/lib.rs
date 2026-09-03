@@ -167,6 +167,12 @@ impl RepositoryIntelligence {
         &self.repository_id
     }
 
+    /// Path of the SQLite backing file (None for in-memory stores) — lets the
+    /// ContextEngine re-open the same database when re-indexing outside the repo lock.
+    pub fn db_path(&self) -> Option<std::path::PathBuf> {
+        self.db.path().map(std::path::Path::to_path_buf)
+    }
+
     /// FIX #1: Fast doc_count check — returns cached count if available,
     /// avoiding full index open + reader + stats on every query.
     pub fn cached_doc_count(&self) -> Option<usize> {
@@ -592,6 +598,15 @@ impl RepositoryIntelligence {
                 "Large repository detected — set CODERUN_SYMBOLS_ENABLED=false for ~20% faster indexing (BM25 only), CODERUN_INDEX_THREADS=8 for more parallelism, or CODERUN_BUILD_GRAPH=1 to force graph during init"
             );
         }
+
+        // The on-disk index just changed: drop this run's writer handle, then evict
+        // any cached TantivyIndex/reader for this repo so the NEXT search reopens a
+        // fresh handle and serves the new commit immediately. Without this, in-process
+        // queries (daemon ContextEngine, CLI --watch) would keep reading through the
+        // stale cached reader created before this run.
+        drop(tantivy_writer);
+        drop(tantivy_index);
+        coderun_storage::tantivy_index::TantivyIndex::invalidate_cached(&default_index_path(&self.repository_id));
 
         Ok(stats)
     }
@@ -1202,12 +1217,13 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
     if let Some(lang) = language {
         let ast_symbols = parser::extract_symbols_ast(content, lang);
         if !ast_symbols.is_empty() {
-            return ast_symbols.into_iter().map(|s| ExtractedSymbol {
-                name: s.name,
-                kind: s.kind,
-                line_start: s.line_start as i64,
-                line_end: s.line_end as i64,
-            }).collect();
+            return ast_symbols
+                .into_iter()
+                .map(|s| ExtractedSymbol {
+                    name: s.name,
+                    kind: s.kind,
+                })
+                .collect();
         }
     }
 
@@ -1217,14 +1233,9 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
     // Extract functions
     for cap in patterns.function_pattern.captures_iter(content) {
         if let Some(name) = cap.get(1).or(cap.get(2)).or(cap.get(3)).or(cap.get(4)).or(cap.get(5)) {
-            let line_num = content[..cap.get(0).unwrap().start()]
-                .lines()
-                .count();
             symbols.push(ExtractedSymbol {
                 name: name.as_str().to_string(),
                 kind: "function".to_string(),
-                line_start: line_num as i64,
-                line_end: line_num as i64 + 5, // Approximate
             });
         }
     }
@@ -1232,14 +1243,9 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
     // Extract structs/classes
     for cap in patterns.struct_pattern.captures_iter(content) {
         if let Some(name) = cap.get(1).or(cap.get(2)).or(cap.get(3)).or(cap.get(4)).or(cap.get(5)) {
-            let line_num = content[..cap.get(0).unwrap().start()]
-                .lines()
-                .count();
             symbols.push(ExtractedSymbol {
                 name: name.as_str().to_string(),
                 kind: "struct".to_string(),
-                line_start: line_num as i64,
-                line_end: line_num as i64 + 10, // Approximate
             });
         }
     }
@@ -1247,14 +1253,9 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
     // Extract enums
     for cap in patterns.enum_pattern.captures_iter(content) {
         if let Some(name) = cap.get(1) {
-            let line_num = content[..cap.get(0).unwrap().start()]
-                .lines()
-                .count();
             symbols.push(ExtractedSymbol {
                 name: name.as_str().to_string(),
                 kind: "enum".to_string(),
-                line_start: line_num as i64,
-                line_end: line_num as i64 + 10,
             });
         }
     }
@@ -1262,14 +1263,9 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
     // Extract impl blocks
     for cap in patterns.impl_pattern.captures_iter(content) {
         if let Some(name) = cap.get(1) {
-            let line_num = content[..cap.get(0).unwrap().start()]
-                .lines()
-                .count();
             symbols.push(ExtractedSymbol {
                 name: name.as_str().to_string(),
                 kind: "impl".to_string(),
-                line_start: line_num as i64,
-                line_end: line_num as i64 + 20, // Approximate
             });
         }
     }
@@ -1277,14 +1273,9 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
     // Extract traits
     for cap in patterns.trait_pattern.captures_iter(content) {
         if let Some(name) = cap.get(1) {
-            let line_num = content[..cap.get(0).unwrap().start()]
-                .lines()
-                .count();
             symbols.push(ExtractedSymbol {
                 name: name.as_str().to_string(),
                 kind: "trait".to_string(),
-                line_start: line_num as i64,
-                line_end: line_num as i64 + 15,
             });
         }
     }
@@ -1292,14 +1283,9 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
     // Extract type aliases
     for cap in patterns.type_pattern.captures_iter(content) {
         if let Some(name) = cap.get(1) {
-            let line_num = content[..cap.get(0).unwrap().start()]
-                .lines()
-                .count();
             symbols.push(ExtractedSymbol {
                 name: name.as_str().to_string(),
                 kind: "type".to_string(),
-                line_start: line_num as i64,
-                line_end: line_num as i64 + 1,
             });
         }
     }
@@ -1311,8 +1297,6 @@ fn extract_symbols(content: &str, patterns: &SymbolPatterns, language: Option<&s
 struct ExtractedSymbol {
     name: String,
     kind: String,
-    line_start: i64,
-    line_end: i64,
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

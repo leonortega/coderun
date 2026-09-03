@@ -327,10 +327,8 @@ impl TantivyIndex {
                 let msg = e.to_string();
                 if msg.contains("schema") || msg.contains("Schema") {
                     tracing::warn!(path = index_path, error = %msg, "Tantivy schema mismatch — recreating index (re-index required)");
-                    // invalidate cache entry if any
-                    if let Ok(mut cache) = index_cache().write() {
-                        cache.remove(index_path);
-                    }
+                    // Invalidate any cached handle for this index path (schema drift)
+                    Self::invalidate_cached(index_path);
                     std::fs::remove_dir_all(path).ok();
                     std::fs::create_dir_all(path)
                         .map_err(|e2| format!("Failed to recreate index directory after schema mismatch: {}", e2))?;
@@ -375,6 +373,18 @@ impl TantivyIndex {
         Ok(fresh)
     }
 
+    /// Evict a cached index handle so the next `open_cached` rebuilds it from disk.
+    /// Call after any in-process re-index that wrote through a DIFFERENT handle
+    /// (e.g. `RepositoryIntelligence::index_repository`, which uses `open` not
+    /// `open_cached`): it forces the next query to create a fresh `TantivyIndex`
+    /// + `IndexReader` and thus observe the new commit immediately instead of
+    /// serving from the stale pre-reindex cached reader.
+    pub fn invalidate_cached(index_path: &str) {
+        if let Ok(mut cache) = index_cache().write() {
+            cache.remove(index_path);
+        }
+    }
+
     /// Get or create the cached reader (reloads if index has committed since last reader creation).
     pub fn cached_reader(&self) -> Result<IndexReader, String> {
         if let Some(r) = self.cached_reader.get() {
@@ -388,10 +398,6 @@ impl TantivyIndex {
         let _ = self.cached_reader.set(r.clone());
         Ok(r)
     }
-
-    /// Invalidate cached reader — currently reload() handles freshness; kept for API symmetry.
-    #[allow(dead_code)]
-    fn invalidate_reader_cache(&self) {}
 
     /// Get a writer for indexing documents — adaptive heap based on index size
     pub fn writer(&self) -> Result<IndexWriter, String> {
@@ -1059,5 +1065,53 @@ mod tests {
         // Count repo docs
         let count = index.count_repo_docs(&reader, "repo_a").unwrap();
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_invalidate_cached_reopens_fresh() {
+        // Daemon auto-reindex contract: a query caches an index handle + reader, then a
+        // re-index commits NEW docs through a separate raw handle. Invalidation must
+        // force the next query to REOPEN (fresh handle + reader) so it sees the new
+        // commit instead of whatever the pre-reindex cached reader still serves.
+        let temp_dir = TempDir::new().unwrap();
+        let index_path = temp_dir.path().to_str().unwrap();
+
+        // Commit "alpha" through a raw handle (same as RepositoryIntelligence::index_repository).
+        // NOTE: tantivy's directory write-lock lives on the IndexWriter — it must be
+        // dropped before a later run can create its own writer on the same directory.
+        let raw_a = TantivyIndex::open(index_path).unwrap();
+        let mut writer_a = raw_a.writer().unwrap();
+        raw_a
+            .add_document(&mut writer_a, "a.rs", "fn alpha_marker_one() {}", "rust", &[], &[], "repo_x", "Source")
+            .unwrap();
+        raw_a.commit(&mut writer_a).unwrap();
+        drop(writer_a);
+        drop(raw_a);
+
+        // First query seeds the global cache and its cached reader with alpha.
+        let idx_a = TantivyIndex::open_cached(index_path).unwrap();
+        let reader_a = idx_a.cached_reader().unwrap();
+        let hits_a = idx_a.search(&reader_a, "alpha_marker_one", None, 10, None).unwrap();
+        assert!(!hits_a.is_empty(), "initial commit must be visible");
+
+        // A later re-index commits "beta" through a second raw handle while the
+        // cached reader above is still alive.
+        let raw_b = TantivyIndex::open(index_path).unwrap();
+        let mut writer_b = raw_b.writer().unwrap();
+        raw_b
+            .add_document(&mut writer_b, "b.rs", "fn beta_marker_two() {}", "rust", &[], &[], "repo_x", "Source")
+            .unwrap();
+        raw_b.commit(&mut writer_b).unwrap();
+        drop(writer_b);
+        drop(raw_b);
+
+        // The next query must NOT keep serving from the pre-reindex cached reader:
+        // invalidate so open_cached() rebuilds a fresh handle from disk.
+        TantivyIndex::invalidate_cached(index_path);
+        let idx_b = TantivyIndex::open_cached(index_path).unwrap();
+        assert!(!Arc::ptr_eq(&idx_a, &idx_b), "invalidation must force a fresh handle");
+        let reader_b = idx_b.cached_reader().unwrap();
+        let hits_b = idx_b.search(&reader_b, "beta_marker_two", None, 10, None).unwrap();
+        assert!(!hits_b.is_empty(), "fresh handle must observe the re-indexed commit");
     }
 }

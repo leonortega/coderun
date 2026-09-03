@@ -23,20 +23,11 @@ pub enum CoderunError {
     #[error("context build failed: {0}")]
     ContextBuildFailed(String),
 
-    #[error("model routing failed: {0}")]
-    ModelRoutingFailed(String),
-
-    #[error("LLM unavailable: {0}")]
-    LlmUnavailable(String),
-
     #[error("RTK compression failed: {0}")]
     RtkCompressionFailed(String),
 
     #[error("knowledge retrieval failed: {0}")]
     KnowledgeRetrievalFailed(String),
-
-    #[error("skill match failed: {0}")]
-    SkillMatchFailed(String),
 
     #[error("database error: {0}")]
     DatabaseError(String),

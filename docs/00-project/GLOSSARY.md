@@ -8,9 +8,9 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Runtime
 
-**Definition:** The AI Runtime system itself — a local application that improves coding agents by providing repository intelligence, context optimization, model routing, and tool-output compression.
+**Definition:** The AI Runtime system itself — a local application that improves coding agents by providing repository intelligence, context optimization, and tool-output compression.
 
-**Scope:** Everything that runs as the daemon process. Excludes the coding agent, LiteLLM, and model providers.
+**Scope:** Everything that runs as the daemon process. Excludes the coding agent and model providers.
 
 ### Daemon
 
@@ -74,7 +74,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Context Pack
 
-**Definition:** The final, token-budgeted package of context assembled for a single LLM request. Emitted as YAML with three sections in fixed order: `behavioral_skills`, `docs_context`, `code_context`.
+**Definition:** The final, token-budgeted package of context assembled for a single LLM request. Emitted as YAML with two sections in fixed order: `docs_context`, `code_context`.
 
 **Scope:** Output of the Context Engine. Input to the model.
 
@@ -98,55 +98,29 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Knowledge Hub
 
-**Definition:** One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes two retrieval strategies: tag-based skill matching and BM25/tantivy lexical search for docs/code (FlashRank and engram removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md` and `ENGRAM_CBM_REMOVAL.md`).
+**Definition:** One organizational surface for project docs, ADRs, templates, and long-term memory. BM25/tantivy lexical search over stored knowledge (FlashRank and engram removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md` and `ENGRAM_CBM_REMOVAL.md`).
 
 **Scope:** Owns: storage and retrieval of all knowledge types.
 
 ### Skill
 
-**Definition:** A named, reusable instruction set that teaches the coding agent how to perform a specific type of task. Skills come from community formats: Claude, Cursor, Continue, agentskills.io. Matched by deterministic tag-based scoring.
+**Definition:** A named, reusable instruction set that teaches a coding agent how to perform a specific type of task. Skills live in community formats (Claude, Cursor, Continue, agentskills.io) and are discovered by the agent's own tooling — the runtime does not load or match them (removed — see `docs/01-architecture/REMOVED_TOOLS.md`).
 
-**Scope:** Part of the Knowledge Hub. Injected into the Context Pack as `behavioral_skills`.
+**Scope:** Owned by the coding agent's ecosystem, not the runtime.
 
 ### Skill Engine
 
-**Definition:** The component that performs task classification, skill activation, conflict detection, priority resolution, and instruction injection. Deterministic, tag-based, against a small registry.
-
-**Scope:** Part of the Knowledge Hub's skill subsystem.
-
-### Skill Registry
-
-**Definition:** The in-memory collection of loaded skill definitions. Small (dozens of entries, not thousands). Skills are loaded from community-format files at daemon startup.
-
-**Scope:** Managed by the Skill Engine.
+**Definition:** [REMOVED] Coderun's deterministic tag-based skill matching component was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`).
 
 ### Context
 
-**Definition:** Information provided to the LLM to help it understand and complete a task. Includes: skill instructions, documentation, code snippets, repository metadata.
+**Definition:** Information provided to the LLM to help it understand and complete a task. Includes: documentation, code snippets, repository metadata.
 
 **Scope:** Built by the Context Engine. Managed within token budgets.
 
-### Model Router
+### Model Router / Tier / Gateway
 
-**Definition:** The component that selects which LLM model to use for a given task based on task complexity, available models, latency targets, budget, and required capabilities.
-
-**Scope:** Owns: heuristic complexity scoring, model tier selection, LiteLLM configuration.
-
-### Model Tier
-
-**Definition:** A classification of models by capability and cost. Three tiers in v1:
-
-| Tier | Description | Example Models |
-|------|-------------|----------------|
-| Fast | Low cost, high speed, suitable for simple tasks | gpt-4o-mini, claude-3-haiku |
-| Balanced | Moderate cost, moderate speed, suitable for most tasks | gpt-4o, claude-3-sonnet |
-| Capable | High cost, lower speed, suitable for complex reasoning | o1, claude-3-opus |
-
-### Model Gateway
-
-**Definition:** The infrastructure layer that unifies multiple LLM providers behind one API shape. In v1, LiteLLM serves as the model gateway with routing strategies, per-key budgets, cost tracking, and fallback chains.
-
-**Scope:** External to the runtime's core logic, but integrated via the Model Router.
+**Definition:** [REMOVED v0.8.6] Heuristic tier routing and the LiteLLM gateway were deleted — the runtime is model-agnostic and the agent / provider / user chooses the model (see `docs/01-architecture/LLM_ROUTING_REMOVAL.md`).
 
 ### Execution Optimizer
 
@@ -168,7 +142,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Event Bus
 
-**Definition:** An async-only system for observability events. Events: ContextBuilt, SkillActivated, RepositoryUpdated, ToolExecuted, ModelSelected, ResponseGenerated, MemorySaved. Never in the `BuildContext` call path.
+**Definition:** An async-only system for observability events. Events: ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved. Never in the `BuildContext` call path.
 
 **Scope:** Consumed by CLI inspection, metrics, and future orchestrators.
 
@@ -216,7 +190,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Configuration
 
-**Definition:** Runtime settings defined in TOML format. Includes: model settings, token budgets, skill paths, daemon settings, agent-specific options, logging levels, and database paths.
+**Definition:** Runtime settings defined in TOML format. Includes: token budgets, daemon settings, retrieval settings, logging levels, and database paths.
 
 **Scope:** Loaded at daemon startup.
 
@@ -234,15 +208,13 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### IModelGateway
 
-**Definition:** The interface contract for model routing and inference. Default implementation is LiteLLM. Supports swapping to other gateways.
-
-**Scope:** Defined as a contract for portability. Concrete implementation is LiteLLM.
+**Definition:** [REMOVED v0.8.6] The model gateway interface and its LiteLLM implementation were deleted with the Model Router — the runtime is model-agnostic (see `docs/01-architecture/LLM_ROUTING_REMOVAL.md`).
 
 ### IWorkflowEngine
 
-**Definition:** The interface contract for external workflow orchestration. Optional, external to the runtime. Implementations: Temporal, DBOS Transact.
+**Definition:** [REMOVED] The workflow-engine interface (and DBOS) were removed — the runtime is a single tokio daemon (see `docs/01-architecture/REMOVED_TOOLS.md`).
 
-**Scope:** Not implemented in v1. Defined for future extensibility.
+**Scope:** Removed with the workflow engine.
 
 ### Prompt Caching
 
@@ -250,8 +222,8 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 **Scope:** First-class concern in the Context Engine's pack ordering.
 
-### Inspection Command
+### Preview Command
 
-**Definition:** A CLI command that can preview or replay what a given prompt would build (or did build). Generalizes the session-trace-inspection pattern.
+**Definition:** A CLI command that previews what a given prompt would build via BuildContext (event replay was removed — see `docs/01-architecture/REMOVED_TOOLS.md`).
 
-**Scope:** Consumes event bus events. Part of the CLI.
+**Scope:** Runs BuildContext locally (or via the daemon when running). Part of the CLI.

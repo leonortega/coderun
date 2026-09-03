@@ -21,6 +21,25 @@ if [ -S "$CODERUN_SOCKET" ] && command -v python3 >/dev/null 2>&1; then
   :
 fi
 
+# Readiness wait: poll /health until state == "ready" (bounded, fail-open). The HTTP
+# health listener binds BEFORE the initial index, so a cold start reports
+# "indexing" and this POST would 503 — wait so the first prompt gets context.
+# Unreachable (daemon down) bails immediately; budget expiry proceeds to the POST
+# below, which itself fails open.
+_ready_budget_ms="${CODERUN_READY_TIMEOUT_MS:-10000}"
+_ready_deadline=$(( $(date +%s) + (_ready_budget_ms + 999) / 1000 ))
+while [ "$(date +%s)" -lt "$_ready_deadline" ]; do
+  if _health_body="$(curl -sS --connect-timeout 1 --max-time 2 "$CODERUN_URL/health" 2>/dev/null)"; then
+    _health_state="$(echo "$_health_body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state","ready"))' 2>/dev/null || echo ready)"
+    case "$_health_state" in
+      ready|"") break ;;        # live daemon → proceed
+      *) sleep 1 ;;              # still indexing → keep polling
+    esac
+  else
+    break                       # unreachable → don't burn the budget
+  fi
+done
+
 # HTTP fallback (fail-open)
 HTTP_PAYLOAD="$(python3 -c "import json,sys; print(json.dumps({'hook_type': sys.argv[1], 'payload': {'type': 'MessageRewrite', 'session_id': 'gemini', 'message': sys.argv[2]}}))" "$HOOK_TYPE" "$INPUT" 2>/dev/null || echo "{}")"
 

@@ -1,5 +1,11 @@
 # Request Lifecycle
 
+> **V1 framing:** see [V1_RUNTIME_SPEC.md](V1_RUNTIME_SPEC.md). Stage 6 (Model
+> Routing) was deleted in v0.8.6 — the runtime is model-agnostic and the agent
+> chooses the model. Stage 4 (Skill Selection) was deleted with the Skill Engine
+> (see `REMOVED_TOOLS.md`). Stage 0 (Readiness) precedes every request. Where this
+> document conflicts with the V1 spec, the V1 spec wins.
+
 ## Purpose
 
 Define one complete request from user task to final response. Every stage is specified precisely with inputs, outputs, behavior, and error handling.
@@ -14,13 +20,15 @@ sequenceDiagram
     participant CE as Context Engine
     participant RI as Repository Intelligence
     participant KH as Knowledge Hub
-    participant SE as Skill Engine
-    participant MR as Model Router
-    participant LL as LiteLLM
     participant Model as LLM Model
     participant EO as Execution Optimizer
 
     Dev->>Agent: "Add rate limiting to the API"
+
+    rect rgb(220, 240, 240)
+    Note over Agent,AD: Stage 0: Readiness wait
+    Agent->>AD: Probe (GET /health or UDS Probe) until state = "ready"
+    end
 
     rect rgb(230, 245, 255)
     Note over Agent,AD: Stage 1: Hook Interception
@@ -43,27 +51,17 @@ sequenceDiagram
     KH-->>CE: Vec<KnowledgeEntry>
     end
 
-    rect rgb(230, 255, 230)
-    Note over CE,SE: Stage 4: Skill Selection
-    CE->>SE: match_skills(task_description)
-    SE->>SE: Tag-based scoring
-    SE-->>CE: Vec<SkillMatch>
-    end
-
     rect rgb(255, 255, 230)
     Note over CE: Stage 5: Context Assembly
-    CE->>CE: Order: skills → docs → code
+    CE->>CE: Order: docs → code
     CE->>CE: Apply frozen-prefix boundary
     CE->>CE: Deduplicate + token budget
     CE->>CE: Emit YAML Context Pack
     end
 
     rect rgb(255, 230, 240)
-    Note over CE,MR: Stage 6: Model Routing
-    CE->>MR: select_model(routing_request)
-    MR->>MR: Heuristic scoring
-    MR-->>CE: RoutingDecision
-    CE-->>AD: ContextPack + RoutingDecision
+    Note over CE,AD: Stage 6: Model Selection [REMOVED v0.8.6 — agent chooses the model]
+    CE-->>AD: ContextPack
     end
 
     rect rgb(230, 230, 255)
@@ -75,11 +73,9 @@ sequenceDiagram
 
     rect rgb(255, 245, 230)
     Note over Agent,Model: Stage 8: Model Request
-    Agent->>Agent: Configure model from RoutingDecision
-    Agent->>LL: POST /chat/completions
-    LL->>Model: Forward request
-    Model-->>LL: Response
-    LL-->>Agent: Completion
+    Agent->>Agent: Configure model (agent/provider/user choice — runtime is model-agnostic)
+    Agent->>Model: POST /chat/completions
+    Model-->>Agent: Completion
     end
 
     rect rgb(240, 255, 240)
@@ -103,11 +99,38 @@ sequenceDiagram
 
 ---
 
+## Stage 0: Readiness Wait
+
+### Entry Point
+
+Before the first request, the agent must confirm the daemon is ready. During the
+cold start (initial index) the UDS socket is NOT bound yet — the daemon gates
+binding on indexing completion — so readiness is polled over HTTP first.
+
+### Processing
+
+1. Poll HTTP `GET /health` until `state == "ready"` (or `GET /metrics` shows
+   `coderun_daemon_ready 1`). During indexing these answer `state: "indexing"`.
+2. Once the UDS socket exists, the same signal is available on the primary
+   transport via the `Probe` payload (`{ "type": "Probe" }`) — answered before
+   rate-limiting, never gated, no engine lock.
+3. If a real request is sent while not ready: HTTP `POST /hook` returns `503`
+   (`reason: "daemon_indexing"`). Retry with backoff — this is a retry signal,
+   not a fail-open passthrough.
+
+### Output
+
+A confirmed-ready daemon. Proceed to Stage 1.
+
+---
+
 ## Stage 1: Hook Interception
 
 ### Entry Point
 
-Developer provides a natural-language task to the coding agent. The agent's pre-generation hook fires before the model generates a response.
+Developer provides a natural-language task to the coding agent (daemon already
+confirmed ready — Stage 0). The agent's pre-generation hook fires before the model
+generates a response.
 
 ### Input
 
@@ -256,53 +279,12 @@ KnowledgeEntry {
 
 ---
 
-## Stage 4: Skill Selection
+## Stage 4: Skill Selection — [REMOVED]
 
-### Entry Point
+> Skill matching ran between knowledge retrieval and context assembly as an
+> optional path. The Skill Engine was removed — agents own skill discovery
+> natively (see `REMOVED_TOOLS.md`). Stage 3 hands directly to Stage 5.
 
-Context Engine needs to find skills applicable to the task.
-
-### Input
-
-- Task description
-- Context hints (files_mentioned, language)
-
-### Processing
-
-1. Classify task using shared signals (structural, semantic, scope)
-2. For each skill in registry:
-   a. Extract tag keywords
-   b. Compute tag overlap score with task description
-   c. Apply category bonus if task matches skill tags
-   d. Compute final score
-3. Sort by score descending
-4. Detect conflicts between matched skills
-5. Resolve priority (higher score wins)
-6. Filter: score > 0.3
-7. Take top N (configured, default 5)
-8. Return full instructions (not just descriptions)
-9. Log: `DEBUG skills_matched count={count} skills={names}`
-
-### Output
-
-```rust
-Vec<SkillMatch>  // max 5
-
-SkillMatch {
-    skill_name: String,
-    match_score: f64,
-    instructions: String,
-    examples: Vec<String>,
-    constraints: Vec<String>,
-}
-```
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| No skills loaded | Return empty list |
-| All scores below threshold | Return empty list |
 
 ---
 
@@ -317,7 +299,6 @@ All retrieval stages complete. Context Engine assembles the final Context Pack.
 - TaskRequest (message, hints)
 - SearchResults (from Stage 2)
 - Vec<KnowledgeEntry> (from Stage 3)
-- Vec<SkillMatch> (from Stage 4)
 - Session fingerprint (existing context)
 - Token budget (from configuration)
 
@@ -334,25 +315,11 @@ remaining = total_budget
 
 Content is assembled in this fixed order for maximum prompt cache hit rates:
 
-1. **behavioral_skills** (20% of budget) — Most cache-stable
-2. **docs_context** (15% of budget) — Moderately stable
-3. **Frozen-prefix boundary** — Marks where stable content ends
-4. **code_context** (55% of budget) — Least stable
+1. **docs_context** (45% of budget) — Most cache-stable
+2. **Frozen-prefix boundary** — Marks where stable content ends
+3. **code_context** (55% of budget) — Least stable
 
-#### Step 3: Add Behavioral Skills
-
-```
-skills_budget = total_budget * 0.20  // 2400 tokens
-
-for skill in matched_skills:
-    skill_tokens = count_tokens(skill.instructions)
-    if skill_tokens <= remaining AND skill_tokens <= skills_budget:
-        add skill to behavioral_skills section
-        remaining -= skill_tokens
-        skills_budget -= skill_tokens
-```
-
-#### Step 4: Add Docs Context
+#### Step 3: Add Docs Context
 
 ```
 docs_budget = total_budget * 0.15  // 1800 tokens
@@ -393,9 +360,6 @@ for result in search_results:
 
 ```yaml
 # Context Pack (YAML)
-behavioral_skills:
-  - name: "Add Rate Limiting"
-    instructions: "1. Check existing middleware patterns..."
 docs_context:
   - path: "docs/conventions.md"
     content: "All middleware follows the Express middleware signature..."
@@ -410,7 +374,6 @@ code_context:
 
 ```rust
 ContextPack {
-    behavioral_skills: Vec<SkillMatch>,
     docs_context: Vec<KnowledgeEntry>,
     code_context: Vec<CodeFile>,
     token_usage: TokenUsage,
@@ -434,100 +397,12 @@ TokenUsage {
 
 ---
 
-## Stage 6: Model Routing
+## Stage 6: Model Selection — [REMOVED v0.8.6]
 
-### Entry Point
-
-Context pack assembled. Need to select appropriate model.
-
-### Input
-
-- Task description
-- Context pack size (total tokens)
-- Number of files involved
-- Number of knowledge entries
-- Number of skills matched
-
-### Processing
-
-1. Compute structural complexity:
-   ```
-   file_count_score = min(context.code_context.len() / 10.0, 1.0)
-   symbol_count_score = min(context.metadata.key_symbols.len() / 20.0, 1.0)
-   structural = (file_count_score + symbol_count_score) / 2.0
-   ```
-
-2. Compute semantic complexity:
-   ```
-   task_length_score = min(task.len() / 200.0, 1.0)
-   technical_terms = count_technical_terms(task)
-   technical_score = min(technical_terms / 5.0, 1.0)
-   action_verbs = count_action_verbs(task)
-   action_score = min(action_verbs / 3.0, 1.0)
-   semantic = (task_length_score + technical_score + action_score) / 3.0
-   ```
-
-3. Compute scope:
-   ```
-   token_score = min(context.token_usage.total_tokens / 10000.0, 1.0)
-   knowledge_score = min(context.docs_context.len() / 10.0, 1.0)
-   skill_score = min(context.behavioral_skills.len() / 5.0, 1.0)
-   scope = (token_score + knowledge_score + skill_score) / 3.0
-   ```
-
-4. Compute final score:
-   ```
-   final = structural * 0.3 + semantic * 0.4 + scope * 0.3
-   ```
-
-5. Map to tier:
-   ```
-   if final < config.routing.fast_threshold:  // default 0.3
-       tier = "fast"
-   elif final > config.routing.capable_threshold:  // default 0.7
-       tier = "capable"
-   else:
-       tier = "balanced"
-   ```
-
-6. Resolve model name:
-   ```
-   model = config.routing.{tier}_model
-   ```
-
-7. Apply override:
-   ```
-   if task_request.model_override:
-       model = task_request.model_override
-       tier = "overridden"
-   ```
-
-8. Log: `INFO model_routed tier={tier} model={model} score={final}`
-
-### Output
-
-```rust
-RoutingDecision {
-    model: String,          // "gpt-4o"
-    tier: String,           // "balanced"
-    scores: RoutingScores,
-    reasoning: String,      // Human-readable explanation
-}
-
-RoutingScores {
-    structural: f64,
-    semantic: f64,
-    scope: f64,
-    final: f64,
-}
-```
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| Scoring failure | Return default (balanced, gpt-4o) |
-| Configuration missing | Use default tier-to-model mapping |
+> Model routing was deleted in v0.8.6: BuildContext is deterministic and the runtime
+> is model-agnostic (V1_RUNTIME_SPEC.md §2.3). The agent / provider / user chooses
+> the model. There is no routing stage — the Context Pack passes straight from the
+> Context Engine (Stage 5) to the Adapter Layer (Stage 7).
 
 ---
 
@@ -535,12 +410,11 @@ RoutingScores {
 
 ### Entry Point
 
-Context pack and routing decision ready. Format and return to agent.
+Context pack ready. Format and return to agent.
 
 ### Input
 
 - ContextPack from Stage 5
-- RoutingDecision from Stage 6
 - Correlation ID from Stage 1
 
 ### Processing
@@ -551,13 +425,12 @@ Context pack and routing decision ready. Format and return to agent.
        original: original_message,
        rewritten: inject_context(original_message, context_pack),
        context_pack: Some(context_pack),
-       routing_decision: Some(routing_decision),
    }
    ```
 
 2. Log token usage to SQLite
 
-3. Emit ContextBuilt and ModelSelected events
+3. Emit ContextBuilt event
 
 4. Log: `INFO request_completed correlation_id={id} tokens={total} model={model}`
 
@@ -570,10 +443,8 @@ The rewritten message includes the original message plus injected context:
 ```
 [SYSTEM CONTEXT — Generated by Coderun Runtime]
 Context Pack (8,500 tokens):
-- 3 skills matched (Add Rate Limiting, Error Handling Pattern)
 - 2 knowledge entries (middleware convention, API design pattern)
 - 5 code files (router.ts, auth.ts, middleware/, config.ts, types.ts)
-- Model: gpt-4o (balanced tier, score: 0.51)
 
 [ORIGINAL MESSAGE]
 Add rate limiting to the API
@@ -593,7 +464,6 @@ VALUES ('req_xyz789', 'context', 8500, 0, 'gpt-4o', 'balanced', '2025-01-15T10:3
 | Error | Response |
 |-------|----------|
 | Context build failure | OriginalPassthrough (fail-open) |
-| Model routing failure | Context with default model |
 | Token logging failure | Return response, log warning |
 
 ---
@@ -612,8 +482,8 @@ This stage is performed by the **coding agent**, not the runtime. The runtime pr
 
 1. Receive rewritten message with injected context
 2. Include in the model's prompt
-3. Configure model from routing decision (if provided)
-4. Send to model provider (through LiteLLM or directly)
+3. Choose model (agent/provider/user — the runtime is model-agnostic, V1_RUNTIME_SPEC.md §2.3)
+4. Send to model provider directly
 5. Receive model response
 
 ### Agent Output
@@ -711,12 +581,13 @@ After the request cycle completes:
 
 | Stage | Target Duration | Maximum Duration |
 |-------|-----------------|------------------|
+| Stage 0: Readiness Probe | < 1ms | 5ms |
 | Stage 1: Hook Interception | < 2ms | 10ms |
 | Stage 2: Code Search | < 50ms | 200ms |
 | Stage 3: Knowledge Retrieval | < 30ms | 100ms |
-| Stage 4: Skill Selection | < 10ms | 50ms |
+| Stage 4: Skill Selection | N/A (removed — see `REMOVED_TOOLS.md`) | N/A |
 | Stage 5: Context Assembly | < 50ms | 200ms |
-| Stage 6: Model Routing | < 5ms | 20ms |
+| Stage 6: Model Routing | N/A (removed v0.8.6) | N/A |
 | Stage 7: Response | < 10ms | 50ms |
 | **Total Runtime Overhead** | **< 160ms** | **< 30s (hard limit)** |
 | Stage 8: Model Request | N/A (external) | N/A |
@@ -746,10 +617,8 @@ Every log entry across all stages includes the correlation ID. This enables:
 {"level":"info","correlation_id":"req_xyz789","module":"adapter","message":"hook_received","hook_type":"PreGeneration"}
 {"level":"debug","correlation_id":"req_xyz789","module":"repository_intelligence","message":"code_search_completed","results":12,"duration_ms":35}
 {"level":"debug","correlation_id":"req_xyz789","module":"knowledge_hub","message":"knowledge_retrieved","entries":3,"duration_ms":18}
-{"level":"debug","correlation_id":"req_xyz789","module":"skill_engine","message":"skills_matched","skills":["Add Rate Limiting"],"count":1,"duration_ms":4}
-{"level":"debug","correlation_id":"req_xyz789","module":"context_engine","message":"context_pack_built","total_tokens":8500,"budget_remaining":3500,"order":"skills→docs→code"}
-{"level":"info","correlation_id":"req_xyz789","module":"model_router","message":"model_routed","model":"gpt-4o","tier":"balanced","score":0.51}
-{"level":"info","correlation_id":"req_xyz789","module":"adapter","message":"request_completed","total_tokens":8500,"model":"gpt-4o","latency_ms":127}
+{"level":"debug","correlation_id":"req_xyz789","module":"context_engine","message":"context_pack_built","total_tokens":8500,"budget_remaining":3500,"order":"docs→code"}
+{"level":"info","correlation_id":"req_xyz789","module":"adapter","message":"request_completed","total_tokens":8500,"latency_ms":127}
 ```
 
 ---
@@ -774,11 +643,11 @@ The following rules are **mandatory** for any coding AI implementing this specif
 
 7. **Implement the token budget system exactly.** The budget allocation percentages and priority order are fixed for v1.
 
-8. **Implement the model routing algorithm exactly.** The scoring formula and tier thresholds are fixed for v1.
+8. **Do not implement model routing.** Removed v0.8.6 — the runtime is model-agnostic; the agent/provider/user selects the model (V1_RUNTIME_SPEC.md §2.3).
 
-9. **Implement the skill matching algorithm exactly.** The tag scoring and category bonus are fixed for v1.
+9. **Do not implement skill matching.** The Skill Engine was removed (see `REMOVED_TOOLS.md`) — agents own skill discovery natively.
 
-10. **Implement the cache-aware ordering exactly.** The order skills → docs → code with frozen-prefix boundary is fixed for v1.
+10. **Implement the cache-aware ordering exactly.** The order docs → code with frozen-prefix boundary is fixed for v1.
 
 11. **Do not add features not in scope.** If a feature is listed in SCOPE.md as out of scope, do not implement it.
 
@@ -796,7 +665,7 @@ The following rules are **mandatory** for any coding AI implementing this specif
 
 18. **Use the specified configuration format.** Do not add configuration options without updating this specification.
 
-19. **Test with Promptfoo for evaluation.** Model routing accuracy and context quality must be evaluated with Promptfoo.
+19. **Evaluate context quality.** Retrieval/context quality must be evaluated (Promptfoo or the benchmark suite); model routing accuracy is moot — routing was removed.
 
 20. **Performance targets are mandatory.** The timing budget in this document defines acceptable performance. Target low single digits; hard limit 30 seconds.
 

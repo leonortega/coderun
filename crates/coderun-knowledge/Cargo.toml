@@ -7,7 +7,6 @@ edition.workspace = true
 coderun-core.workspace = true
 coderun-events.workspace = true
 coderun-storage.workspace = true
-coderun-skills.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

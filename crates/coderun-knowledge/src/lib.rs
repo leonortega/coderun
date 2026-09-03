@@ -1,25 +1,19 @@
-pub mod rerank;
-
-use std::path::Path;
-
-use coderun_core::{KnowledgeEntry, SkillMatch};
+use coderun_core::KnowledgeEntry;
 use coderun_events::{EventBus, RuntimeEvent};
 use coderun_storage::Database;
 use tracing::{debug, info};
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-/// KnowledgeConfig — rerank_enabled kept for compat (passthrough), storage is SQLite+tantivy local
+/// KnowledgeConfig — storage is SQLite+tantivy local
 #[derive(Debug, Clone)]
 pub struct KnowledgeConfig {
-    pub rerank_enabled: bool,
     pub max_knowledge_entries: usize,
 }
 
 impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
-            rerank_enabled: false, // v1: FlashRank removed per benchmark; reranker is passthrough
             max_knowledge_entries: 10000,
         }
     }
@@ -32,8 +26,6 @@ pub struct KnowledgeHub {
     event_bus: EventBus,
     #[allow(dead_code)]
     config: KnowledgeConfig,
-    /// In-memory skill registry (loaded from files)
-    skills: Vec<coderun_skills::Skill>,
 }
 
 impl KnowledgeHub {
@@ -43,32 +35,7 @@ impl KnowledgeHub {
             db,
             event_bus,
             config,
-            skills: Vec::new(),
         }
-    }
-
-    /// Load skills from a directory
-    pub fn load_skills(&mut self, skills_dir: &Path) -> Result<usize, String> {
-        let mut engine = coderun_skills::SkillEngine::new(skills_dir.to_path_buf());
-        let count = engine.load_skills()?;
-        self.skills = engine.get_skills().to_vec();
-        Ok(count)
-    }
-
-    /// Load skills from multiple directories in priority order (first occurrence of a skill
-    /// name wins) — repo-local `.coderun/skills` merged with the global `~/.coderun/skills`
-    /// library. Non-existent directories are skipped.
-    pub fn load_skills_from_dirs(&mut self, dirs: &[std::path::PathBuf]) -> Result<usize, String> {
-        let mut engine = coderun_skills::SkillEngine::from_skills(Vec::new());
-        let count = engine.load_skills_from_dirs(dirs)?;
-        self.skills = engine.get_skills().to_vec();
-        Ok(count)
-    }
-
-    /// Match skills — delegates to canonical SkillEngine scorer (v0.6.0 single impl)
-    pub fn match_skills(&self, task_description: &str, max_skills: usize) -> Vec<SkillMatch> {
-        let engine = coderun_skills::SkillEngine::from_skills(self.skills.clone());
-        engine.match_skills(task_description, max_skills)
     }
 
     // ── Knowledge Storage ──────────────────────────────────────────
@@ -149,7 +116,6 @@ impl KnowledgeHub {
         let lexical_limit = 20usize;
         let records = self.db.search_knowledge(query, category_filter, 0.3, lexical_limit, repository_id)?;
 
-        // v1: FlashRank removed — reranker is passthrough (see rerank.rs module docs)
         let mut entries: Vec<KnowledgeEntry> = Vec::new();
         for rec in records.into_iter().take(max_results) {
             if rec.confidence >= 0.3 {
@@ -602,39 +568,4 @@ mod tests {
         assert!(res.len() <= 3);
     }
 
-    #[test]
-    fn test_v060_match_skills_delegates_to_skill_engine() {
-        use std::fs;
-        use std::path::PathBuf;
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("coderun_knowledge_v060_{}", nanos));
-        fs::create_dir_all(&dir).unwrap();
-        // Seed skills directly via KnowledgeHub internal vec
-        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let cfg = KnowledgeConfig::default();
-        let mut hub = KnowledgeHub::new(db, crate::EventBus::new(), cfg);
-        // Inject two skills
-        hub.skills = vec![
-            coderun_skills::Skill { name: "Rust Expert".to_string(), tags: vec!["rust".into(), "cargo".into()], instructions: "rust".into(), examples: vec![], constraints: vec![], description: "".into(), priority: 2, specificity: 0.4 },
-            coderun_skills::Skill { name: "Python Expert".to_string(), tags: vec!["python".into()], instructions: "py".into(), examples: vec![], constraints: vec![], description: "".into(), priority: 1, specificity: 0.2 },
-        ];
-        // Same input to both engines should yield identical top match
-        let hub_matches = hub.match_skills("help with rust cargo", 5);
-        let engine = coderun_skills::SkillEngine::from_skills(hub.skills.clone());
-        let eng_matches = engine.match_skills("help with rust cargo", 5);
-        assert_eq!(hub_matches.len(), eng_matches.len());
-        if !hub_matches.is_empty() {
-            assert_eq!(hub_matches[0].skill_name, eng_matches[0].skill_name);
-            assert!((hub_matches[0].match_score - eng_matches[0].match_score).abs() < 1e-9);
-        }
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_v060_match_skills_threshold() {
-        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let hub = KnowledgeHub::new(db, crate::EventBus::new(), KnowledgeConfig::default());
-        // No skills loaded → no matches
-        assert!(hub.match_skills("rust", 5).is_empty());
-    }
 }

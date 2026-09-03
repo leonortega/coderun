@@ -47,6 +47,8 @@ pub enum HttpRequestPayload {
         #[serde(default)]
         repository_path: Option<String>,
     },
+    #[serde(rename = "Probe")]
+    Probe,
 }
 
 #[derive(serde::Deserialize)]
@@ -87,6 +89,12 @@ pub enum HttpResponsePayload {
         original: String,
         reason: String,
     },
+    #[serde(rename = "Probe")]
+    Probe {
+        state: String,
+        index_files: usize,
+        version: String,
+    },
 }
 
 // ── Server State ─────────────────────────────────────────────────────────
@@ -100,25 +108,12 @@ pub struct HttpServerState {
 // ── Server Setup ─────────────────────────────────────────────────────────
 
 pub fn create_router(state: HttpServerState) -> Router {
-    #[cfg(feature = "workflow")]
-    {
-        return Router::new()
-            .route("/hook", post(handle_hook))
-            .route("/health", axum::routing::get(handle_health))
-            .route("/metrics", axum::routing::get(handle_metrics))
-            .route("/workflow/start", post(handle_workflow_start))
-            .route("/workflow/{id}", axum::routing::get(handle_workflow_status))
-            .route("/workflow/{id}/approve", post(handle_workflow_approve))
-            .with_state(state);
-    }
-    #[cfg(not(feature = "workflow"))]
-    {
-        return Router::new()
-            .route("/hook", post(handle_hook))
-            .route("/health", axum::routing::get(handle_health))
-            .route("/metrics", axum::routing::get(handle_metrics))
-            .with_state(state);
-    }
+    Router::new()
+        .route("/hook", post(handle_hook))
+        .route("/health", axum::routing::get(handle_health))
+        .route("/metrics", axum::routing::get(handle_metrics))
+        .route("/mcp", post(crate::mcp::handle_mcp))
+        .with_state(state)
 }
 
 pub async fn start_http_server(
@@ -143,11 +138,28 @@ pub async fn start_http_server(
 
 // ── Handlers ─────────────────────────────────────────────────────────────
 
+/// Build the readiness probe payload from the shared metrics. Used by the HTTP
+/// `Probe` payload and the UDS/MessagePack probe (parity with `GET /health`).
+/// Never touches the engine or the readiness gate — always answers.
+fn http_probe_payload() -> HttpResponsePayload {
+    let m = crate::metrics::global();
+    HttpResponsePayload::Probe {
+        state: m.readiness_str().to_string(),
+        index_files: m.index_files(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 async fn handle_health() -> Json<serde_json::Value> {
     // Version single source of truth: root Cargo.toml [workspace.package].version
+    // Readiness: "indexing" while the initial index / an auto-reindex runs, "ready" after.
+    // Clients should poll until `state` is "ready" before sending requests.
+    let m = crate::metrics::global();
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "state": m.readiness_str(),
+        "index_files": m.index_files(),
     }))
 }
 
@@ -155,51 +167,8 @@ async fn handle_metrics() -> String {
     crate::metrics::global().exposition()
 }
 
-#[cfg(feature = "workflow")]
-async fn handle_workflow_start(
-    State(_state): State<HttpServerState>,
-    Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let task = body.get("task").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let workflow_id = body.get("workflow_id").and_then(|v| v.as_str()).unwrap_or("wf_local").to_string();
-    // Persist to audits/workflows if DB available — best-effort, never fail
-    // For v1 mock: just echo, DBOS sidecar will do durable insert when --features workflow
-    Json(serde_json::json!({"workflow_id": workflow_id, "status": "pending", "task": task}))
-}
-
-#[cfg(feature = "workflow")]
-async fn handle_workflow_status(
-    State(_state): State<HttpServerState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({"workflow_id": id, "status": "running"}))
-}
-
-#[cfg(feature = "workflow")]
-async fn handle_workflow_approve(
-    State(_state): State<HttpServerState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    // HMAC verification for workflow approval (uses coderun-core canonical verifier via ratelimit::verify_hmac)
-    if let Some(secret) = std::env::var("CODERUN_DBOS_SECRET").ok().filter(|s| !s.is_empty()) {
-        let body_str = body.to_string();
-        let sig = body.get("signature").and_then(|v| v.as_str()).unwrap_or("");
-        if !sig.is_empty() && !crate::ratelimit::verify_hmac(&secret, &body_str, sig) {
-            tracing::warn!("workflow approve HMAC verification failed");
-            return Json(serde_json::json!({"workflow_id": id, "status": "hmac_failed"}));
-        }
-        // Keep verify_hmac symbol exercised even when no signature provided
-        let _ = crate::ratelimit::verify_hmac(&secret, &body_str, sig);
-    } else {
-        // Still exercise verify_hmac to keep dead-code warning gone
-        let _ = crate::ratelimit::verify_hmac("", &body.to_string(), "");
-    }
-    Json(serde_json::json!({"workflow_id": id, "status": "completed"}))
-}
-
 /// Validate message length (spec §3 — secrets redaction + input validation)
-fn validate_input_len(content: &str, limit: usize) -> Result<(), String> {
+pub(crate) fn validate_input_len(content: &str, limit: usize) -> Result<(), String> {
     if content.len() > limit {
         return Err(format!("input too large: {} > {} bytes (truncated)", content.len(), limit));
     }
@@ -224,10 +193,41 @@ async fn handle_hook(
     let correlation_id = request.correlation_id.unwrap_or_else(|| {
         format!("req_{}", uuid::Uuid::new_v4())
     });
+    // Readiness probe — lightweight parity with GET /health and the UDS probe:
+    // never gated (must answer during indexing), never rate-limited, no engine lock.
+    if matches!(request.payload, HttpRequestPayload::Probe) {
+        let resp = HttpResponse {
+            correlation_id: correlation_id.clone(),
+            hook_type: request.hook_type.clone(),
+            payload: http_probe_payload(),
+            latency_ms: 0,
+            error: None,
+        };
+        return Ok(Json(resp));
+    }
+    // Readiness gate: while the initial index (or an auto-reindex) is running, the
+    // engine lock is held — reject fast with 503 so clients can back off and retry
+    // instead of queueing on the lock. Poll GET /health (`state: "ready"`) before
+    // sending requests. Never counted as fail-open: this is a retry signal, not a fault.
+    if !crate::metrics::global().is_ready() {
+        tracing::warn!(correlation_id = %correlation_id, "HTTP /hook rejected — daemon indexing in progress (503)");
+        let resp = HttpResponse {
+            correlation_id: correlation_id.clone(),
+            hook_type: request.hook_type.clone(),
+            payload: HttpResponsePayload::OriginalPassthrough {
+                original: String::new(),
+                reason: "daemon_indexing".to_string(),
+            },
+            latency_ms: 0,
+            error: Some("daemon not ready — indexing in progress".to_string()),
+        };
+        return Err((StatusCode::SERVICE_UNAVAILABLE, Json(resp)));
+    }
     // Rate limiting (HTTP fallback) — shared TokenBucket
     let session_key = match &request.payload {
         HttpRequestPayload::MessageRewrite { session_id, .. } => session_id.clone().unwrap_or_else(|| correlation_id.clone()),
         HttpRequestPayload::ToolOutput { tool_name, .. } => tool_name.clone(),
+        HttpRequestPayload::Probe => "probe".to_string(),
     };
     if http_rate_limiter().is_rate_limited(&session_key) {
         crate::metrics::global().inc_fail_open();
@@ -270,6 +270,7 @@ async fn handle_hook(
     let hook_type = match request.hook_type.as_str() {
         "PreGeneration" => HookType::PreGeneration,
         "PreToolCall" => HookType::PreToolCall,
+        "Probe" => HookType::Probe,
         _ => {
             let hook_type_str = request.hook_type.clone();
             let resp = HttpResponse {
@@ -292,6 +293,7 @@ async fn handle_hook(
     let repository_path: Option<String> = match &request.payload {
         HttpRequestPayload::MessageRewrite { repository_path, .. } => repository_path.clone(),
         HttpRequestPayload::ToolOutput { repository_path, .. } => repository_path.clone(),
+        HttpRequestPayload::Probe => None,
     };
     let repository_id = {
         use sha2::{Digest, Sha256};
@@ -338,6 +340,8 @@ async fn handle_hook(
                     repository_path,
                 }
             }
+            // Probes are intercepted above (before the readiness gate); never converted.
+            HttpRequestPayload::Probe => unreachable!("probe handled before hook_type conversion"),
         },
     };
 
@@ -391,6 +395,9 @@ async fn handle_request(
                 &state.optimizer,
             )?
         }
+        // Unreachable over HTTP (intercepted in handle_hook before conversion), but
+        // harmless to answer honestly if an AgentRequest is built directly by a caller.
+        RequestPayload::Probe => http_probe_payload(),
     };
 
     Ok(HttpResponse {
@@ -402,7 +409,7 @@ async fn handle_request(
     })
 }
 
-async fn handle_pre_generation(
+pub(crate) async fn handle_pre_generation(
     message: String,
     session_id: String,
     context_hints: Option<coderun_core::ContextHints>,
@@ -424,7 +431,7 @@ async fn handle_pre_generation(
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.lock().await;
     let context_pack = engine.build_context(&task).await?;
-    crate::metrics::global().inc_requests("PreGeneration", "balanced");
+    crate::metrics::global().inc_requests("PreGeneration");
     // TASK-022: wire metrics — context tokens + retrieval recall (was dead_code)
     crate::metrics::global().observe_context_tokens(context_pack.token_usage.total_tokens);
     let recall = if !context_pack.code_context.is_empty() { 0.85 } else { 0.0 };
@@ -455,7 +462,7 @@ async fn handle_pre_generation(
     })
 }
 
-fn handle_pre_tool_call(
+pub(crate) fn handle_pre_tool_call(
     tool_name: String,
     output_type: OutputType,
     content: String,
@@ -525,5 +532,9 @@ mod tests {
         let resp = handle_health().await;
         assert_eq!(resp.0["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(resp.0["status"], "ok");
+        // Readiness: the global metrics default to Indexing (no daemon running in
+        // tests), so the health payload must report the indexing state + a count.
+        assert_eq!(resp.0["state"], "indexing");
+        assert!(resp.0["index_files"].is_u64() || resp.0["index_files"].is_null());
     }
 }

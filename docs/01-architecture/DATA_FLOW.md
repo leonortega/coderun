@@ -1,5 +1,10 @@
 # Data Flow
 
+> **V1 framing:** see [V1_RUNTIME_SPEC.md](V1_RUNTIME_SPEC.md). Model Router /
+> LiteLLM were deleted in v0.8.6 (see `LLM_ROUTING_REMOVAL.md`) — Flow 7 (Model Routing) is removed.
+> Flow 5 (Skill Selection) is removed with the Skill Engine (see `REMOVED_TOOLS.md`).
+> Where this file conflicts with the V1 spec or the code, the V1 spec / code win.
+
 ## Purpose
 
 Describe all important data flows through the AI Runtime. Each flow shows the sequence of operations, data transformations, and module interactions.
@@ -82,8 +87,6 @@ sequenceDiagram
     participant CE as Context Engine
     participant RI as Repository Intelligence
     participant KH as Knowledge Hub
-    participant SE as Skill Engine
-    participant MR as Model Router
     participant TC as tiktoken-rs
     participant EB as Event Bus
 
@@ -103,28 +106,18 @@ sequenceDiagram
     TV-->>KH: candidates
     KH-->>CE: Vec<KnowledgeEntry>
 
-    CE->>SE: match_skills(task)
-    SE->>SE: tag-based scoring
-    SE-->>KH: Vec<SkillMatch>
-    KH-->>CE: Vec<SkillMatch>
-
     CE->>TC: count_tokens(content)
     TC-->>CE: token_counts
 
-    CE->>CE: Order: skills → docs → code
+    CE->>CE: Order: docs → code
     CE->>CE: Apply frozen-prefix boundary
     CE->>CE: Deduplicate against fingerprint
     CE->>CE: Enforce token budget
     CE->>CE: Emit Context Pack as YAML
 
-    CE->>MR: select_model(routing_request)
-    MR->>MR: Heuristic scoring
-    MR-->>CE: RoutingDecision
-
     CE->>EB: emit(ContextBuilt)
-    MR->>EB: emit(ModelSelected)
 
-    CE-->>AD: ContextPack + RoutingDecision
+    CE-->>AD: ContextPack
     AD-->>Agent: RewrittenMessage(with context)
 ```
 
@@ -232,51 +225,11 @@ sequenceDiagram
 
 ---
 
-## Flow 5: Skill Selection
+## Flow 5: Skill Selection — [REMOVED]
 
-### Trigger
+> Skill matching ran inside BuildContext as an optional path. The Skill Engine was
+> removed — agents own skill discovery natively (see `REMOVED_TOOLS.md`).
 
-- Part of BuildContext pipeline (Flow 2)
-
-### Sequence
-
-```mermaid
-sequenceDiagram
-    participant CE as Context Engine
-    participant KH as Knowledge Hub
-    participant SE as Skill Engine
-
-    CE->>KH: match_skills(task_description)
-    KH->>SE: classify_task(task_description)
-    SE->>SE: reuse Model Router signals
-
-    loop For each skill in registry
-        SE->>SE: compute_tag_overlap(skill.tags, task)
-        SE->>SE: apply_category_bonus()
-        SE->>SE: compute_final_score()
-    end
-
-    SE->>SE: sort_by_score_descending()
-    SE->>SE: detect_conflicts()
-    SE->>SE: resolve_priority()
-    SE->>SE: filter(score > 0.3)
-    SE->>SE: take(top_N)
-
-    SE-->>KH: Vec<SkillMatch>
-    KH-->>CE: Vec<SkillMatch>
-```
-
-### SkillMatch Structure
-
-```json
-{
-  "skill_name": "Add Rate Limiting",
-  "match_score": 0.85,
-  "instructions": "1. Check existing middleware patterns...",
-  "examples": ["src/middleware/rate_limit.rs"],
-  "constraints": ["Do not modify authentication logic"]
-}
-```
 
 ---
 
@@ -285,7 +238,7 @@ sequenceDiagram
 ### Trigger
 
 - Part of BuildContext pipeline (Flow 2)
-- Orchestrates Flows 4 and 5
+- Orchestrates Flow 4
 
 ### Sequence
 
@@ -293,23 +246,20 @@ sequenceDiagram
 flowchart TD
     A[Receive TaskRequest] --> B[Initialize token budget: 12000]
     B --> C[Search code: ~6600 tokens]
-    C --> D[Retrieve knowledge: ~1800 tokens]
-    D --> E[Match skills: ~2400 tokens]
-    E --> F[Order for cache stability]
+    C --> D[Retrieve knowledge: ~45% budget]
+    D --> E[Order for cache stability]
 
-    F --> G[Section 1: behavioral_skills - 20%]
-    G --> H[Section 2: docs_context - 15%]
-    H --> I[Frozen-prefix boundary]
-    I --> J[Section 3: code_context - 55%]
+    E --> F[Section 1: docs_context - 45%]
+    F --> G[Frozen-prefix boundary]
+    G --> H[Section 2: code_context - 55%]
 
-    J --> K[Deduplicate against session fingerprint]
-    K --> L[Enforce token budget]
-    L --> M[Emit Context Pack as YAML]
+    H --> I[Deduplicate against session fingerprint]
+    I --> J[Enforce token budget]
+    J --> K[Emit Context Pack as YAML]
 
-    style G fill:#e8f5e9
-    style H fill:#f3e5f5
-    style I fill:#fff3e0
-    style J fill:#e1f5fe
+    style F fill:#f3e5f5
+    style G fill:#fff3e0
+    style H fill:#e1f5fe
 ```
 
 ### Cache-Aware Ordering Detail
@@ -318,13 +268,9 @@ flowchart TD
 Context Pack Structure (YAML):
 
 ┌─────────────────────────────────────────────────┐
-│ behavioral_skills                20%  2,400 tok │
+│ docs_context                       45%  5,400 tok│
 │ ████████████████████████████████████████         │
 │ (Most cache-stable: byte-identical across tasks)│
-├─────────────────────────────────────────────────┤
-│ docs_context                       15%  1,800 tok│
-│ ████████████████████████████                     │
-│ (Moderately stable: changes rarely)              │
 ├───────── FROZEN-PREFIX BOUNDARY ────────────────┤
 │ code_context                       55%  6,600 tok│
 │ ████████████████████████████████████████         │
@@ -348,63 +294,11 @@ Context Pack Structure (YAML):
 
 ---
 
-## Flow 7: Model Routing
+## Flow 7: Model Routing — [REMOVED v0.8.6]
 
-### Trigger
-
-- Part of BuildContext pipeline (Flow 2)
-- After context assembly is complete
-
-### Sequence
-
-```mermaid
-sequenceDiagram
-    participant CE as Context Engine
-    participant MR as Model Router
-    participant CFG as Configuration
-
-    CE->>MR: select_model(RoutingRequest)
-    MR->>CFG: get routing weights
-    CFG-->>MR: weights
-
-    MR->>MR: compute_structural_score(context)
-    MR->>MR: compute_semantic_score(task_description)
-    MR->>MR: compute_scope_score(context_size)
-
-    MR->>MR: final_score = structural * 0.3 + semantic * 0.4 + scope * 0.3
-
-    alt score < 0.3
-        MR->>MR: tier = "fast"
-    else score 0.3–0.7
-        MR->>MR: tier = "balanced"
-    else score > 0.7
-        MR->>MR: tier = "capable"
-    end
-
-    MR->>CFG: get model_for_tier(tier)
-    CFG-->>MR: model_name
-
-    MR->>MR: build_reasoning()
-    MR->>MR: emit(ModelSelected)
-
-    MR-->>CE: RoutingDecision
-```
-
-### RoutingDecision Structure
-
-```json
-{
-  "model": "gpt-4o",
-  "tier": "balanced",
-  "scores": {
-    "structural": 0.5,
-    "semantic": 0.6,
-    "scope": 0.4,
-    "final": 0.51
-  },
-  "reasoning": "Moderate complexity: middleware creation with clear task description and moderate context size"
-}
-```
+Model routing / LiteLLM were deleted from the v1 runtime (see `LLM_ROUTING_REMOVAL.md`).
+The runtime is model-agnostic — the agent / provider / user chooses the model
+(V1_RUNTIME_SPEC.md §2.3). Flow 2 (BuildContext) ends at `ContextPack`.
 
 ---
 
@@ -453,7 +347,6 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant CE as Context Engine
-    participant MR as Model Router
     participant RI as Repository Intelligence
     participant EO as Execution Optimizer
     participant EB as Event Bus
@@ -461,7 +354,6 @@ sequenceDiagram
     participant MET as Metrics
 
     CE->>EB: emit(ContextBuilt {correlation_id, tokens, ...})
-    MR->>EB: emit(ModelSelected {correlation_id, model, tier, ...})
     RI->>EB: emit(RepositoryUpdated {files_indexed, ...})
     EO->>EB: emit(ToolExecuted {tool_name, ratio, ...})
 
@@ -517,7 +409,6 @@ sequenceDiagram
 | BuildContext timeout | OriginalPassthrough | None — original message used |
 | BuildContext error | OriginalPassthrough | None — original message used |
 | Repository not indexed | OriginalPassthrough | None — original message used |
-| LiteLLM unreachable | OriginalPassthrough | None — original message used |
 | Any internal error | OriginalPassthrough | None — original message used |
 
 The agent always gets a response. The runtime never blocks or breaks the agent.

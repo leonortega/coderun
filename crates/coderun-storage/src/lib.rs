@@ -25,6 +25,9 @@ use tracing::{debug, info, warn};
 /// needs database access opens its own connection.
 pub struct Database {
     conn: Connection,
+    /// Original file path of the backing store (None for in-memory `:memory:` databases).
+    /// Lets other components re-open the same SQLite file from a different connection.
+    db_path: Option<std::path::PathBuf>,
 }
 
 impl Database {
@@ -36,9 +39,18 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
 
-        let db = Self { conn };
+        // `:memory:` is not a real file — record nothing so callers can tell the
+        // store is ephemeral (retrieval-only instances, tests).
+        let db_path = (path != std::path::Path::new(":memory:")).then(|| path.to_path_buf());
+        let db = Self { conn, db_path };
         db.run_migrations()?;
         Ok(db)
+    }
+
+    /// Path of the backing SQLite file, if this connection is file-backed.
+    /// Returns `None` for in-memory (`:memory:`) stores.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.db_path.as_deref()
     }
 
     /// Run all pending migrations
@@ -68,6 +80,10 @@ impl Database {
         // Migration 006: repository-scoped knowledge (TASK-030) + dedup cleanup (TASK-032)
         let migration_006 = include_str!("migrations/006_knowledge_repo.sql");
         self.apply_migration("006_knowledge_repo", migration_006)?;
+
+        // Migration 007: drop vestigial token_usage model/tier columns (Model Router removed)
+        let migration_007 = include_str!("migrations/007_drop_vestigial.sql");
+        self.apply_migration("007_drop_vestigial", migration_007)?;
 
         // v1: 004_events and 005_audits removed per TASK-002/TASK-001 — preserved in future/workflow/migrations/
         // Event persistence (ring buffer + SQLite) and workflow audits are NOT part of v1 hot path.
@@ -394,14 +410,12 @@ impl Database {
         request_type: &str,
         input_tokens: i64,
         output_tokens: i64,
-        model: &str,
-        tier: &str,
     ) -> Result<(), String> {
         let start = Instant::now();
         self.conn
             .execute(
-                "INSERT INTO token_usage (correlation_id, request_type, input_tokens, output_tokens, model, tier) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![correlation_id, request_type, input_tokens, output_tokens, model, tier],
+                "INSERT INTO token_usage (correlation_id, request_type, input_tokens, output_tokens) VALUES (?1, ?2, ?3, ?4)",
+                params![correlation_id, request_type, input_tokens, output_tokens],
             )
             .map_err(|e| format!("Failed to insert usage: {}", e))?;
         log_slow("insert_usage", start);
@@ -1043,9 +1057,9 @@ mod tests {
     #[test]
     fn test_token_usage() {
         let db = test_db();
-        db.insert_usage("req_123", "pre_generation", 1000, 500, "gpt-4o", "balanced")
+        db.insert_usage("req_123", "pre_generation", 1000, 500)
             .unwrap();
-        db.insert_usage("req_456", "pre_tool", 2000, 300, "gpt-4o", "balanced")
+        db.insert_usage("req_456", "pre_tool", 2000, 300)
             .unwrap();
 
         let stats = db.get_usage_stats().unwrap();

@@ -6,6 +6,11 @@
 
 CODERUN_URL="${CODERUN_DAEMON_URL:-http://127.0.0.1:9527}"
 
+# Shared readiness wait (poll /health; bounded + fail-open)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=coderun-ready.sh
+source "${SCRIPT_DIR}/coderun-ready.sh"
+
 # Read input from stdin (JSON)
 INPUT=$(cat)
 
@@ -17,6 +22,11 @@ if [ -z "$MESSAGE" ]; then
   echo "$INPUT"
   exit 0
 fi
+
+# Wait for daemon readiness (cold start / auto-reindex) so this first request gets
+# context instead of a 503 passthrough. Fail-open: on unreachable or budget expiry
+# we proceed to the POST anyway, which itself fails open on error.
+coderun_wait_ready || true
 
 # Call Coderun daemon
 RESPONSE=$(curl -s -X POST "${CODERUN_URL}/hook" \

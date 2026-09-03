@@ -1,6 +1,5 @@
 [context]
 cache_order = [
-    "behavioral_skills",
     "docs_context",
     "code_context",
 ]
@@ -31,6 +30,8 @@ languages = [
     "yaml",
 ]
 path = "~/.coderun/index/"
+# Watch mode for auto-reindexing: "commit" (default, triggers on git commit) or "filesystem" (triggers on any file change)
+watch_mode = "commit"
 
 [knowledge]
 max_knowledge_entries = 10000
@@ -41,17 +42,7 @@ level = "info"
 max_size_mb = 100
 retention_days = 7
 
-[model]
-default_tier = "balanced"
-max_tokens_response = 4096
-routing_enabled = false
-
 [rtk]
 compression_level = "balanced"
 enabled = true
 max_output_tokens = 8000
-
-[skills]
-auto_discover = true
-max_skills_per_request = 5
-path = ".coderun/skills/"

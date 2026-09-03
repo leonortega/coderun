@@ -1,5 +1,11 @@
 # Components
 
+> **V1 framing:** see [V1_RUNTIME_SPEC.md](V1_RUNTIME_SPEC.md) — product definition,
+> ownership boundaries, and the out-of-scope list. Removed capabilities (Model Router /
+> LiteLLM v0.8.6, workflow and the Skill Engine — see `REMOVED_TOOLS.md`) are deleted
+> from this file. Where this file conflicts with the V1 spec or the code, the V1
+> spec / code win.
+
 ## Purpose
 
 Define every v1 module in detail. Each module section specifies purpose, responsibilities, inputs, outputs, dependencies, persistent data, runtime behavior, errors, boundaries, and implementation requirements.
@@ -36,14 +42,16 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 |-------|------|-------------|
 | PreGeneration | MessageRewrite | Session ID, message, optional context hints |
 | PreToolCall | ToolOutput | Tool name, output type, content, optional context |
+| Probe | Readiness | (no fields) — answered before rate-limiting, no engine lock |
 
 ### Outputs
 
 | Output | Type | Description |
 |--------|------|-------------|
-| RewrittenMessage | ContextPack + RoutingDecision | Rewritten message with injected context |
+| RewrittenMessage | ContextPack | Rewritten message with injected context |
 | CompressedOutput | Compressed tool output | Token-reduced tool output |
 | OriginalPassthrough | Original message + reason | Fail-open: unmodified message |
+| Probe | state, index_files, version | Readiness answer (while indexing: HTTP `503 daemon_indexing`) |
 
 ### Dependencies
 
@@ -124,9 +132,9 @@ The central module and one public entry point: `BuildContext(task)`. Retrieves r
 
 ### Responsibilities
 
-- Coordinate Repository Intelligence, Knowledge Hub, and Model Router
+- Coordinate Repository Intelligence and Knowledge Hub
 - Assemble context from multiple sources
-- Order context for cache stability: skills → docs → code
+- Order context for cache stability: docs → code
 - Apply frozen-prefix boundary
 - Enforce token budgets
 - Manage session fingerprint to avoid duplicate content
@@ -144,14 +152,12 @@ The central module and one public entry point: `BuildContext(task)`. Retrieves r
 
 | Output | Type | Description |
 |--------|------|-------------|
-| ContextPack | YAML | Three sections: behavioral_skills, docs_context, code_context |
-| RoutingDecision | Model selection | Model name, tier, reasoning |
+| ContextPack | YAML | Two sections: docs_context, code_context |
 
 ### Dependencies
 
 - Repository Intelligence (code search and file content)
-- Knowledge Hub (knowledge retrieval and skill matching)
-- Model Router (model selection)
+- Knowledge Hub (knowledge retrieval)
 - tiktoken-rs (local token counting)
 - tokio (async runtime)
 
@@ -171,15 +177,13 @@ flowchart TD
     A[Receive TaskRequest] --> B[Parse task description]
     B --> C[Search Repository Intelligence]
     C --> D[Retrieve Knowledge]
-    D --> E[Match Skills]
-    E --> F[Score all candidates]
-    F --> G[Order for cache stability]
-    G --> H[Apply frozen-prefix boundary]
-    H --> I[Deduplicate against session fingerprint]
-    I --> J[Apply token budget]
-    J --> K[Emit Context Pack as YAML]
-    K --> L[Select model via Model Router]
-    L --> M[Return ContextPack + RoutingDecision]
+    D --> E[Score all candidates]
+    E --> F[Order for cache stability]
+    F --> G[Apply frozen-prefix boundary]
+    G --> H[Deduplicate against session fingerprint]
+    H --> I[Apply token budget]
+    I --> J[Emit Context Pack as YAML]
+    J --> K[Return ContextPack]
 ```
 
 #### Cache-Aware Ordering
@@ -187,24 +191,17 @@ flowchart TD
 The Context Pack is ordered in this fixed sequence for maximum prompt cache stability:
 
 ```yaml
-# Section 1: Most cache-stable (byte-identical across many tasks)
-behavioral_skills:
-  - name: "Add Rate Limiting"
-    instructions: "..."
-  - name: "Error Handling Pattern"
-    instructions: "..."
-
 # Frozen-prefix boundary: everything above is cache-stable
 # Everything below changes between tasks
 
-# Section 2: Moderately cache-stable (changes rarely)
+# Section 1: Moderately cache-stable (changes rarely)
 docs_context:
   - path: "docs/architecture.md"
     content: "..."
   - path: "docs/conventions.md"
     content: "..."
 
-# Section 3: Least cache-stable (changes frequently)
+# Section 2: Least cache-stable (changes frequently)
 code_context:
   - path: "src/router.ts"
     content: "..."
@@ -218,10 +215,9 @@ code_context:
 
 | Source | Budget Allocation | Priority | Cache Stability |
 |--------|-------------------|----------|-----------------|
-| behavioral_skills | 20% of budget | 1 (highest) | Highest |
-| docs_context | 15% of budget | 2 | Medium |
-| code_context | 55% of budget | 3 | Lowest |
-| metadata (implicit) | 10% of budget | 4 | N/A |
+| docs_context | 45% of budget | 1 (highest) | Highest |
+| code_context | 55% of budget | 2 | Lowest |
+| metadata (implicit) | remaining | 3 | N/A |
 
 #### Deduplication
 
@@ -242,17 +238,13 @@ code_context:
 |-------|----------|
 | Repository search failure | Continue with empty code_context |
 | Knowledge retrieval failure | Continue with empty docs_context |
-| Skill matching failure | Continue with empty behavioral_skills |
 | Token estimation failure | Use character-based estimation |
-| Model routing failure | Use default model tier |
 | Any unrecoverable error | Return OriginalPassthrough (fail-open) |
 
 ### Boundaries
 
 - Does not search the repository directly (delegates to Repository Intelligence)
 - Does not retrieve knowledge directly (delegates to Knowledge Hub)
-- Does not match skills directly (delegates to Skill Engine via Knowledge Hub)
-- Does not select models directly (delegates to Model Router)
 - Orchestrates and assembles the final output
 - Must complete within 30 seconds (fail-open on timeout)
 
@@ -416,19 +408,17 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 
 ### Purpose
 
-One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes two retrieval strategies: tag-based skill matching and lexical search for docs/code (engram and reranking removed — see `ENGRAM_CBM_REMOVAL.md`, `FLASHRANK_REMOVAL.md`).
+One organizational surface for project docs, ADRs, templates, and long-term memory. Lexical (BM25) search over stored knowledge and docs (engram and reranking removed — see `ENGRAM_CBM_REMOVAL.md`, `FLASHRANK_REMOVAL.md`).
 
 ### v0.2.0 Implementation
 
 - **SQLite** for knowledge storage with LIKE-based search
 - **tantivy BM25** for lexical retrieval
-- **Reranker** passthrough (FlashRank removed from v1 per benchmark — see `FLASHRANK_REMOVAL.md`)
 - **Pattern detection** for knowledge extraction (naming, architectural, domain)
 
 ### Responsibilities
 
 - Store and retrieve knowledge entries across all categories
-- Manage skill registry and tag-based matching
 - Perform lexical search for docs and code
 - Store and retrieve memory via SQLite+tantivy local
 - Detect and extract knowledge from indexed code
@@ -440,7 +430,6 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 |-------|------|-------------|
 | store_knowledge | KnowledgeEntry | Knowledge to store |
 | retrieve_knowledge | KnowledgeQuery | Query to find relevant knowledge |
-| match_skills | SkillMatchQuery | Task description for skill matching |
 | extract_knowledge | ExtractRequest | Extract knowledge from code analysis |
 | memory_save | MemoryEntry | Save to memory (SQLite local) |
 | memory_search | MemoryQuery | Search memory (SQLite local) |
@@ -450,8 +439,6 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 | Output | Type | Description |
 |--------|------|-------------|
 | Vec<KnowledgeEntry> | Knowledge entries | Retrieved knowledge ranked by relevance |
-| Vec<SkillMatch> | Matched skills | Skills with scores and full instructions |
-| MemorySearchResult | Memory entries | Relevant memory from engram |
 
 ### Dependencies
 
@@ -475,30 +462,6 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 3. Retrieve top 20 candidates
 4. Filter by minimum confidence threshold (0.3)
 6. Return top 10 results
-
-#### Skill Matching
-
-1. Receive task description
-2. For each skill in registry:
-   a. Extract trigger tags
-   b. Compute tag overlap score with task description
-   c. Apply category bonus if task matches skill tags
-   d. Compute final match score
-3. Sort by score descending
-4. Return top N matches with score > 0.3
-5. Inject full skill instructions (not just descriptions)
-
-#### Memory Operations
-
-1. **Read (deterministic, in hot path):**
-   a. Receive query from Context Engine
-   b. Call engram HTTP API with query
-   c. Return relevant memory entries
-2. **Write (async, agent-invoked):**
-   a. Receive memory entry from agent
-   b. Call engram HTTP API to save
-   c. Optionally scan for semantic conflicts
-   d. Emit MemorySaved event
 
 #### Knowledge Extraction
 
@@ -524,8 +487,6 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 - Does not make AI-based knowledge judgments (uses pattern detection only)
 - Does not expose knowledge to the coding agent directly
 - Only provides knowledge through the Context Engine
-- Skills are matched by tag-based scoring, not by the same ranking pipeline as docs/code
-
 ### Implementation Requirements
 
 - Use SQLite for knowledge storage
@@ -533,262 +494,28 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 - Use SQLite for memory operations (engram removed)
 - Knowledge categories: `convention`, `pattern`, `domain`, `decision`
 - Each knowledge entry has: id, category, key, value, confidence, source, created_at, updated_at
-- Skill registry loaded from community-format files at daemon startup
 - Implement confidence decay as a background task
 
 ---
 
-## 5. Skill Engine
+## 5. Skill Engine — [REMOVED]
 
-### Purpose
+> The Skill Engine (`coderun-skills` crate, skill load/match, `behavioral_skills`)
+> was removed — agents own skill discovery natively (see `REMOVED_TOOLS.md`).
 
-Deterministic tag-based skill matching against a small registry. Task classification, skill activation, conflict detection, priority, and instruction injection. No LLM call, no agent browsing of skill descriptions at request time.
-
-### Responsibilities
-
-- Load skill definitions from community-format files (Claude, Cursor, Continue, agentskills.io)
-- Validate skill schema
-- Classify tasks using signals shared with Model Router
-- Match skills to tasks using tag-based scoring
-- Detect conflicts between matched skills
-- Resolve priority when multiple skills match
-- Return full skill instructions for injection
-
-### Inputs
-
-| Input | Type | Description |
-|-------|------|-------------|
-| match_skills | SkillMatchQuery | Task description and context for matching |
-| get_skill | String | Skill name for direct retrieval |
-| reload_skills | None | Reload all skill definitions from disk |
-| list_skills | None | List all loaded skills |
-
-### Outputs
-
-| Output | Type | Description |
-|--------|------|-------------|
-| Vec<SkillMatch> | Matched skills | Skills with match scores and full instructions |
-| Skill | Full skill definition | Complete skill with all fields |
-| Vec<String> | Skill names | List of available skill names |
-
-### Dependencies
-
-- Filesystem (skill definition files)
-- No external services
-
-### Persistent Data
-
-| Data | Storage | Purpose |
-|------|---------|---------|
-| Skill definitions | Community-format files | Developer-managed skill content |
-| Skill registry | In-memory | Loaded at daemon startup |
-
-### Runtime Behavior
-
-#### Skill Loading
-
-1. Scan skill directory for community-format files (.md, .toml, .yaml)
-2. Parse each file according to its format
-3. Validate required fields: `name`, `tags`/`trigger`, `instructions`
-4. Validate optional fields: `description`, `examples`, `constraints`
-5. Load valid skills into in-memory registry
-6. Log count of loaded skills
-7. Warn on invalid files, skip them
-
-#### Task Classification
-
-The Skill Engine reuses the same signals as the Model Router for task classification:
-- Structural complexity (files involved, symbols referenced)
-- Semantic complexity (task description, technical terms, action verbs)
-- Scope (context size, knowledge entries)
-
-#### Skill Matching
-
-1. Receive task description
-2. Classify task using shared signals
-3. For each skill in registry:
-   a. Extract tag keywords
-   b. Compute tag overlap score with task description
-   c. Apply category bonus if task matches skill tags
-   d. Compute final match score
-4. Sort by score descending
-5. Filter: score > 0.3
-6. Detect conflicts (contradictory instructions)
-7. Resolve priority (higher score wins)
-8. Take top N (configured, default 5)
-9. Return full instructions (not just descriptions)
-
-#### Conflict Detection
-
-1. Compare instructions of matched skills
-2. Flag pairs with contradictory constraints
-3. If conflicts found: keep higher-priority skill, log warning
-4. Do not inject conflicting instructions
-
-### Skill Format (Community)
-
-```markdown
-# Add Rate Limiting
-
-## Tags
-rate limit, throttle, request limit, API limit, middleware, security
-
-## Instructions
-1. Check existing middleware patterns in the project
-2. Create a rate limiter module following project conventions
-3. Apply to target routes
-4. Add configuration for rate limits
-5. Add tests for rate limiting behavior
-
-## Examples
-- Add global rate limiting: src/middleware/rate_limit.rs, src/config.rs
-
-## Constraints
-- Do not modify authentication logic
-- Use the project's existing error handling pattern
-- Make rate limits configurable via environment variables
-```
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| Invalid file format | Skip file, log warning |
-| Missing required fields | Skip file, log warning |
-| Skill directory not found | Log warning, operate with zero skills |
-| File read error | Skip file, log warning |
-
-### Boundaries
-
-- Does not execute skills
-- Does not modify code based on skills
-- Does not enforce skill constraints
-- Only provides skill instructions to the Context Engine
-- Skills are advisory, not mandatory
-- Registry is small (dozens, not thousands)
-
-### Implementation Requirements
-
-- Parse community-format files (Markdown, TOML, YAML)
-- Validate skill schema on load
-- Store skills in `Vec<Skill>` after loading
-- Skill matching uses deterministic tag scoring (no AI)
-- Tags are case-insensitive
-- Match score = (matched tags / total tags) * category_bonus
-- Category bonus: 1.2 if task matches skill tags, 1.0 otherwise
-- Full skill instructions injected directly (small, already determined relevant)
 
 ---
 
-## 6. Model Router
+## 5. Model Router — [REMOVED v0.8.6]
 
-### Purpose
-
-Select the appropriate LLM model for a given task based on heuristic complexity scoring. No LLM call decides the tier.
-
-### v0.2.0 Implementation
-
-- **Heuristic scoring** with structural, semantic, and scope factors
-- **Tier selection** (fast, balanced, capable) based on score thresholds
-- **LiteLLM client** for multi-provider model routing
-- **Model override** support from request parameters
-
-### Responsibilities
-
-- Score task complexity using heuristic
-- Select model tier (fast, balanced, capable)
-- Map tier to specific model name
-- Return routing decision with reasoning
-- Configure LiteLLM for the selected model
-
-### Inputs
-
-| Input | Type | Description |
-|-------|------|-------------|
-| select_model | RoutingRequest | Task description, complexity hints, context size, budget |
-
-### Outputs
-
-| Output | Type | Description |
-|--------|------|-------------|
-| RoutingDecision | Model selection | Model name, tier, reasoning, scores |
-
-### Dependencies
-
-- Configuration (model tier mappings)
-- LiteLLM (model gateway, via reqwest HTTP client)
-
-### Persistent Data
-
-None. Model routing is stateless.
-
-### Runtime Behavior
-
-#### Complexity Scoring
-
-1. Receive task description and context size
-2. Compute structural complexity:
-   - Number of files involved (from context)
-   - Number of symbols referenced
-   - Depth of code structure
-3. Compute semantic complexity:
-   - Task description length and specificity
-   - Presence of technical terms (middleware, refactor, migrate, etc.)
-   - Presence of action verbs (implement, fix, add, remove, etc.)
-4. Compute scope:
-   - Context size in tokens
-   - Number of knowledge entries
-   - Number of skills matched
-5. Apply weights from configuration
-6. Compute final score: `structural * 0.3 + semantic * 0.4 + scope * 0.3`
-7. Map score to tier:
-   - Score < 0.3: fast
-   - Score 0.3–0.7: balanced
-   - Score > 0.7: capable
-
-#### Tier-to-Model Mapping
-
-| Tier | Default Model | Configurable Via |
-|------|---------------|------------------|
-| fast | gpt-4o-mini | routing.fast_model |
-| balanced | gpt-4o | routing.balanced_model |
-| capable | o1 | routing.capable_model |
-
-#### Fallback Policy
-
-1. Try primary model from tier
-2. On failure: try next tier down (capable → balanced → fast)
-3. On all tiers exhausted: return error
-4. Log each fallback attempt
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| Scoring failure | Return default tier (balanced) |
-| Configuration missing | Use default tier-to-model mapping |
-| All models unavailable | Return error |
-
-### Boundaries
-
-- Does not call models directly (delegates to LiteLLM)
-- Does not manage model quotas
-- Does not handle model errors beyond fallback
-- Only selects which model to use
-
-### Implementation Requirements
-
-- Use deterministic scoring formula
-- Log scoring breakdown at DEBUG level
-- Log final routing decision at INFO level
-- Make tier-to-model mapping configurable
-- Support overriding routing via request parameter
-- Implement fallback chain via LiteLLM configuration
-- Emit ModelSelected event on completion
+> Model routing / LiteLLM were deleted from the v1 runtime in v0.8.6 (see
+> `LLM_ROUTING_REMOVAL.md`). The runtime is model-agnostic — the agent / provider /
+> user chooses the model (V1_RUNTIME_SPEC.md §2.3). This section is retained as a
+> numbered stub so later section numbers stay stable.
 
 ---
 
-## 7. Execution Optimizer
+## 6. Execution Optimizer
 
 ### Purpose
 
@@ -912,7 +639,7 @@ On compression failure:
 
 ---
 
-## 8. Event Bus
+## 7. Event Bus
 
 ### Purpose
 
@@ -930,10 +657,8 @@ Async-only observability system for metrics, debugging, inspection, and future o
 | Event | Emitter | Payload |
 |-------|---------|---------|
 | ContextBuilt | Context Engine | correlation_id, token_counts, file_count, latency_ms |
-| SkillActivated | Skill Engine | correlation_id, skill_name, match_score |
 | RepositoryUpdated | Repository Intelligence | files_indexed, symbols_extracted, duration_ms |
 | ToolExecuted | Execution Optimizer | tool_name, original_tokens, compressed_tokens, ratio |
-| ModelSelected | Model Router | correlation_id, model, tier, score, reasoning |
 | ResponseGenerated | Adapter Layer | correlation_id, hook_type, latency_ms, error |
 | MemorySaved | Knowledge Hub | entry_id, namespace, key |
 
@@ -957,7 +682,7 @@ None. Events are ephemeral, consumed by subscribers.
 
 | Subscriber | Purpose |
 |------------|---------|
-| CLI Inspection | Preview/replay what a prompt would build/did build |
+| CLI Inspection | Preview what a prompt would build |
 | Metrics | Aggregate token usage, latency, error rates |
 | Future Orchestrator | Trigger workflows based on events (separate product) |
 
@@ -984,7 +709,7 @@ None. Events are ephemeral, consumed by subscribers.
 
 ---
 
-## 9. Local Storage
+## 8. Local Storage
 
 ### Purpose
 
@@ -1067,9 +792,7 @@ Provide command-line interface for daemon management, repository inspection, and
 - Initialize a repository for runtime use
 - Trigger repository re-indexing
 - Preview what a prompt would build
-- Replay what a prompt did build
 - Show daemon status and health
-- Manage skill definitions
 - Show configuration
 
 ### Commands
@@ -1080,10 +803,7 @@ Provide command-line interface for daemon management, repository inspection, and
 | `coderun init` | Initialize runtime for current repository |
 | `coderun index` | Trigger repository re-indexing |
 | `coderun preview <prompt>` | Preview what BuildContext would produce for a prompt |
-| `coderun replay <correlation_id>` | Replay what BuildContext did produce for a past request |
 | `coderun status` | Show daemon status and metrics |
-| `coderun skills list` | List available skills |
-| `coderun skills validate` | Validate skill definitions |
 | `coderun config show` | Show effective configuration |
 | `coderun config validate` | Validate configuration file |
 | `coderun doctor` | Health check: verify all dependencies are available |
@@ -1091,7 +811,7 @@ Provide command-line interface for daemon management, repository inspection, and
 ### Dependencies
 
 - clap (argument parsing)
-- All daemon modules (for init, index, preview, replay, status)
+- All daemon modules (for init, index, preview, status)
 
 ### Runtime Behavior
 
@@ -1101,44 +821,29 @@ Provide command-line interface for daemon management, repository inspection, and
 2. Initialize logging
 3. Open database and index
 4. Initialize knowledge store
-5. Load skills
-6. Index repository (background)
-7. Start Unix socket server
-8. Print startup banner with socket path
-9. Wait for shutdown signal
+5. Index repository (background)
+6. Start Unix socket server
+7. Print startup banner with socket path
+8. Wait for shutdown signal
 
 #### `coderun init`
 
 1. Create `.coderun/` directory in current repo
 2. Create default `.coderun/config.toml`
-3. Create `.coderun/skills/` directory
-4. Initialize SQLite database
-5. Create BM25/tantivy index
-6. Run initial indexing
-7. Print success message with statistics
+3. Initialize SQLite database
+4. Create BM25/tantivy index
+5. Run initial indexing
+6. Print success message with statistics
 
 #### `coderun preview <prompt>`
 
 1. Connect to daemon via UDS
 2. Send PreGeneration request with prompt
-3. Receive ContextPack + RoutingDecision
+3. Receive ContextPack
 4. Print formatted preview:
-   - Skills matched
    - Knowledge entries
    - Code files included
    - Token counts
-   - Model routing decision
-
-#### `coderun replay <correlation_id>`
-
-1. Connect to daemon via UDS
-2. Request event history for correlation_id
-3. Print formatted replay:
-   - What was retrieved
-   - What was matched
-   - What was included in the context pack
-   - What model was selected
-   - Token usage
 
 ### Errors
 

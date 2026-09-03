@@ -1,5 +1,11 @@
 # Runtime
 
+> **V1 framing:** see [V1_RUNTIME_SPEC.md](V1_RUNTIME_SPEC.md) — product definition,
+> ownership boundaries, and the out-of-scope list. Removed capabilities (Model Router /
+> LiteLLM, v0.8.6; workflow and the Skill Engine — see `REMOVED_TOOLS.md`) are
+> deleted from this file. Where this file conflicts with the V1 spec or the code,
+> the V1 spec / code win.
+
 ## Purpose
 
 Define how the AI Runtime operates as a local daemon application. This document specifies the process lifecycle, configuration loading, repository initialization, IPC protocol, request handling, shutdown, persistence, logging, error handling, and fail-open behavior.
@@ -16,17 +22,25 @@ The runtime runs as a single Rust daemon process. The daemon hosts a Unix domain
 Start (coderun serve)
   │
   ├── Load configuration
-  ├── Initialize logging
+  ├── Initialize logging + metrics
   ├── Open/create SQLite database (metadata only — see V1_MINIMAL_STACK_PLAN.md:3)
   ├── Open/create Tantivy index (sole retrieval; no MkDocs ingestion)
-  ├── Load skill definitions
-  ├── Start Repository Intelligence (background index)
-  ├── Start Unix socket server
-  ├── Emit RepositoryUpdated event
+  ├── Build ContextEngine (single index path: reindex_repository)
+  │
+  ├── Readiness = "indexing" (reported by /health + /metrics)
+  ├── Bind HTTP health/metrics listener FIRST — reachable during indexing;
+  │     POST /hook returns 503 (reason: "daemon_indexing") until ready
+  ├── Run initial repository index to completion (readiness gate)
+  │     — on failure/panic: log loudly, still flip to ready (degraded: ripgrep fallback)
+  ├── Readiness = "ready"
+  ├── Start auto-reindex watcher (commit | filesystem)
+  │     — each watcher reindex flips readiness: ready → indexing → ready
+  ├── Bind UDS/MessagePack adapter (primary transport — only after the index)
   │
   │   ┌─── Running ───────────────────────────────────────┐
   │   │                                                    │
   │   │   Accept agent connections (UDS)                   │
+  │   │   UDS Probe payload → state / index_files / version│
   │   │   Handle pre-generation hooks (BuildContext)       │
   │   │   Handle pre-tool hooks (compress output)          │
   │   │   Emit observability events                        │
@@ -38,6 +52,7 @@ Start (coderun serve)
   │
   ├── Stop accepting new connections
   ├── Drain in-flight requests (max 30s)
+  ├── Stop auto-reindex watcher (poll loops exit within one interval)
   ├── Flush Tantivy index
   ├── Close SQLite connection
   ├── Flush logs
@@ -96,25 +111,18 @@ Start (coderun serve)
 4. Verify index is readable
 ```
 
-### Step 5: Skill Loading
+### Step 5: Initial Repository Indexing (readiness-gated)
 
-```
-1. Read skill directory path from configuration
-2. Scan for community-format skill files (.md, .toml, .yaml)
-3. Parse each skill definition
-4. Validate skill schema (name, trigger/tags, instructions required)
-5. Load valid skills into Skill Engine registry
-6. Log count of loaded skills
-7. Warn on invalid skill files, skip them
-```
-
-### Step 6: Repository Indexing (Background)
+> Runs to completion (success or failure) BEFORE the UDS/MessagePack adapter binds,
+> so no request on the primary transport can wait on the engine lock mid-index or
+> race a half-built index. During this phase the HTTP health/metrics listener is
+> already up and reports `state: "indexing"`.
 
 ```
 1. Check if repository is already indexed (SQLite metadata)
 2. If indexed: compare file hashes, identify changes
 3. If not indexed: schedule full index
-4. Index runs in background tokio task:
+4. Index runs on tokio's blocking pool via the ContextEngine (single index path):
    a. Walk repository directory tree
    b. Skip .git, node_modules, target, __pycache__, .venv
    c. Parse each source file with tree-sitter (incremental)
@@ -122,16 +130,23 @@ Start (coderun serve)
    e. Add to BM25/tantivy index
    f. Store metadata in SQLite
    g. Detect project type and conventions
-5. Emit RepositoryUpdated event when complete
+5. On completion (success or failure) flip readiness to "ready"
 6. Log indexing statistics
 ```
 
-### Step 7: Unix Socket Server Start
+### Step 6: Auto-Reindex Watcher
+
+> Starts after the initial index. Mode from `[index].watch_mode`: `commit` (default,
+> polls the resolved git HEAD) or `filesystem` (real-time via notify). Each reindex
+> flips readiness to `"indexing"` for its duration so clients back off instead of
+> queueing on the engine lock.
+
+### Step 7: UDS/MessagePack Adapter Bind
 
 ```
 1. Create Unix socket at configured path (default: /tmp/coderun.sock)
 2. Set socket permissions (owner read/write only)
-3. Start accepting connections
+3. Bind — only after the initial index completed (readiness gate)
 4. Log server startup with socket path
 5. Ready to serve requests
 ```
@@ -167,41 +182,15 @@ languages = ["rust", "typescript", "javascript", "python"]  # 111 languages supp
 [knowledge]
 max_knowledge_entries = 10000         # Max knowledge entries (engram removed — see ENGRAM_CBM_REMOVAL.md)         # Max knowledge entries
 
-[skills]
-path = ".coderun/skills/"            # Skill definitions directory
-auto_discover = true                  # Auto-discover skill files
-max_skills_per_request = 5           # Max skills injected per request
-
 [context]
 max_tokens = 12000                    # Max tokens per Context Pack
 max_files = 20                        # Max files in Context Pack
 max_lines_per_file = 500             # Max lines per file in Context Pack
-cache_order = ["behavioral_skills", "docs_context", "code_context"]  # Fixed order
+cache_order = ["docs_context", "code_context"]  # Fixed order
 
-[model]
-default_tier = "balanced"            # Default model tier
-routing_enabled = true                # Enable model routing
-max_tokens_response = 4096            # Max tokens in model response
-
-[routing]
-# Task complexity scoring weights
-structural_weight = 0.3
-semantic_weight = 0.4
-scope_weight = 0.3
-
-# Model tier thresholds
-fast_threshold = 0.3                  # Score below this = fast tier
-capable_threshold = 0.7              # Score above this = capable tier
-
-# Model tier mappings
-fast_model = "gpt-4o-mini"
-balanced_model = "gpt-4o"
-capable_model = "o1"
-
-[litellm]
-endpoint = "http://localhost:4000"    # LiteLLM endpoint
-timeout_ms = 30000                    # Request timeout
-max_retries = 3                       # Max retries on failure
+# [model] / [routing] / [litellm] removed in v0.8.6 — the runtime is
+# model-agnostic; the agent/provider/user selects the model (V1_RUNTIME_SPEC.md §2.3)
+# [skills] removed — the runtime no longer loads or matches skills (REMOVED_TOOLS.md)
 
 [rtk]
 enabled = true                        # Enable RTK compression
@@ -228,10 +217,10 @@ retention_days = 7                    # Log retention
 | `CODERUN_DAEMON_SOCKET` | daemon.socket_path | /tmp/coderun.sock |
 | `CODERUN_DATABASE_PATH` | database.path | ~/.coderun/data.db |
 | `CODERUN_LOG_LEVEL` | logging.level | info |
-| `CODERUN_MODEL_DEFAULT` | model.default_tier | balanced |
 | `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
 | `CODERUN_ENGRAM_ENDPOINT` | *removed* — engram retired (see ENGRAM_CBM_REMOVAL.md) | — |
+| `CODERUN_MODEL_DEFAULT` | *removed v0.8.6* — model router deleted | — |
+| `CODERUN_LITELLM_URL` | *removed v0.8.6* — LiteLLM deleted | — |
 
 ## IPC Protocol
 
@@ -245,15 +234,17 @@ The daemon communicates with coding agents over a Unix domain socket using Messa
 // Request from agent to daemon
 struct AgentRequest {
     correlation_id: String,           // req_{uuid}
-    hook_type: HookType,              // PreGeneration | PreToolCall
-    payload: RequestPayload,          // MessageRewrite | ToolOutput
+    hook_type: HookType,              // PreGeneration | PreToolCall | Probe
+    payload: RequestPayload,          // MessageRewrite | ToolOutput | Probe
+    repository_id: String,            // TASK-021: hash of repo path
+    timestamp: String,                // ISO8601 request creation time
 }
 
 // Response from daemon to agent
 struct AgentResponse {
     correlation_id: String,
     hook_type: HookType,
-    payload: ResponsePayload,         // RewrittenMessage | CompressedOutput | OriginalPassthrough
+    payload: ResponsePayload,         // RewrittenMessage | CompressedOutput | OriginalPassthrough | Probe
     latency_ms: u64,
     error: Option<String>,            // Non-fatal error message
 }
@@ -261,6 +252,7 @@ struct AgentResponse {
 enum HookType {
     PreGeneration,
     PreToolCall,
+    Probe,                            // readiness probe (V1_RUNTIME_SPEC.md §5)
 }
 
 enum RequestPayload {
@@ -268,13 +260,16 @@ enum RequestPayload {
         session_id: String,
         message: String,
         context_hints: Option<ContextHints>,
+        repository_path: Option<String>, // agent workspace root (TASK-036)
     },
     ToolOutput {
         tool_name: String,
         output_type: OutputType,      // FileRead | SearchResult | ShellOutput | Other
         content: String,
         context: Option<String>,      // What the agent was looking for
+        repository_path: Option<String>, // agent workspace root (TASK-036)
     },
+    Probe,                            // readiness probe
 }
 
 enum ResponsePayload {
@@ -282,7 +277,6 @@ enum ResponsePayload {
         original: String,
         rewritten: String,
         context_pack: Option<ContextPack>,
-        routing_decision: Option<RoutingDecision>,
     },
     CompressedOutput {
         original: String,
@@ -294,8 +288,55 @@ enum ResponsePayload {
         original: String,
         reason: String,               // "timeout" | "error" | "fail-open"
     },
+    Probe {
+        state: String,                // "indexing" | "ready"
+        index_files: usize,
+        version: String,
+    },
 }
 ```
+
+### Readiness & Probe
+
+The daemon exposes a readiness state so clients can wait before sending requests
+instead of queueing on the engine lock mid-index. State machine:
+
+```
+indexing ──(initial index completes)──► ready ──(auto-reindex starts)──► indexing ──► ready
+```
+
+| Surface | When not ready | When ready |
+|---------|----------------|------------|
+| HTTP `GET /health` | `{"state": "indexing", "index_files": N}` | `{"status": "ok", "state": "ready", ...}` |
+| HTTP `GET /metrics` | `coderun_daemon_ready 0` | `coderun_daemon_ready 1` |
+| HTTP `POST /hook` | HTTP `503` `reason: "daemon_indexing"` | processes the request |
+| Daemon MCP `POST /mcp` | `tools/call` -> JSON-RPC error `-32001 daemon_indexing` (HTTP `200`) | `tools/call` processes (`coderun_context` / `coderun_compress`) |
+| UDS `Probe` payload | `Probe { state: "indexing", ... }` | `Probe { state: "ready", ... }` |
+
+Wire example (UDS/MessagePack primary):
+
+```json
+// Request
+{ "correlation_id": "req_abc", "hook_type": "Probe", "payload": { "type": "Probe" } }
+
+// Response
+{ "correlation_id": "req_abc", "hook_type": "Probe", "payload": {
+    "type": "Probe", "state": "ready", "index_files": 142, "version": "0.9.0" },
+  "latency_ms": 0, "error": null }
+```
+
+Client guidance:
+
+1. **Cold start:** the UDS socket is NOT bound until the initial index completes
+   (readiness gate), so poll HTTP `GET /health` until `state == "ready"`.
+2. **Post-startup:** the UDS `Probe` payload answers on the primary transport —
+   never rate-limited, never gated, no engine lock. It reports `indexing` during
+   auto-reindexes; retry with backoff instead of sending real requests.
+3. HTTP `POST /hook` during indexing returns `503 daemon_indexing` — a retry
+   signal, **not** a fail-open passthrough (fail-open still guarantees the agent
+   always gets a `RewrittenMessage`/`CompressedOutput` once ready).
+
+4. **MCP clients** (`POST /mcp`) get the same signal as JSON-RPC: `initialize`/`ping`/`tools/list` answer while indexing, but `tools/call` returns error `-32001 daemon_indexing` (HTTP stays `200`) - a retry signal, never a transport failure.
 
 ### Fail-Open Behavior
 
@@ -307,7 +348,6 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | BuildContext error | OriginalPassthrough | "error" |
 | Context Engine failure | OriginalPassthrough | "fail-open" |
 | Repository not indexed | OriginalPassthrough | "fail-open" |
-| LiteLLM unreachable | OriginalPassthrough | "fail-open" |
 | Any internal error | OriginalPassthrough | "fail-open" |
 
 ## Request Handling
@@ -321,8 +361,6 @@ sequenceDiagram
     participant CE as Context Engine
     participant RI as Repository Intelligence
     participant KH as Knowledge Hub
-    participant SE as Skill Engine
-    participant MR as Model Router
     participant EB as Event Bus
 
     Agent->>AD: PreGeneration(message, session_id)
@@ -335,22 +373,16 @@ sequenceDiagram
     RI-->>CE: SearchResults
 
     CE->>KH: retrieve_knowledge(query)
-    KH->>SE: match_skills(task)
-    SE-->>KH: Vec<SkillMatch>
     KH-->>CE: Vec<KnowledgeEntry>
 
     CE->>CE: Assemble Context Pack
-    CE->>CE: Order: skills → docs → code
+    CE->>CE: Order: docs → code
     CE->>CE: Apply frozen-prefix boundary
     CE->>CE: Enforce token budget
 
-    CE->>MR: select_model(routing_request)
-    MR-->>CE: RoutingDecision
-
     CE->>EB: emit(ContextBuilt)
-    MR->>EB: emit(ModelSelected)
 
-    CE-->>AD: ContextPack + RoutingDecision
+    CE-->>AD: ContextPack
     AD-->>Agent: RewrittenMessage(with context)
 ```
 
@@ -493,7 +525,6 @@ Structured JSON format:
   "details": {
     "files_included": 5,
     "knowledge_entries": 3,
-    "skills_matched": 1,
     "total_tokens": 8500,
     "latency_ms": 12
   }
@@ -506,8 +537,8 @@ Structured JSON format:
 |-------|-------------|
 | ERROR | Component failure, request failure, database corruption |
 | WARN | Recoverable issue, degraded performance, retry needed |
-| INFO | Request lifecycle, indexing progress, model routing decision |
-| DEBUG | Module decisions, search results, skill matching scores |
+| INFO | Request lifecycle, indexing progress |
+| DEBUG | Module decisions, search results, retrieval scores |
 | TRACE | Full data flow, token counting, context assembly details |
 
 ## Error Handling
@@ -519,7 +550,7 @@ Structured JSON format:
 | **Timeout** | Return OriginalPassthrough (fail-open) | BuildContext exceeds 30s |
 | **Request Error** | Return OriginalPassthrough (fail-open) | Invalid request body |
 | **Degraded** | Continue with reduced functionality, return partial context | Knowledge retrieval failed |
-| **Transient** | Retry once, then fail-open | LiteLLM timeout |
+| **Transient** | Retry once, then fail-open | Provider timeout (agent-side) |
 | **Fatal** | Process exits with code 1 | SQLite corrupted, configuration invalid |
 
 ### Error Response Format
@@ -546,11 +577,8 @@ Structured JSON format:
 | INVALID_REQUEST | Request Error | Request body validation failed |
 | INDEX_NOT_READY | Degraded | Repository not yet indexed |
 | CONTEXT_BUILD_FAILED | Degraded | Context assembly partial failure |
-| MODEL_ROUTING_FAILED | Degraded | Could not select model, using default |
-| LLM_UNAVAILABLE | Transient | LiteLLM or model provider unreachable |
 | RTK_COMPRESSION_FAILED | Degraded | Tool output compression failed, return uncompressed |
 | KNOWLEDGE_RETRIEVAL_FAILED | Degraded | Knowledge search failed, continue without knowledge |
-| SKILL_MATCH_FAILED | Degraded | Skill matching failed, continue without skills |
 | DATABASE_ERROR | Fatal | SQLite operations failed |
 | INDEX_ERROR | Fatal | Tantivy operations failed |
 | MEMORY_UNAVAILABLE | Degraded | Memory store unreachable, continue without memory |

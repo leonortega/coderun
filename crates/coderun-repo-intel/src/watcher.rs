@@ -2,23 +2,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tracing::{debug, info};
-#[cfg(feature = "git-watcher")]
-use tracing::warn;
+use tracing::{info, warn};
+#[cfg(feature = "fs-watcher")]
+use tracing::debug;
+
+/// Watch mode for auto-reindexing — defined in `coderun-core` so config, CLI and
+/// daemon share one type (this module re-exports it for compatibility).
+pub use coderun_core::WatchMode;
 
 /// Debounce interval for filesystem events — avoids rapid-fire during git operations.
+#[cfg(feature = "fs-watcher")]
 const DEBOUNCE_MS: u64 = 500;
 
 /// Max cache size for libgit2 (64 MB) — controls memory usage on large repos.
+#[cfg(feature = "fs-watcher")]
 const LIBGIT2_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-/// Git-change-triggered incremental watcher — FIRST-CLASS v0.5.0: `notify` crate + `git2` diff primary, polling fallback
-/// On filesystem change or git HEAD move, triggers `RepositoryIntelligence::index_repository` incrementally.
-/// Primary: `notify::RecommendedWatcher` + `git2::Repository::diff_tree_to_workdir`; fallback: polling HEAD+mtime 5s with WARN.
+/// Git-change-triggered incremental watcher with two modes:
+/// - **Commit** (default): Polls the resolved HEAD commit, triggers re-index only on new commits.
+/// - **Filesystem**: Uses `notify` crate to watch for any file changes (requires `fs-watcher` feature).
 pub struct RepoWatcher {
     repo_path: PathBuf,
     running: Arc<AtomicBool>,
     poll_interval: Duration,
+    mode: WatchMode,
 }
 
 impl RepoWatcher {
@@ -27,6 +34,7 @@ impl RepoWatcher {
             repo_path,
             running: Arc::new(AtomicBool::new(false)),
             poll_interval: Duration::from_secs(5),
+            mode: WatchMode::default(),
         }
     }
 
@@ -35,89 +43,98 @@ impl RepoWatcher {
         self
     }
 
-    /// Spawn background watcher task that calls `on_change` whenever the repo appears dirty.
-    /// `on_change` should be `RepoIntelligence::index_repository` incrementally.
-    /// FIRST-CLASS: try `notify`+`git2` watcher; on Err fallback to polling with WARN.
+    pub fn with_mode(mut self, mode: WatchMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn mode(&self) -> WatchMode {
+        self.mode
+    }
+
+    /// Spawn background watcher task that calls `on_change` when re-indexing is needed.
+    /// Both modes run `on_change` on tokio's blocking pool, so the callback may do
+    /// blocking work (e.g. a full `index_repository()` walk) without stalling async I/O.
     pub fn spawn<F>(&self, on_change: F) -> tokio::task::JoinHandle<()>
     where
         F: Fn() + Send + Sync + 'static,
     {
-        // FIRST-CLASS: attempt notify+git2 incremental watcher
-        // Wrap in Arc so it can be shared between the try_notify path and fallback
         let on_change = Arc::new(on_change);
-        if let Some(handle) = self.try_notify_git2_watcher(on_change.clone()) {
-            info!(path = %self.repo_path.display(), "Repo watcher started (notify+git2 first-class)");
-            return handle;
+
+        match self.mode {
+            WatchMode::Filesystem => self.spawn_filesystem_watcher(on_change),
+            WatchMode::Commit => self.spawn_commit_watcher(on_change),
         }
-        tracing::warn!("notify/git2 watcher not available, fallback to polling HEAD+mtime (v0.5.0 first-class missing)");
+    }
+
+    // ── Commit Mode (default) ──────────────────────────────────────────
+
+    /// Watch for new git commits by polling the resolved HEAD commit OID.
+    /// Reading `.git/HEAD` alone is NOT enough — on a branch checkout HEAD is the
+    /// static string `ref: refs/heads/<branch>` and never changes on commit. We
+    /// resolve the actual commit via git2 (handles symbolic refs, packed refs,
+    /// detached HEAD and worktrees) and compare the OID instead.
+    fn spawn_commit_watcher<F>(&self, on_change: Arc<F>) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
         let repo_path = self.repo_path.clone();
         let running = self.running.clone();
         let interval = self.poll_interval;
+
+        // Commit mode needs a real git repo with at least one commit to watch.
+        if resolve_head_oid(&repo_path).is_none() {
+            warn!(
+                path = %repo_path.display(),
+                "Commit watch mode requires a git repository with commits — auto-reindex \
+                 disabled (use 'filesystem' mode for non-git repos)"
+            );
+            return tokio::task::spawn(async {});
+        }
+
         running.store(true, Ordering::Relaxed);
-        tokio::spawn(async move {
-            let mut last_head = read_head(&repo_path);
-            let mut last_mtime = dir_mtime(&repo_path);
-            info!(path = %repo_path.display(), "Repo watcher started (poll fallback {:?})", interval);
+
+        tokio::task::spawn_blocking(move || {
+            info!(
+                path = %repo_path.display(),
+                interval_secs = interval.as_secs(),
+                "Repo watcher started (commit mode — polling HEAD commit)"
+            );
+
+            let mut last_oid = resolve_head_oid(&repo_path);
             while running.load(Ordering::Relaxed) {
-                tokio::time::sleep(interval).await;
-                let cur_head = read_head(&repo_path);
-                let cur_mtime = dir_mtime(&repo_path);
-                if cur_head != last_head || cur_mtime != last_mtime {
-                    debug!(old_head = ?last_head, new_head = ?cur_head, "Repo change detected (poll fallback)");
-                    last_head = cur_head;
-                    last_mtime = cur_mtime;
+                std::thread::sleep(interval);
+                // A transient resolution failure (e.g. mid-checkout) is skipped — we
+                // keep the last known OID so the watcher doesn't fire spuriously.
+                let Some(cur_oid) = resolve_head_oid(&repo_path) else {
+                    continue;
+                };
+                if Some(cur_oid.as_str()) != last_oid.as_deref() {
+                    info!(
+                        old = ?last_oid,
+                        new = %cur_oid,
+                        "New commit detected — triggering re-index"
+                    );
+                    last_oid = Some(cur_oid);
                     on_change();
                 }
             }
         })
     }
 
-    /// Try to start the first-class notify+git2 watcher.
-    ///
-    /// When the `git-watcher` feature is enabled:
-    /// 1. Opens the repo with `git2::Repository::open()`
-    /// 2. Configures libgit2 cache via `opts::set_cache_max_size()` (git2 0.21)
-    /// 3. Creates a `notify::RecommendedWatcher` with debounced event channel
-    /// 4. Spawns a tokio task that:
-    ///    - Receives debounced filesystem events (500ms debounce)
-    ///    - On any event: opens repo, diffs HEAD vs workdir
-    ///    - Calls `on_change()` only when actual dirty files exist
-    ///
-    /// Returns `None` (triggering polling fallback) when:
-    /// - `git-watcher` feature is not compiled in
-    /// - `repo_path/.git` doesn't exist (not a git repo)
-    /// - git2 or notify initialization fails
-    #[cfg(feature = "git-watcher")]
-    fn try_notify_git2_watcher<F>(&self, on_change: Arc<F>) -> Option<tokio::task::JoinHandle<()>>
+    // ── Filesystem Mode ────────────────────────────────────────────────
+
+    /// Watch file system changes via `notify` crate.
+    /// Triggers re-index on any file modification (debounced).
+    #[cfg(feature = "fs-watcher")]
+    fn spawn_filesystem_watcher<F>(&self, on_change: Arc<F>) -> tokio::task::JoinHandle<()>
     where
         F: Fn() + Send + Sync + 'static,
     {
         use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-        // Guard: must be a git repo
-        if !self.repo_path.join(".git").exists() {
-            debug!(path = %self.repo_path.display(), "Not a git repo — skipping notify+git2 watcher");
-            return None;
-        }
-
-        // Configure libgit2 memory cache (git2 0.21 API, unsafe)
-        // SAFETY: set_cache_max_size only modifies internal libgit2 cache limits.
-        // Safe to call once at startup before any concurrent repo operations.
-        unsafe {
-            if let Err(e) = git2::opts::set_cache_max_size(LIBGIT2_CACHE_MAX_BYTES as isize) {
-                warn!(error = %e, "Failed to set libgit2 cache size — using defaults");
-            }
-        }
-
-        // Validate repo is openable
-        let repo = match git2::Repository::open(&self.repo_path) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, path = %self.repo_path.display(), "Failed to open git repo for watcher");
-                return None;
-            }
-        };
-        drop(repo); // close — we'll reopen on each check
+        // Configure libgit2 memory cache
+        configure_git2_cache();
 
         // Create debounced notify watcher
         let (tx, rx) = std::sync::mpsc::channel();
@@ -127,28 +144,33 @@ impl RepoWatcher {
         ) {
             Ok(w) => w,
             Err(e) => {
-                warn!(error = %e, "Failed to create notify watcher");
-                return None;
+                warn!(error = %e, "Failed to create notify watcher — falling back to commit mode");
+                return self.spawn_commit_watcher(on_change);
             }
         };
 
         // Watch the repo directory recursively
         if let Err(e) = debouncer.watch(&self.repo_path, RecursiveMode::Recursive) {
-            warn!(error = %e, path = %self.repo_path.display(), "Failed to watch repo directory");
-            return None;
+            warn!(
+                error = %e,
+                path = %self.repo_path.display(),
+                "Failed to watch repo directory — falling back to commit mode"
+            );
+            return self.spawn_commit_watcher(on_change);
         }
 
-        // Detach the watcher so it lives as long as the handle
-        // We move debouncer into the spawned task to keep it alive
         let repo_path = self.repo_path.clone();
         let running = self.running.clone();
         running.store(true, Ordering::Relaxed);
 
         let handle = tokio::task::spawn_blocking(move || {
-            // Keep the watcher alive for the lifetime of this task
             let _watcher = debouncer;
 
-            info!(path = %repo_path.display(), "Repo watcher started (notify+git2, debounce={}ms)", DEBOUNCE_MS);
+            info!(
+                path = %repo_path.display(),
+                debounce_ms = DEBOUNCE_MS,
+                "Repo watcher started (filesystem mode — notify + git2 dirty check)"
+            );
 
             // Debounce loop: reset timer on each event, fire after quiet period
             loop {
@@ -156,7 +178,6 @@ impl RepoWatcher {
                     break;
                 }
 
-                // Block until first event (with timeout to check running flag)
                 match rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(_event) => {
                         // Got an event — drain any queued events with short timeout
@@ -170,14 +191,8 @@ impl RepoWatcher {
                                 break;
                             }
                             match rx.recv_timeout(remaining) {
-                                Ok(_event) => {
-                                    // Another event — extend debounce window
-                                    continue;
-                                }
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                    // Debounce quiet period elapsed
-                                    break;
-                                }
+                                Ok(_event) => continue,
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                     warn!("Notify channel disconnected");
                                     return;
@@ -185,18 +200,32 @@ impl RepoWatcher {
                             }
                         }
 
-                        // Check if repo is actually dirty
-                        if is_repo_dirty(&repo_path) {
-                            debug!(path = %repo_path.display(), "Repo dirty — triggering incremental index");
-                            on_change();
-                        } else {
-                            debug!(path = %repo_path.display(), "Filesystem event but repo clean — skipping");
+                        // Only re-index for real changes. When the repo isn't a git repo
+                        // (or has no HEAD yet) we can't diff, so treat file events as changes.
+                        match repo_has_changes(&repo_path) {
+                            Some(true) => {
+                                debug!(
+                                    path = %repo_path.display(),
+                                    "Repo dirty — triggering incremental index"
+                                );
+                                on_change();
+                            }
+                            Some(false) => {
+                                debug!(
+                                    path = %repo_path.display(),
+                                    "Filesystem event but repo clean — skipping"
+                                );
+                            }
+                            None => {
+                                debug!(
+                                    path = %repo_path.display(),
+                                    "No git HEAD to diff — treating file event as a change"
+                                );
+                                on_change();
+                            }
                         }
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // No event for 1s — loop and check running flag
-                        continue;
-                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         warn!("Notify channel disconnected");
                         break;
@@ -205,16 +234,19 @@ impl RepoWatcher {
             }
         });
 
-        Some(handle)
+        handle
     }
 
-    /// Stub when `git-watcher` feature is not compiled in — falls back to polling.
-    #[cfg(not(feature = "git-watcher"))]
-    fn try_notify_git2_watcher<F>(&self, _on_change: Arc<F>) -> Option<tokio::task::JoinHandle<()>>
+    /// Stub when `fs-watcher` feature is not compiled in — falls back to commit mode.
+    #[cfg(not(feature = "fs-watcher"))]
+    fn spawn_filesystem_watcher<F>(&self, on_change: Arc<F>) -> tokio::task::JoinHandle<()>
     where
         F: Fn() + Send + Sync + 'static,
     {
-        None
+        warn!(
+            "fs-watcher feature not enabled — falling back to commit mode"
+        );
+        self.spawn_commit_watcher(on_change)
     }
 
     pub fn stop(&self) {
@@ -228,55 +260,46 @@ impl RepoWatcher {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Check if a git repository has uncommitted changes (staged or unstaged).
-/// Uses git2 to diff HEAD vs workdir — only returns true for real code changes,
-/// not internal .git/ writes.
-#[cfg(feature = "git-watcher")]
-fn is_repo_dirty(repo_path: &Path) -> bool {
-    let repo = match git2::Repository::open(repo_path) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
+/// Configure libgit2 memory cache (64 MB).
+#[cfg(feature = "fs-watcher")]
+fn configure_git2_cache() {
+    // SAFETY: set_cache_max_size only modifies internal libgit2 cache limits.
+    // Safe to call once at startup before any concurrent repo operations.
+    unsafe {
+        if let Err(e) = git2::opts::set_cache_max_size(LIBGIT2_CACHE_MAX_BYTES as isize) {
+            warn!(error = %e, "Failed to set libgit2 cache size — using defaults");
+        }
+    }
+}
 
-    // Check HEAD exists (empty repo has no HEAD)
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => return false, // unborn branch — nothing to diff
-    };
+/// Resolve the full commit OID that HEAD currently points to.
+/// Handles symbolic refs, packed refs, detached HEAD and worktrees — anything
+/// `.git/HEAD` file reads cannot. Returns `None` when the repo can't be opened
+/// or HEAD has no commit yet (fresh/unborn branch, non-git directory).
+fn resolve_head_oid(repo_path: &Path) -> Option<String> {
+    let repo = git2::Repository::open(repo_path).ok()?;
+    let head = repo.head().ok()?;
+    head.target().map(|oid| oid.to_string())
+}
 
-    let tree = match head.peel_to_tree() {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
+/// Determine whether the repo has uncommitted changes relative to HEAD.
+///
+/// Returns:
+/// - `Some(true)` — dirty (staged/unstaged/untracked changes present)
+/// - `Some(false)` — clean
+/// - `None` — repo can't be opened or has no HEAD (fresh repo / non-git dir);
+///   callers should treat file events as changes.
+#[cfg(feature = "fs-watcher")]
+fn repo_has_changes(repo_path: &Path) -> Option<bool> {
+    let repo = git2::Repository::open(repo_path).ok()?;
+    let head = repo.head().ok()?;
+    let tree = head.peel_to_tree().ok()?;
 
-    // Diff HEAD tree vs workdir — any changes mean dirty
     // Include untracked files so new (unstaged) files are detected
     let mut opts = git2::DiffOptions::new();
     opts.include_untracked(true);
-    // Note: `diff` borrows from `repo`, so we must extract the count before dropping
-    let delta_count = match repo.diff_tree_to_workdir(Some(&tree), Some(&mut opts)) {
-        Ok(diff) => diff.deltas().len(),
-        Err(_) => 0,
-    };
-    delta_count > 0
-}
-
-#[cfg(not(feature = "git-watcher"))]
-fn is_repo_dirty(_repo_path: &Path) -> bool {
-    false
-}
-
-fn read_head(repo_path: &Path) -> Option<String> {
-    let head_path = repo_path.join(".git").join("HEAD");
-    std::fs::read_to_string(head_path)
-        .ok()
-        .map(|s| s.trim().to_string())
-}
-
-fn dir_mtime(repo_path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(repo_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
+    let diff = repo.diff_tree_to_workdir(Some(&tree), Some(&mut opts)).ok()?;
+    Some(diff.deltas().len() > 0)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -286,137 +309,280 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Create a git repo in `dir` with one initial commit.
+    fn init_repo(dir: &std::path::Path) {
+        let repo = git2::Repository::init(dir).unwrap();
+        commit_file(&repo, "initial.txt", "init", "initial commit");
+    }
+
+    /// Stage + commit a single file in the given repo.
+    fn commit_file(repo: &git2::Repository, name: &str, content: &str, msg: &str) {
+        let workdir = repo.workdir().expect("repo has a workdir");
+        std::fs::write(workdir.join(name), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(name)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = repo.signature().unwrap();
+        let parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap();
+    }
+
     #[test]
-    fn test_watcher_new() {
+    fn test_watcher_new_default_mode() {
         let w = RepoWatcher::new(PathBuf::from("."));
         assert!(!w.is_running());
+        assert_eq!(w.mode(), WatchMode::Commit);
+    }
+
+    #[test]
+    fn test_watch_mode_from_str() {
+        assert_eq!("commit".parse::<WatchMode>().unwrap(), WatchMode::Commit);
+        assert_eq!("git".parse::<WatchMode>().unwrap(), WatchMode::Commit);
+        assert_eq!(
+            "filesystem".parse::<WatchMode>().unwrap(),
+            WatchMode::Filesystem
+        );
+        assert_eq!("fs".parse::<WatchMode>().unwrap(), WatchMode::Filesystem);
+        assert!("invalid".parse::<WatchMode>().is_err());
+    }
+
+    #[test]
+    fn test_watch_mode_display() {
+        assert_eq!(WatchMode::Commit.to_string(), "commit");
+        assert_eq!(WatchMode::Filesystem.to_string(), "filesystem");
+    }
+
+    #[test]
+    fn test_watch_mode_default_is_commit() {
+        assert_eq!(WatchMode::default(), WatchMode::Commit);
     }
 
     #[tokio::test]
-    async fn test_watcher_spawn_and_stop() {
-        let dir = std::env::temp_dir().join(format!("coderun_watcher_{}", uuid::Uuid::new_v4()));
+    async fn test_commit_watcher_detects_new_commit() {
+        let dir = std::env::temp_dir().join(format!(
+            "coderun_watcher_commit_{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
-        let w = RepoWatcher::new(dir.clone()).with_interval(Duration::from_millis(50));
+        init_repo(&dir);
+
+        let w = RepoWatcher::new(dir.clone())
+            .with_mode(WatchMode::Commit)
+            .with_interval(Duration::from_millis(50));
+
         let flag = Arc::new(AtomicBool::new(false));
         let flag_clone = flag.clone();
+
         let handle = w.spawn(move || {
             flag_clone.store(true, Ordering::Relaxed);
         });
+
         assert!(w.is_running());
-        // Trigger by touching HEAD
-        let head = dir.join(".git").join("HEAD");
-        std::fs::create_dir_all(head.parent().unwrap()).unwrap();
-        std::fs::write(&head, "ref: refs/heads/main").unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Let the watcher read the initial HEAD commit
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!flag.load(Ordering::Relaxed), "should not fire on startup");
+
+        // A real new commit (the common branch-based workflow — .git/HEAD text is
+        // unchanged by this; only the resolved OID moves)
+        let repo = git2::Repository::open(&dir).unwrap();
+        commit_file(&repo, "second.txt", "more", "second commit");
+        drop(repo);
+
+        // Wait for the poll to detect the new OID
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "Commit watcher should detect a new commit on the current branch"
+        );
+
         w.stop();
-        assert!(!w.is_running());
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── v0.5.0 first-class tool tests ──────────────────────────────────
-
-    #[test]
-    fn test_try_notify_git2_returns_none_when_feature_disabled() {
-        let w = RepoWatcher::new(PathBuf::from("."));
-        // Without `git-watcher` feature, try_notify_git2_watcher is stub → None
-        let cb = Arc::new(|| {});
-        #[cfg(not(feature = "git-watcher"))]
-        assert!(
-            w.try_notify_git2_watcher(cb).is_none(),
-            "notify/git2 not wired → fallback polling is expected when git-watcher feature is off"
-        );
-        // With `git-watcher` feature, still None for non-git dir
-        #[cfg(feature = "git-watcher")]
-        assert!(
-            w.try_notify_git2_watcher(cb).is_none(),
-            "Non-git directory → should fall back to polling"
-        );
-    }
-
-    #[cfg(feature = "git-watcher")]
-    #[test]
-    fn test_try_notify_git2_returns_none_for_non_git_dir() {
-        let dir = std::env::temp_dir().join(format!("coderun_watcher_nongit_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let w = RepoWatcher::new(dir.clone());
-        assert!(
-            w.try_notify_git2_watcher(Arc::new(|| {})).is_none(),
-            "Non-git directory should return None"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(feature = "git-watcher")]
     #[tokio::test]
-    async fn test_try_notify_git2_returns_some_for_valid_repo() {
-        let dir = std::env::temp_dir().join(format!("coderun_watcher_gitrepo_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Init a real git repo
-        let repo = git2::Repository::init(&dir).unwrap();
-        drop(repo);
-
-        // Create a file so there's something to diff
-        std::fs::write(dir.join("test.txt"), "hello").unwrap();
-
-        let w = RepoWatcher::new(dir.clone());
-        let result = w.try_notify_git2_watcher(Arc::new(|| {}));
-        assert!(result.is_some(), "Valid git repo should return Some(handle)");
-        if let Some(handle) = result {
-            handle.abort();
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(feature = "git-watcher")]
-    #[test]
-    fn test_is_repo_dirty_detects_changes() {
-        let dir = std::env::temp_dir().join(format!("coderun_watcher_dirty_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Init repo and make an initial commit
-        let repo = git2::Repository::init(&dir).unwrap();
-        {
-            let mut index = repo.index().unwrap();
-            std::fs::write(dir.join("initial.txt"), "init").unwrap();
-            index.add_path(std::path::Path::new("initial.txt")).unwrap();
-            index.write().unwrap();
-            let oid = index.write_tree().unwrap();
-            let tree = repo.find_tree(oid).unwrap();
-            let sig = repo.signature().unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-                .unwrap();
-        }
-
-        // Clean repo → not dirty
-        assert!(!is_repo_dirty(&dir), "Clean repo should not be dirty");
-
-        // Add uncommitted change
-        std::fs::write(dir.join("new_file.rs"), "fn main() {}").unwrap();
-        assert!(is_repo_dirty(&dir), "Repo with uncommitted file should be dirty");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn test_watcher_fallback_polling_still_detects_mtime() {
+    async fn test_commit_watcher_ignores_file_changes() {
         let dir = std::env::temp_dir().join(format!(
-            "coderun_watcher_mtime_{}",
+            "coderun_watcher_commit_noop_{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let w = RepoWatcher::new(dir.clone()).with_interval(Duration::from_millis(40));
-        let hit = Arc::new(AtomicBool::new(false));
-        let hit_clone = hit.clone();
+        init_repo(&dir);
+
+        let w = RepoWatcher::new(dir.clone())
+            .with_mode(WatchMode::Commit)
+            .with_interval(Duration::from_millis(50));
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
         let handle = w.spawn(move || {
-            hit_clone.store(true, Ordering::Relaxed);
+            flag_clone.store(true, Ordering::Relaxed);
         });
-        // Touch a file to bump mtime
-        std::fs::write(dir.join("a.txt"), "v1").unwrap();
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        // Polling may or may not have hit yet depending on mtime granularity, but watcher must be running and not panic
+
         assert!(w.is_running());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Touch a file (but don't commit)
+        std::fs::write(dir.join("new_file.rs"), "fn main() {}").unwrap();
+
+        // Wait — commit watcher should NOT trigger
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "Commit watcher should NOT trigger on plain file changes"
+        );
+
+        w.stop();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_commit_watcher_noop_on_non_git_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "coderun_watcher_nongit_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let w = RepoWatcher::new(dir.clone())
+            .with_mode(WatchMode::Commit)
+            .with_interval(Duration::from_millis(50));
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let handle = w.spawn(move || {
+            flag_clone.store(true, Ordering::Relaxed);
+        });
+
+        // Not a git repo → watcher must not pretend to run
+        assert!(!w.is_running());
+        std::fs::write(dir.join("a.txt"), "v1").unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!flag.load(Ordering::Relaxed));
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "fs-watcher")]
+    #[test]
+    fn test_repo_has_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "coderun_watcher_dirty_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo(&dir);
+
+        // Clean repo → Some(false)
+        assert_eq!(repo_has_changes(&dir), Some(false));
+
+        // Uncommitted change → Some(true)
+        std::fs::write(dir.join("new_file.rs"), "fn main() {}").unwrap();
+        assert_eq!(repo_has_changes(&dir), Some(true));
+
+        // Non-git dir → None (treat file events as changes)
+        let plain = std::env::temp_dir().join(format!(
+            "coderun_watcher_notgit_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(repo_has_changes(&plain), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&plain);
+    }
+
+    #[cfg(feature = "fs-watcher")]
+    #[tokio::test]
+    async fn test_filesystem_watcher_triggers_on_dirty_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "coderun_watcher_fs_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo(&dir);
+
+        let w = RepoWatcher::new(dir.clone())
+            .with_mode(WatchMode::Filesystem)
+            .with_interval(Duration::from_millis(50));
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let handle = w.spawn(move || {
+            flag_clone.store(true, Ordering::Relaxed);
+        });
+
+        assert!(w.is_running());
+
+        // Wait for watcher to start
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Create a dirty file
+        std::fs::write(dir.join("dirty.rs"), "fn main() {}").unwrap();
+
+        // Wait for debounce + dirty check
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "Filesystem watcher should detect dirty repo"
+        );
+
+        w.stop();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "fs-watcher")]
+    #[tokio::test]
+    async fn test_filesystem_watcher_triggers_on_non_git_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "coderun_watcher_fs_nongit_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let w = RepoWatcher::new(dir.clone())
+            .with_mode(WatchMode::Filesystem)
+            .with_interval(Duration::from_millis(50));
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let handle = w.spawn(move || {
+            flag_clone.store(true, Ordering::Relaxed);
+        });
+
+        assert!(w.is_running());
+
+        // Wait for watcher to start, then create a file — no git repo to diff, so
+        // the file event itself must trigger a re-index.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        std::fs::write(dir.join("new.txt"), "content").unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "Filesystem watcher should trigger on file events in a non-git dir"
+        );
+
         w.stop();
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);

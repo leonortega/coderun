@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A local AI Runtime that improves existing coding agents by providing repository intelligence, optimized context construction, intelligent model routing, and tool-output compression. It sits between coding agents and LLM providers, making every agent interaction more efficient and contextually aware — without replacing the agent itself.
+A local AI Runtime that improves existing coding agents by providing repository intelligence, optimized context construction, and tool-output compression. It sits between coding agents and LLM providers, making every agent interaction more efficient and contextually aware — without replacing the agent itself and without choosing the agent's model.
 
 ## Problem Statement
 
@@ -12,17 +12,13 @@ Current coding agents (opencode, Claude Code, Cursor, Gemini CLI, etc.) operate 
 
 2. **Naive context selection.** Agents either dump entire files into context or rely on developers to manually specify what matters. This wastes tokens and misses critical information.
 
-3. **No skill awareness.** Agents cannot discover or apply domain-specific workflows (e.g., "migrate a database schema," "add a new API endpoint following project conventions") without developers manually providing instructions each time.
+3. **Tool-output bloat.** Tool outputs (file reads, search results, shell commands) are passed through uncompressed, inflating token usage by 3–10× with redundant or irrelevant content.
 
-4. **Tool-output bloat.** Tool outputs (file reads, search results, shell commands) are passed through uncompressed, inflating token usage by 3–10× with redundant or irrelevant content.
-
-5. **One-size-fits-all model routing.** Agents use a single model for all tasks regardless of whether the task is simple formatting or complex architectural reasoning.
-
-6. **No cost optimization.** Without prompt caching awareness, agents miss the single biggest available cost lever: ordering context for maximum cache hits.
+4. **No cost optimization.** Without prompt caching awareness, agents miss the single biggest available cost lever: ordering context for maximum cache hits.
 
 ## Goal
 
-Build a local runtime that solves these six problems, without becoming a coding agent itself. The runtime exposes one clean API: `BuildContext(task)` plus a routing call. It works standalone for solo developers and can be extended with external orchestration for teams needing approvals and audit trails.
+Build a local runtime that solves these four problems, without becoming a coding agent itself. The runtime exposes one clean API: `BuildContext(task)` (plus a readiness probe and tool-output compression). It works standalone for solo developers and can be extended with external orchestration for teams needing approvals and audit trails.
 
 ## Target Users
 
@@ -70,11 +66,11 @@ A developer asks a coding agent to "add rate limiting to the API." The runtime i
 
 ### Use Case 2: Cache-Optimized Context
 
-The runtime orders context as skills → docs → code (most to least cache-stable). An explicit frozen-prefix boundary ensures only content after that boundary changes between calls. This maximizes prompt cache hit rates, which is the single biggest cost lever available.
+The runtime orders context as docs → code (most to least cache-stable). An explicit frozen-prefix boundary ensures only content after that boundary changes between calls. This maximizes prompt cache hit rates, which is the single biggest cost lever available.
 
-### Use Case 3: Smart Model Selection
+### Use Case 3: Agent-Chosen Model
 
-A coding agent needs to generate a unit test (simple task) and refactor a core algorithm (complex task). The runtime routes the simple task to a fast, cheap model and the complex task to a capable, expensive model — through LiteLLM as the gateway.
+The runtime is model-agnostic: the agent / provider / user selects the model for each task. Model routing and LiteLLM were removed (v0.8.6 — see `docs/01-architecture/LLM_ROUTING_REMOVAL.md`) because the runtime could not prove it picks better than the agent, provider, or user.
 
 ### Use Case 4: Tool-Output Compression
 
@@ -107,7 +103,6 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 | Latency overhead | Added latency from runtime processing | < 30s hard limit, < 5s typical |
 | Fail-open reliability | Requests pass through unmodified on error | 100% fail-open compliance |
 | Repository indexing time | Time to index a 100k-line repository | < 30 seconds |
-| Model routing accuracy | Correct model tier selection | > 90% accuracy |
 | Stability | Crash rate | < 0.1% of requests |
 
 ## v1 Capabilities
@@ -118,11 +113,9 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 | Repository indexing | Incremental AST parsing with tree-sitter, structural search with ast-grep, text search with ripgrep |
 | Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md`, reranker is passthrough) |
 | Memory | Persistent memory via SQLite+tantivy local (engram removed — see ENGRAM_CBM_REMOVAL.md) |
-| Skill matching | Deterministic tag-based skill activation from community formats |
 | Context construction | Token-budgeted YAML context pack with cache-aware ordering |
-| Model routing | Heuristic complexity scoring → tier selection → LiteLLM gateway |
 | Tool-output optimization | RTK-based compression for tool outputs |
-| Event bus | Async observability events (ContextBuilt, SkillActivated, etc.) |
+| Event bus | Async observability events (ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved) |
 | Local persistence | SQLite for index, metadata, and memory (engram removed) |
 
 ## v1 Limitations
@@ -133,9 +126,8 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 | No conversation memory | Runtime does not persist conversation history across sessions | Session memory deferred (engram removed — see ENGRAM_CBM_REMOVAL.md) |
 | No multi-agent coordination | Runtime serves one agent instance at a time | Concurrent agent support in v2 |
 | No web UI | CLI-only interface | Dashboard in v2 |
-| No plugin system | Skills are file-based community formats | Dynamic plugin system in v2 |
 | No distributed deployment | Single local daemon process | Distributed runtime in v2 |
 | No vector/semantic recall | Uses tantivy BM25 lexical recall only (engram removed) | Semantic recall only if lexical proves insufficient |
 | No relationship-aware retrieval | Uses BM25 + reranking only | Graph-based retrieval only if concrete query pattern requires it |
-| No external orchestration | Runtime works standalone | DBOS required since v0.6.0 (SQLite+Litestream native); Temporal deleted |
+| No external orchestration | Runtime works standalone | Workflow engine removed (see `docs/01-architecture/REMOVED_TOOLS.md`) |
 | Tier 2 agents | Best-effort only, no guarantee of hook compliance | N/A — by design (v0.6.0 keeps README-only) |

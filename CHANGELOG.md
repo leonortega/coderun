@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-03 — Retrieval Engine v1 + Benchmarks
+
+### Added — Retrieval Engine
+- **Intent detection** `crates/coderun-context/src/retrieval/intent.rs` classifies queries into categories (procedural, structural, debugging, informational, mixed) to route to the best search strategy
+- **Query expansion** `crates/coderun-context/src/retrieval/query.rs` expands queries with synonyms and related terms (e.g., "error handling" → [error, handling, try, catch, exception]) for higher recall
+- **BM25 full-text search** via tantivy `MmapDirectory` for fast lexical matching across indexed files
+- **Structural search** `crates/coderun-context/src/retrieval/structural.rs` in-process ast-grep backend for code-aware search (find function definitions, class hierarchies, import chains)
+- **Graph boost** `crates/coderun-context/src/retrieval/ranking.rs` boosts files related to top candidates via the code dependency graph
+- **Retrieval policy** `crates/coderun-context/src/retrieval/policy.rs` configurable tuning: `candidate_k` (50→500), `max_files`, `enable_graph`, `enable_expansion`
+- **Candidate pool sweep** — `candidate_k` increased from 50 to 500 with +249% recall improvement at only +3ms latency cost
+- **CombinedRetriever** `crates/coderun-context/src/retrieval/engine.rs` orchestrates the full pipeline: intent → expansion → BM25 + structural → graph → ranking
+
+### Added — Benchmark Suite
+- **bench_components** — Component evaluation on coderun repo (20 queries, measures impact of graph boost, candidate_k, query expansion)
+- **bench_mattermost_50** — 50 queries against Mattermost (9k Go + React files) vs `grep -rE`
+- **bench_dt_50** — 50 queries against DefinitelyTyped (53k TypeScript files) vs `grep -rE`
+- **bench_retrieval_50** — 50 queries on coderun repo with `index_repository()` cold/warm comparison
+- **benchmark.rs** — Unit tests for recall@k, MRR, keyword coverage, intent detection metrics
+- Full benchmark report: `docs/BENCHMARKS_V1.md`
+
+### Added — Repository Intelligence Improvements
+- **First-class docs indexing** — Markdown files indexed without tree-sitter via dedicated path
+- **Docs/code split** — Separated documentation and code retrieval paths for better precision
+- **PascalCase splitting** — Symbol extraction splits `MyFunctionName` → [My, Function, Name] for better BM25 matching
+- **Path tokenization** — File paths split into searchable tokens (e.g., `src/components/Header.tsx` → [src, components, Header, tsx])
+- **Incremental symbol extraction** — `mtime+size` shortcut skips unchanged files on warm re-index (cold: 1,455 symbols, warm: 0-298)
+
+### Added — Watch Mode Configuration
+- **Two auto-index modes** `crates/coderun-repo-intel/src/watcher.rs`:
+  - `commit` (default) — Polls the resolved HEAD commit (git2, handles branch refs/packed refs/detached HEAD) every 5s, re-indexes only on new commits
+  - `filesystem` — Real-time file change detection via `notify` crate
+- **Configurable** via `[index].watch_mode` in `.coderun/config.toml` or `CODERUN_WATCH_MODE` env var
+- **git2 now non-optional** — Required for commit-based watching (always available)
+
+### Added — Daemon Readiness Endpoint
+- **`GET /health` + `GET /metrics` readiness** — `GET /health` now reports `state: "indexing" | "ready"` (plus `index_files`), `GET /metrics` exposes a `coderun_daemon_ready` gauge, and `POST /hook` returns HTTP `503` with `reason: "daemon_indexing"` until the initial index completes. The HTTP health/metrics listener binds *before* indexing (only request serving is readiness-gated), so clients can poll readiness and wait instead of queueing on the engine lock mid-index.
+- **UDS/MessagePack `Probe` payload** — new `RequestPayload::Probe` / `ResponsePayload::Probe` (plus `HookType::Probe`) over the primary transport: send `{"type":"Probe"}` and get `state`, `index_files`, and `version` back. Answered before rate-limiting/gating with no engine lock — the same readiness signal as `GET /health`, so UDS clients can wait before sending real requests.
+- **Client adapters poll readiness before their first request** — the OpenCode plugin, Claude Code hooks (`.claude/hooks/coderun-ready.sh`), Gemini CLI hooks, and Cursor extension now wait for `state: "ready"` (polling `GET /health`, bounded + fail-open) before their first real request, so a cold-starting daemon enriches the first prompt instead of 503-passthroughing it. Unreachable daemons bail immediately (hooks never stall on a missing daemon); successful checks are cached for 30s. `CODERUN_READY_TIMEOUT_MS` controls the wait budget (default 10s).
+
+
+### Added— Daemon MCP Surface (`POST /mcp`)
+- **Daemon-hosted MCP**— JSON-RPC 2.0 at `POST /mcp` on the existing `127.0.0.1:9527` axum listener (identical on Windows and Unix; no extra socket or process). Stateless tools-only subset: `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized` (HTTP 202).
+- **Two tools**— `coderun_context(prompt, repository_path?)` (enriched context answer + provenance `structuredContent`) and `coderun_compress(content, tool_name, output_type?, context?)` (compressed output + token counts) - the same engine/optimizer paths `/hook` uses.
+- **No-conversion client path**— the opencode plugin now drives both hooks through the MCP tools (`chat.message` -> `coderun_context`, `tool.execute.before` -> `coderun_compress`); daemons that predate `/mcp` are served via the automatic `/hook` fallback (wire behavior unchanged).
+- **Readiness over MCP**— `tools/list`/`initialize` answer while indexing; `tools/call` returns JSON-RPC `-32001 daemon_indexing` (HTTP `200`) until the index is ready - parity with the `/hook` 503 gate.
+
+
+### Changed — Dependency Updates
+- **tantivy** updated to `0.26.1` (latest stable)
+- **git2** updated from `0.19` to `0.21` (fewer transitive deps: libssh2, openssl removed)
+- **tantivy-tokenizer-api** updated from `0.2` to `0.7`
+- **tree-sitter-language-pack** updated to `1.16.1`
+- **Version** bumped from `0.8.6` to `0.9.0`
+
+### Changed — Cleanup
+- **Removed engram** — Cross-session memory now handled by SQLite+tantivy local
+- **Removed FlashRank** — Reranker removed per benchmark evaluation (MRR degradation)
+- **Removed LLM Model Router / LiteLLM** — BuildContext now deterministic (MCP retained)
+- **Removed MkDocs integration** — Docs indexed via first-class path instead
+- **Removed DBOS workflow** — `coderun-workflow` crate, the daemon `workflow` feature and its routes, and the CLI `workflow` command deleted (see `docs/01-architecture/REMOVED_TOOLS.md`)
+- **Removed `coderun replay`** — Event replay removed from hot path, `tracing` + `metrics` retained
+- **Removed the Skill Engine** — `coderun-skills` crate, `ContextPack.behavioral_skills`, Knowledge Hub skill load/match, the CLI `skills` subcommand + `--community-skills`, `[skills]` config, and repo skill content deleted (see `docs/01-architecture/REMOVED_TOOLS.md`)
+- **Removed the model map** — `[model]` config + `CODERUN_MODEL_DEFAULT`, metrics tier dimension, and `token_usage.model`/`tier` columns (migration 007)
+- **Bench files gated behind `#[cfg(test)]`** — Zero warnings in release builds
+
+### Fixed
+- **bench_retrieval_50 empty results** — Added missing `index_repository()` call before queries
+- **Unnecessary parentheses warnings** in `bench_components.rs` (3 instances)
+- **Dead code warnings** in `coderun-repo-intel` — Gated `DEBOUNCE_MS`, `LIBGIT2_CACHE_MAX_BYTES`, `repo_has_changes` behind `#[cfg(feature = "fs-watcher")]` and `#[cfg(test)]`
+- **Auto-reindex goes through the ContextEngine** — the daemon watcher reindexes via `ContextEngine::reindex_repository`, and indexing now evicts the repo's cached tantivy handle on completion so the next query serves the fresh commit immediately instead of from a stale pre-reindex reader
+
+### Performance
+
+| Metric | Mattermost (9k) | DefinitelyTyped (53k) |
+|--------|----------------|----------------------|
+| Retrieval P50 | 27ms | 47ms |
+| Grep P50 | 971ms | 4,819ms |
+| Speedup | **27×** | **106×** (P50) |
+| Novelty | 53.0% | 89.2% |
+| Recall | 13.1% | 14.2% |
+
+---
+
 ## [0.7.0] - 2026-08-25 — Single-Command Bootstrap
 
 ### Added — One-Command Repository Bootstrap

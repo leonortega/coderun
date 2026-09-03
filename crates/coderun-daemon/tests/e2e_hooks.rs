@@ -79,7 +79,23 @@ async fn e2e_hook_contracts() {
         let _ = axum::serve(listener, router).await;
     });
 
+    // The readiness gate (serve() sets this after the initial index) must be
+    // flipped for a directly-booted router — this test acts as a READY daemon.
+    coderun_daemon::metrics::global().set_readiness(coderun_daemon::metrics::Readiness::Ready);
+
     let port = addr.port().to_string();
+
+    // ── (e) Readiness probe (HTTP) — mirrors the UDS/MessagePack `Probe` payload ──
+    let body = serde_json::json!({
+        "correlation_id": "e2e_probe_001",
+        "hook_type": "Probe",
+        "payload": { "type": "Probe" }
+    });
+    let json = post_hook(&port, &body).await;
+    assert_eq!(json["payload"]["type"], "Probe", "probe payload expected: {json}");
+    assert_eq!(json["payload"]["state"], "ready", "readiness flipped to Ready: {json}");
+    assert_eq!(json["payload"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(json["payload"]["index_files"].is_u64(), "index_files must be a number: {json}");
 
     async fn post_hook(port: &str, body: &serde_json::Value) -> serde_json::Value {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

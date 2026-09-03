@@ -17,14 +17,13 @@ describe("E2E: OpenCode → Coderun → BuildContext", () => {
         payload: {
           type: "RewrittenMessage",
           original: "implement auth",
-          rewritten: "implement auth\n\n---\n\nContext:\nbehavioral_skills: Rust Expert\ncode_context: // src/auth.rs:10",
+          rewritten: "implement auth\n\n---\n\nContext:\ndocs_context: \ncode_context: // src/auth.rs:10",
           context_pack: {
-            behavioral_skills: "Rust Expert",
             docs_context: "",
             code_context: "// src/auth.rs:10 fn authenticate()",
-            token_usage: { total_tokens: 8500, budget_remaining: 3500, by_source: { behavioral_skills: 1000, code_context: 7500 } },
+            token_usage: { total_tokens: 8500, budget_remaining: 3500, by_source: { docs_context: 0, code_context: 7500 } },
             provenance: [{ path: "src/auth.rs", source: "code", retriever: "tantivy", score: 0.92, reason: "bm25" }],
-            metadata: { task_hash: "abc123", correlation_id: "req_e2e123", cache_order: ["behavioral_skills","docs_context","code_context"], repository_state: "deadbeef12345678" }
+            metadata: { task_hash: "abc123", correlation_id: "req_e2e123", cache_order: ["docs_context","code_context"], repository_state: "deadbeef12345678" }
           },
           // routing_decision removed — see LLM_ROUTING_REMOVAL.md (BuildContext is ContextPack only)
         },

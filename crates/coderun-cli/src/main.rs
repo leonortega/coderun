@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use coderun_core::Config;
+use coderun_core::{Config, WatchMode};
 
 // ── CLI Arguments ───────────────────────────────────────────────────────
 
@@ -34,20 +34,16 @@ enum Commands {
         /// Run interactive setup wizard
         #[arg(long)]
         wizard: bool,
-        /// Opt-in: install community skills from skills.sh (stack-matched via skills.sh)
-        /// Default is OFF per V1 minimal plan; agent tools handle repo ops, skills are optional.
-        #[arg(long)]
-        community_skills: bool,
-        /// Skip community skill installation (legacy, kept for compat — default is already skip)
-        #[arg(long, hide = true)]
-        no_community_skills: bool,
     },
     
     /// Trigger repository re-indexing
     Index {
-        /// Watch for changes (git-change-triggered incremental)
+        /// Watch for changes and re-index automatically
         #[arg(long)]
         watch: bool,
+        /// Watch mode: "commit" (default, triggers on git commit) or "filesystem" (triggers on any file change)
+        #[arg(long)]
+        watch_mode: Option<String>,
     },
     
     /// Preview what BuildContext would produce for a prompt (real via daemon if running, else local)
@@ -77,35 +73,14 @@ enum Commands {
     /// Show daemon status and metrics
     Status,
     
-    /// Manage skill definitions
-    Skills {
-        #[command(subcommand)]
-        action: SkillsAction,
-    },
-    
     /// Manage configuration
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
 
-    /// Durable workflows (DBOS) — requires --features workflow (future/workflow, NOT v1)
-    #[cfg(feature = "workflow")]
-    Workflow {
-        #[command(subcommand)]
-        action: WorkflowAction,
-    },
-    
     /// Health check: verify all dependencies are available
     Doctor,
-}
-
-#[derive(Subcommand)]
-enum SkillsAction {
-    /// List available skills
-    List,
-    /// Validate skill definitions
-    Validate,
 }
 
 #[derive(Subcommand)]
@@ -120,31 +95,6 @@ enum ConfigAction {
         #[arg(value_parser = clap::value_parser!(String))]
         from: String,
     },
-}
-
-#[cfg(feature = "workflow")]
-#[derive(Subcommand)]
-enum WorkflowAction {
-    /// Start a durable workflow
-    Start {
-        /// Task prompt
-        prompt: String,
-        /// Require human approval gate
-        #[arg(long)]
-        require_approval: bool,
-    },
-    /// Get workflow status
-    Status {
-        /// Workflow ID
-        workflow_id: String,
-    },
-    /// Approve a pending workflow
-    Approve {
-        /// Workflow ID
-        workflow_id: String,
-    },
-    /// List recent workflows
-    List,
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -170,14 +120,11 @@ fn main() {
     
     let result = match cli.command {
         Commands::Serve { port, socket } => cmd_serve(port, socket),
-        Commands::Init { wizard, community_skills, no_community_skills } => cmd_init(wizard, community_skills, no_community_skills),
-        Commands::Index { watch } => cmd_index(watch),
+        Commands::Init { wizard } => cmd_init(wizard),
+        Commands::Index { watch, watch_mode } => cmd_index(watch, watch_mode.as_deref()),
         Commands::Preview { prompt, session, no_cache, diag, expected_files, candidate_k, max_files } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref(), candidate_k, max_files),
         Commands::Status => cmd_status(),
-        Commands::Skills { action } => cmd_skills(action),
         Commands::Config { action } => cmd_config(action),
-        #[cfg(feature = "workflow")]
-        Commands::Workflow { action } => cmd_workflow(action),
         Commands::Doctor => cmd_doctor(),
     };
     
@@ -199,7 +146,7 @@ fn cmd_serve(_port: u16, _socket: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> Result<(), String> {
+fn cmd_init(wizard: bool) -> Result<(), String> {
     if wizard {
         println!("(wizard mode is non-interactive — defaults applied, edit .coderun/config.toml afterwards)");
         println!();
@@ -216,7 +163,7 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
     println!("═══════════════════════════════════════");
 
     // ── Step 1: Scaffold ─────────────────────────────────────────────
-    println!("[1/8] Scaffold (.coderun/, config, skills, database)");
+    println!("[1/7] Scaffold (.coderun/, config, database)");
     let coderun_dir = PathBuf::from(".coderun");
     std::fs::create_dir_all(&coderun_dir)
         .map_err(|e| format!("Failed to create .coderun directory: {}", e))?;
@@ -228,8 +175,6 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
         std::fs::write(&config_path, config_toml)
             .map_err(|e| format!("Failed to write config: {}", e))?;
     }
-    std::fs::create_dir_all(coderun_dir.join("skills"))
-        .map_err(|e| format!("Failed to create skills directory: {}", e))?;
     let db_path = get_db_path();
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -239,7 +184,7 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
         .map_err(|e| format!("Failed to initialize database: {}", e))?;
 
     // ── Step 2: Repository discovery ─────────────────────────────────
-    println!("[2/8] Repository discovery (languages, frameworks, commands)");
+    println!("[2/7] Repository discovery (languages, frameworks, commands)");
     let discovery = discover_repository(&project_root);
     println!(
         "      languages: {}",
@@ -263,34 +208,8 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
         }
     }
 
-    // Community skills — default OFF per V1 minimal plan (V1_MINIMAL_STACK_PLAN.md:2)
-    // Opt-in via --community-skills or CODERUN_COMMUNITY_SKILLS=1; legacy --no-community-skills still forces skip.
-    let want_community = community_skills
-        || std::env::var("CODERUN_COMMUNITY_SKILLS").map(|v| v == "1" || v == "true").unwrap_or(false);
-    let force_skip = no_community_skills
-        || std::env::var("CODERUN_NO_COMMUNITY_SKILLS").map(|v| v == "1" || v == "true").unwrap_or(false);
-    if force_skip || !want_community {
-        if force_skip {
-            println!("[2b] Community skills — skipped (--no-community-skills)");
-        } else {
-            println!("[2b] Community skills — skipped (default OFF; use --community-skills to install)");
-        }
-    } else {
-        println!("[2b] Community skills (stack-matched via skills.sh — opt-in --community-skills)");
-        match install_community_skills(&project_root, &discovery) {
-            Ok(added) => {
-                if added > 0 {
-                    println!("      ✓ {} skill(s) installed into ~/.coderun/skills", added);
-                } else {
-                    println!("      (no new stack-relevant skills found)");
-                }
-            }
-            Err(e) => println!("      (skipped: {})", e),
-        }
-    }
-
     // ── Step 3: Download tree-sitter grammars ──────────────────────
-    println!("[3/8] Downloading tree-sitter grammars");
+    println!("[3/7] Downloading tree-sitter grammars");
     let lang_names: Vec<&str> = discovery.languages.iter()
         .map(|(name, _)| name.as_str())
         .filter(|name| tree_sitter_language_pack::has_language(name))
@@ -305,7 +224,7 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
     }
 
     // ── Step 4: Parser validation ────────────────────────────────────
-    println!("[4/8] Parser validation (verify tree-sitter grammars)");
+    println!("[4/7] Parser validation (verify tree-sitter grammars)");
     let mut parser_status: Vec<(String, bool, String)> = Vec::new();
     for (lang_name, _count) in &discovery.languages {
         if let Some(id) = coderun_repo_intel::registry::LanguageId::from_str(lang_name) {
@@ -332,7 +251,7 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
     }
 
     // ── Step 5: Indexing ─────────────────────────────────────────────
-    println!("[5/8] Indexing (full-text BM25 + symbol extraction)");
+    println!("[5/7] Indexing (full-text BM25 + symbol extraction)");
     let event_bus = coderun_events::EventBus::new();
     let mut repo_intel = coderun_repo_intel::RepositoryIntelligence::new(
         project_root.clone(),
@@ -379,30 +298,13 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
     let db = coderun_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
 
-    // ── Step 5: Knowledge Hub + Skills ───────────────────────────────
-    println!("[6/8] Knowledge Hub initialization + skill loading");
+    // ── Step 5: Knowledge Hub ────────────────────────────────────────
+    println!("[6/7] Knowledge Hub initialization");
     let (knowledge_seeded, _readme) = ingest_seed_documents(&project_root, &db);
-    let mut knowledge_hub = coderun_knowledge::KnowledgeHub::new(
-        coderun_storage::Database::open(&db_path)
-            .map_err(|e| format!("Failed to reopen database for Knowledge Hub: {}", e))?,
-        event_bus.clone(),
-        coderun_knowledge::KnowledgeConfig::default(),
-    );
-    let skills_dir = coderun_dir.join("skills");
-    let global_skills_dir = dirs().unwrap_or_else(|| PathBuf::from(".")).join("coderun").join("skills");
-    let mut skills_loaded = 0usize;
-    for dir in [&skills_dir, &global_skills_dir] {
-        if dir.is_dir() {
-            match knowledge_hub.load_skills(dir) {
-                Ok(n) => skills_loaded += n,
-                Err(e) => println!("      (skill loading from {}: {})", dir.display(), e),
-            }
-        }
-    }
-    println!("      ✓ knowledge: {} entries seeded, {} skills loaded", knowledge_seeded, skills_loaded);
+    println!("      ✓ knowledge: {} entries seeded", knowledge_seeded);
 
     // ── Step 6: Validation (smoke test all components) ───────────────
-    println!("[7/8] Validation queries (smoke test)");
+    println!("[7/7] Validation queries (smoke test)");
     let repo_id = coderun_core::repository_id_from_path(&project_root.to_string_lossy());
 
     // Tantivy (via RepositoryIntelligence::validate_index)
@@ -435,12 +337,8 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
     let _knowledge_ok = knowledge_seeded > 0;
     println!("      Knowledge: {} entries", knowledge_seeded);
 
-    // Skills
-    let _skills_ok = skills_loaded > 0;
-    println!("      Skills:    {} loaded", skills_loaded);
-
     // ── Step 7: Status report ────────────────────────────────────────
-    println!("[8/8] Repository profile");
+    println!("[7/7] Repository profile");
     let profile = build_profile_json(
         &project_name,
         &discovery,
@@ -467,7 +365,6 @@ fn cmd_init(wizard: bool, community_skills: bool, no_community_skills: bool) -> 
     println!("│ Graph:        {:<24} │", format!("{} edges", dep_edges));
     println!("│ Tantivy:      {:<24} │", format!("{} files", stats.files_indexed));
     println!("│ Knowledge:    {:<24} │", format!("{} entries", knowledge_seeded));
-    println!("│ Skills:       {:<24} │", format!("{} loaded", skills_loaded));
     println!("└─────────────────────────────────────────┘");
     println!();
 
@@ -638,239 +535,6 @@ fn walk_ext_counts(dir: &Path, depth: usize, counts: &mut HashMap<String, usize>
 fn ext_language(ext: &str) -> Option<&'static str> {
     // Use unified registry — single source of truth
     coderun_repo_intel::registry::language_by_extension(ext).map(|def| def.id.as_str())
-}
-
-// ── Community skills via `npx skills` (skills.sh) — TASK-038c ────────────
-
-/// Map discovery results to skills.sh search terms: frameworks first (more specific),
-/// then languages by file count. Normalized, de-duplicated, capped.
-fn stack_terms(discovery: &Discovery) -> Vec<String> {
-    // Checked AFTER normalization ("rust-workspace" already becomes "rust")
-    const GENERIC: &[&str] = &["node", "npm", "make", "cargo"];
-    let mut terms: Vec<String> = Vec::new();
-    let lang_names: std::collections::HashSet<String> =
-        discovery.languages.iter().map(|(l, _)| l.clone()).collect();
-    let push = |t: &str, terms: &mut Vec<String>| {
-        let t = t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("").to_lowercase();
-        if t.len() >= 2 && !GENERIC.contains(&t.as_str()) && !terms.contains(&t) {
-            terms.push(t);
-        }
-    };
-    for f in &discovery.frameworks {
-        // Composite framework aliases ("rust-workspace") resolve to a language name —
-        // let the languages pass place them by usage count instead of framework priority.
-        let norm = f.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("").to_lowercase();
-        if lang_names.contains(&norm) {
-            continue;
-        }
-        push(f, &mut terms);
-    }
-    for (l, _) in &discovery.languages {
-        push(l, &mut terms);
-    }
-    terms.truncate(5);
-    terms
-}
-
-/// Strip ANSI escape sequences (`\x1b[...m`) from CLI output
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for n in chars.by_ref() {
-                    if n.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Parse `npx skills find` output into ranked candidate tokens (`owner/repo@skill`).
-/// The CLI ranks by installs; we keep that order. Best-effort — unparseable output yields
-/// zero candidates and the term is skipped (we never guess sources).
-fn parse_find_candidates(find_output: &str, max_per_term: usize) -> Vec<String> {
-    let clean = strip_ansi(find_output);
-    let mut candidates = Vec::new();
-    for line in clean.lines() {
-        if !line.contains("installs") {
-            continue;
-        }
-        let token = line.trim().split_whitespace().next().unwrap_or("");
-        let Some((repo, skill)) = token.split_once('@') else { continue };
-        let valid =
-            repo.matches('/').count() == 1
-            && !repo.starts_with('/') && !repo.ends_with('/')
-            && !skill.is_empty()
-            && skill.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'));
-        if valid && !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(token)) {
-            candidates.push(token.to_string());
-            if candidates.len() >= max_per_term {
-                break;
-            }
-        }
-    }
-    candidates
-}
-
-/// Filesystem-safe directory name for a skill (`:` etc. are invalid on Windows)
-fn sanitize_dir_name(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
-        .collect()
-}
-
-/// Run a command capturing stdout with a hard timeout (drains stdout on a thread to
-/// avoid pipe-full deadlock; stderr is discarded). Returns stdout on any exit status.
-fn run_command_with_timeout(
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    timeout: std::time::Duration,
-) -> Result<String, String> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn {} failed: {}", program, e))?;
-    let mut stdout = child.stdout.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf);
-        buf
-    });
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => {
-                let out = reader.join().unwrap_or_default();
-                return Ok(out);
-            }
-            Ok(None) => {
-                if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return Err("timeout".to_string());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-}
-
-/// Recursively copy a directory tree (std has no stable copy_dir_all)
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Search skills.sh for the repo's stack and install top-ranked skills into the GLOBAL
-/// library `~/.coderun/skills/` — stack knowledge (csharp, react, …) is useful in EVERY
-/// repo of that stack, so it must not be duplicated per analyzed repo. Staging happens in
-/// a temp dir via `npx skills add … -a universal --copy` (the only writable target the
-/// CLI offers), then each skill is RELOCATED into the global library; nothing is left
-/// behind for opencode or other agents to load natively. Fail-open; time-budgeted.
-fn install_community_skills(project_root: &Path, discovery: &Discovery) -> Result<usize, String> {
-    #[cfg(windows)]
-    let npx = "npx.cmd";
-    #[cfg(not(windows))]
-    let npx = "npx";
-
-    // Probe availability cheaply before committing to the flow
-    run_command_with_timeout(npx, &["--version"], project_root, std::time::Duration::from_secs(20))
-        .map_err(|_| "npx not available".to_string())?;
-
-    // Destination: global skills library (~/.coderun/skills — same folder the installer seeds)
-    let home = dirs().ok_or("cannot resolve home directory")?;
-    let skills_dir = home.join(".coderun").join("skills");
-    std::fs::create_dir_all(&skills_dir).map_err(|e| format!("create skills dir: {}", e))?;
-
-    let mut existing: std::collections::HashSet<String> = std::fs::read_dir(&skills_dir)
-        .map(|entries| entries.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).collect())
-        .unwrap_or_default();
-
-    // Staging: transient temp dir — the npx CLI only writes into `<cwd>/.agents/skills`,
-    // so we keep that out of both the analyzed repo and $HOME.
-    let stage_root = std::env::temp_dir().join(format!("coderun_comm_stage_{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&stage_root).map_err(|e| format!("create staging dir: {}", e))?;
-    // Generous budgets: `skills add` clones the FULL source repo (some are large)
-    let total_budget = Instant::now() + std::time::Duration::from_secs(180);
-    let mut added = 0usize;
-
-    'terms: for term in stack_terms(discovery) {
-        if Instant::now() >= total_budget {
-            println!("      (time budget reached — remaining terms skipped)");
-            break;
-        }
-        let search_timeout = std::time::Duration::from_secs(25).min(total_budget.saturating_duration_since(Instant::now()));
-        let out = match run_command_with_timeout(npx, &["-y", "skills", "find", &term], &stage_root, search_timeout) {
-            Ok(out) => out,
-            Err(_) => continue,
-        };
-        for cand in parse_find_candidates(&out, 2) {
-            if Instant::now() >= total_budget {
-                break 'terms;
-            }
-            let skill_name = cand.rsplit('@').next().unwrap_or("").to_string();
-            let dir_name = sanitize_dir_name(&skill_name);
-            if skill_name.is_empty() || existing.contains(&skill_name) || existing.contains(&dir_name) {
-                continue;
-            }
-            let install_timeout = std::time::Duration::from_secs(90).min(total_budget.saturating_duration_since(Instant::now()));
-            if run_command_with_timeout(npx, &["-y", "skills", "add", &cand, "--copy", "-y", "-a", "universal"], &stage_root, install_timeout).is_err() {
-                warn_line(&format!("{} install timed out — skipped (re-run 'coderun init' to retry)", cand));
-                continue;
-            }
-            // Relocate staged <temp>/.agents/skills/<name> → ~/.coderun/skills/<name>
-            let staged = stage_root.join(".agents").join("skills").join(&skill_name);
-            let dest = skills_dir.join(&dir_name);
-            if staged.exists() && !dest.exists() {
-                let moved = std::fs::rename(&staged, &dest).or_else(|_| copy_dir_recursive(&staged, &dest));
-                match moved {
-                    Ok(()) => {
-                        let _ = std::fs::remove_dir_all(&staged);
-                        println!("      + {} → {}", cand, dest.display());
-                        existing.insert(skill_name.clone());
-                        existing.insert(dir_name.clone());
-                        added += 1;
-                    }
-                    Err(e) => warn_line(&format!("relocate {} failed: {}", cand, e)),
-                }
-            }
-        }
-    }
-
-    // Clean the transient staging tree entirely
-    let _ = std::fs::remove_dir_all(&stage_root);
-
-    Ok(added)
-}
-
-fn warn_line(msg: &str) {
-    println!("      (warn: {})", msg);
 }
 
 /// Update `.coderun/config.toml` with discovered languages so tree-sitter and other
@@ -1067,8 +731,19 @@ fn build_profile_json(
     })
 }
 
-fn cmd_index(watch: bool) -> Result<(), String> {
-    println!("Indexing repository{}...", if watch { " (watch mode — git-change-triggered incremental)" } else { "" });
+fn cmd_index(watch: bool, watch_mode: Option<&str>) -> Result<(), String> {
+    // Parse once up-front so bad values fail fast (single source of truth: WatchMode)
+    let mode = watch_mode.unwrap_or("commit").parse::<WatchMode>()
+        .map_err(|e: String| format!("Invalid watch mode: {}", e))?;
+    if !watch && watch_mode.is_some() {
+        return Err("--watch-mode requires --watch".to_string());
+    }
+    let mode_label = if watch {
+        format!(" (watch mode — {})", mode)
+    } else {
+        String::new()
+    };
+    println!("Indexing repository{}...", mode_label);
     
     let project_root = std::env::current_dir()
         .map_err(|e| format!("Failed to get current directory: {}", e))?;
@@ -1116,18 +791,40 @@ fn cmd_index(watch: bool) -> Result<(), String> {
     }
 
     if watch {
+        // The watcher callbacks run on tokio's blocking pool and call into
+        // `index_repository`, which needs &mut — share the instance behind a Mutex.
+        let watcher = repo_intel.spawn_watcher().with_mode(mode);
+        let repo_intel = std::sync::Arc::new(std::sync::Mutex::new(repo_intel));
+
         println!();
-        println!("Watching for git/file changes (Ctrl+C to stop) — polling every 5s");
-        let watcher = repo_intel.spawn_watcher();
-        let _handle = watcher.spawn(|| {
-            println!("[watcher] change detected — re-indexing...");
+        println!("Watching for changes (Ctrl+C to stop) — mode: {}", mode);
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+        rt.block_on(async move {
+            let ri = repo_intel.clone();
+            let _handle = watcher.spawn(move || {
+                println!("[watcher] change detected — re-indexing...");
+                match ri
+                    .lock()
+                    .map_err(|e| format!("watcher lock poisoned: {}", e))
+                    .and_then(|mut ri| ri.index_repository().map_err(|e| e.to_string()))
+                {
+                    Ok(stats) => println!(
+                        "[watcher] ✓ re-indexed {} files, {} symbols in {}ms",
+                        stats.files_indexed, stats.symbols_extracted, stats.duration_ms
+                    ),
+                    Err(e) => println!("[watcher] ✗ re-index failed: {}", e),
+                }
+            });
+
+            println!("(Watcher running — press Ctrl+C to stop)");
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => println!("\nCtrl+C received — watcher stopped"),
+                Err(e) => eprintln!("Failed to listen for Ctrl+C: {}", e),
+            }
         });
-        // Block until Ctrl+C (simple park)
-        println!("(Watcher running in background — press Ctrl+C to exit)");
-        // In CLI mode we just note that watch would run; actual long-running watch is daemon's job.
-        println!("Note: daemon's background watcher already handles incremental updates; CLI --watch is best-effort.");
     }
-    
+
     Ok(())
 }
 
@@ -1151,14 +848,12 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         let repo_intel = coderun_repo_intel::RepositoryIntelligence::new(project_root.clone(), coderun_storage::Database::open(&db_path).map_err(|e| e.to_string())?, event_bus.clone());
         if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.db_open_and_repo_intel_new: {}ms", _t0.elapsed().as_millis()); }
         let _t1 = Instant::now();
-        let kh = {
-            let kdb = coderun_storage::Database::open(&db_path).map_err(|e| e.to_string())?;
-            let mut hub = coderun_knowledge::KnowledgeHub::new(kdb, event_bus.clone(), coderun_knowledge::KnowledgeConfig::default());
-            // TASK-037b: merged view — repo-local skills first, global library fallback
-            let _ = hub.load_skills_from_dirs(&skill_dirs());
-            hub
-        };
-        if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.kh_db_skills: {}ms", _t1.elapsed().as_millis()); }
+        let kh = coderun_knowledge::KnowledgeHub::new(
+            coderun_storage::Database::open(&db_path).map_err(|e| e.to_string())?,
+            event_bus.clone(),
+            coderun_knowledge::KnowledgeConfig::default(),
+        );
+        if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.kh_new: {}ms", _t1.elapsed().as_millis()); }
         let core_config = coderun_core::Config::load(&project_root)
             .unwrap_or_default();
         let ctx_config = coderun_context::ContextConfig {
@@ -1185,9 +880,6 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         let _t3 = Instant::now();
         let pack = rt.block_on(ctx.build_context(&task)).map_err(|e| e.to_string())?;
         if std::env::var("CODERUN_PROFILE").is_ok() { eprintln!("[profile] cli.build_context: {}ms", _t3.elapsed().as_millis()); }
-        println!("Skills matched:");
-        if pack.behavioral_skills.is_empty() { println!("  (none — deduped or no match)"); } else { println!("  {}", pack.behavioral_skills.lines().next().unwrap_or("").trim()); if pack.behavioral_skills.contains("FROZEN PREFIX END") { println!("  [frozen-prefix boundary present ✓]"); } }
-        println!();
         println!("Knowledge entries (docs_context):");
         if pack.docs_context.is_empty() { println!("  (none)"); } else { for line in pack.docs_context.lines().take(20) { println!("  {}", line); } }
         println!();
@@ -1254,78 +946,6 @@ fn cmd_status() -> Result<(), String> {
         println!("  Run 'coderun init' to initialize");
     }
     
-    println!();
-    
-    // Check skills directory
-    let skills_dir = PathBuf::from(".coderun/skills");
-    if skills_dir.exists() {
-        let count = std::fs::read_dir(&skills_dir)
-            .map(|entries| entries.filter_map(|e| e.ok()).count())
-            .unwrap_or(0);
-        println!("Skills: {} files", count);
-    } else {
-        println!("Skills: Directory not found");
-    }
-    
-    Ok(())
-}
-
-/// Skills search path used by EVERY surface (list/validate/preview/daemon): repo-local
-/// `.coderun/skills` first (curated per repo), then the global `~/.coderun/skills`
-/// library. `load_skills_from_dirs` dedupes by name with first occurrence winning.
-fn skill_dirs() -> Vec<PathBuf> {
-    let mut search_dirs = vec![PathBuf::from(".coderun/skills")];
-    if let Some(home) = dirs() {
-        search_dirs.push(home.join(".coderun").join("skills"));
-    }
-    search_dirs
-}
-
-fn cmd_skills(action: SkillsAction) -> Result<(), String> {
-    match action {
-        SkillsAction::List => {
-            let dirs = skill_dirs();
-            if !dirs.iter().any(|d| d.is_dir()) {
-                println!("No skills directories found (.coderun/skills, ~/.coderun/skills). Run 'coderun init' or scripts/install.ps1.");
-                return Ok(());
-            }
-
-            let mut engine = coderun_skills::SkillEngine::new(dirs[0].clone());
-            let count = engine.load_skills_from_dirs(&dirs)
-                .map_err(|e| format!("Failed to load skills: {}", e))?;
-
-            if count == 0 {
-                println!("No skills found in .coderun/skills/ or ~/.coderun/skills/");
-                return Ok(());
-            }
-
-            println!("Loaded skills ({}):", count);
-            println!();
-
-            for skill in engine.get_skills() {
-                println!("  {} (tags: {})", skill.name, skill.tags.join(", "));
-            }
-        }
-        SkillsAction::Validate => {
-            let dirs = skill_dirs();
-            if !dirs.iter().any(|d| d.is_dir()) {
-                println!("No skills directories found (.coderun/skills, ~/.coderun/skills). Run 'coderun init' or scripts/install.ps1.");
-                return Ok(());
-            }
-
-            let mut engine = coderun_skills::SkillEngine::new(dirs[0].clone());
-            match engine.load_skills_from_dirs(&dirs) {
-                Ok(count) => {
-                    println!("✓ All {} skills are valid", count);
-                }
-                Err(e) => {
-                    println!("✗ Validation failed: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -1367,7 +987,7 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
             println!("Migrating config from '{}' (claude|continue|cursor)...", from);
             let project_root = std::env::current_dir().map_err(|e| e.to_string())?;
             let config = Config::load(&project_root).unwrap_or_default();
-            // Migration: scan source's skills/config locations
+            // Migration: scan source's config locations
             let candidates: Vec<PathBuf> = match from.as_str() {
                 "claude" => vec![project_root.join(".claude").join("settings.json"), dirs().unwrap_or_else(|| PathBuf::from(".")).join(".claude").join("settings.json")],
                 "continue" => vec![project_root.join(".continue").join("config.json")],
@@ -1378,14 +998,14 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
             for p in candidates {
                 if p.exists() {
                     println!("  Found {} at {}", from, p.display());
-                    // Copy skills/config heuristically: if file exists, note migration and validate
+                    // Copy config heuristically: if file exists, note migration and validate
                     found += 1;
                 }
             }
             if found == 0 {
                 println!("  No {} config found — nothing to migrate (best-effort per spec §3 Adapter Layer Tier 2).", from);
             } else {
-                println!("  Migration best-effort complete — review .coderun/config.toml and .coderun/skills/");
+                println!("  Migration best-effort complete — review .coderun/config.toml");
             }
             println!("  Config validation:");
             match config.validate() {
@@ -1398,105 +1018,21 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(feature = "workflow")]
-fn cmd_workflow(action: WorkflowAction) -> Result<(), String> {
-    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = Config::load(&project_root).unwrap_or_default();
-    // v1: workflow opt-in only — preserved in future/workflow
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-    let engine: Box<dyn coderun_core::traits::IWorkflowEngine> = if config.workflow.enabled && config.workflow.engine == "dbos" {
-        Box::new(coderun_workflow::dbos::DBOSWorkflowEngine::new(config.workflow.dbos_endpoint.clone(), config.workflow.dbos_shared_secret.clone()))
-    } else {
-        Box::new(coderun_core::traits::NoopWorkflowEngine)
-    };
-    match action {
-        WorkflowAction::Start { prompt, require_approval } => {
-            let task = coderun_core::TaskRequest { message: prompt.clone(), session_id: format!("cli-{}", uuid::Uuid::new_v4()), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
-            if require_approval { println!("Starting workflow with approval gate..."); }
-            let res = rt.block_on(engine.start_workflow(&task, &config));
-            match res {
-                Ok(id) => {
-                    println!("Workflow started: {}", id);
-                    // Persist locally as well for list/status offline
-                    if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
-                        let _ = db.upsert_workflow(&id, if require_approval { "awaiting_approval" } else { "pending" }, &prompt);
-                        let _ = db.insert_audit(Some(&id), None, "cli", &prompt, None, Some(&format!("require_approval={}", require_approval)));
-                    }
-                    println!("  Use `coderun workflow status {}` to check", id);
-                    if require_approval { println!("  Then `coderun workflow approve {}`", id); }
-                }
-                Err(e) => return Err(format!("Workflow start failed: {}", e)),
-            }
-        }
-        WorkflowAction::Status { workflow_id } => {
-            let res = rt.block_on(engine.get_status(&workflow_id));
-            match res {
-                Ok(s) => println!("{}", s),
-                Err(_) => {
-                    if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
-                        if let Ok(Some(rec)) = db.get_workflow(&workflow_id) {
-                            println!("Workflow {}: status={} task=\"{}\" created={}", rec.workflow_id, rec.status, rec.task, rec.created_at);
-                        } else {
-                            println!("Workflow {} not found (engine down and not in local DB)", workflow_id);
-                        }
-                    } else {
-                        println!("Workflow {} status unknown (engine unavailable)", workflow_id);
-                    }
-                }
-            }
-        }
-        WorkflowAction::Approve { workflow_id } => {
-            // Approve via DBOS HTTP, and update local DB
-            let endpoint = config.workflow.dbos_endpoint.clone();
-            println!("Approving workflow {} via {}...", workflow_id, endpoint);
-            // Best-effort HTTP POST to /workflow/{id}/approve
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-            let res: Result<(), String> = rt.block_on(async {
-                let client = reqwest::Client::new();
-                let url = format!("{}/workflow/{}/approve", endpoint, workflow_id);
-                let resp = client.post(&url).json(&serde_json::json!({})).send().await.map_err(|e| e.to_string())?;
-                if resp.status().is_success() { Ok(()) } else { Err(format!("approve failed: {}", resp.status())) }
-            });
-            if let Err(e) = res { println!("Approve via DBOS failed (will update local DB anyway): {}", e); }
-            if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
-                let _ = db.upsert_workflow(&workflow_id, "completed", "");
-                println!("Workflow {} approved (local DB updated)", workflow_id);
-            }
-        }
-        WorkflowAction::List => {
-            if let Ok(db) = coderun_storage::Database::open(&get_db_path()) {
-                match db.list_workflows(20) {
-                    Ok(list) if list.is_empty() => println!("No workflows yet. Start one with `coderun workflow start \"task\"`"),
-                    Ok(list) => {
-                        println!("Recent workflows:");
-                        for w in list { println!("  {} | {} | {} | {}", w.workflow_id, w.status, w.task.chars().take(40).collect::<String>(), w.created_at); }
-                    }
-                    Err(e) => println!("Failed to list workflows: {}", e),
-                }
-            } else {
-                println!("Database not initialized. Run `coderun init`.");
-            }
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::cmp_owned)]
 fn cmd_doctor() -> Result<(), String> {
-    println!("Coderun Doctor (v1 — 8 probes, workflow opt-in via --features workflow)");
+    println!("Coderun Doctor (v1 — 8 probes)");
     println!("═══════════════════════════════════════");
     println!();
     
     let mut all_ok = true;
     
-    // Check SQLite (critical) — v1: migrations 001-003 only (004/005 moved to future/workflow)
+    // Check SQLite (critical)
     print!("SQLite:          ");
     let db_path = get_db_path();
     match coderun_storage::Database::open(&db_path) {
         Ok(db) => {
             // Check migrations
             match db.get_file_count() {
-                Ok(_) => println!("✓ OK (WAL, migrations 001-003, v1)"),
+                Ok(_) => println!("✓ OK (WAL, migrations up to date)"),
                 Err(e) => { println!("✗ FAILED: {}", e); all_ok = false; }
             }
         },
@@ -1561,16 +1097,6 @@ fn cmd_doctor() -> Result<(), String> {
         if !bare_ok && exists {
             println!("  Hint: bare `coderun --version` will fail until new shell — use absolute {} --version", installed.display());
         }
-    }
-
-    // Check skills directory
-    print!("Skills directory: ");
-    let skills_dir = PathBuf::from(".coderun/skills");
-    if skills_dir.exists() {
-        let count = std::fs::read_dir(&skills_dir).map(|e| e.count()).unwrap_or(0);
-        println!("✓ OK ({} skills, {})", count, skills_dir.display());
-    } else {
-        println!("⚠ NOT FOUND (run 'coderun init')");
     }
 
     // Check repository profile
@@ -1754,12 +1280,6 @@ fn cmd_doctor() -> Result<(), String> {
         if redacted.contains("[REDACTED]") { println!("✓ OK (redaction before outbound calls)"); } else { println!("⚠ Probe failed"); }
     }
 
-    // Workflow — v1 NOT part of hot path (future/workflow only)
-    print!("Workflow/DBOS:   ");
-    {
-        println!("○ v1 disabled — preserved in future/workflow/ (opt-in --features workflow)");
-    }
-
     // Check metrics endpoint
     print!("Metrics:         ");
     {
@@ -1769,9 +1289,8 @@ fn cmd_doctor() -> Result<(), String> {
     println!();
     
     if all_ok {
-        println!("✓ All critical checks passed (v1 — DBOS/workflow disabled by default)");
-        println!("  Try: `coderun preview \"test\"`, `coderun doctor`, `coderun serve` (no DBOS required)");
-        println!("  Opt-in workflow: cargo build --features workflow && coderun --features workflow workflow start \"task\"");
+        println!("✓ All critical checks passed");
+        println!("  Try: `coderun preview \"test\"`, `coderun doctor`, `coderun serve`");
     } else {
         println!("⚠ Some checks failed. Run 'coderun init' to initialize.");
     }
@@ -1834,9 +1353,6 @@ mod tests {
         let cli = Cli::try_parse_from(["coderun", "preview", "test prompt"]);
         assert!(cli.is_ok());
         
-        let cli = Cli::try_parse_from(["coderun", "skills", "list"]);
-        assert!(cli.is_ok());
-        
         let cli = Cli::try_parse_from(["coderun", "config", "show"]);
         assert!(cli.is_ok());
         
@@ -1855,44 +1371,6 @@ mod tests {
     fn test_dirs_exists() {
         let dirs = dirs();
         assert!(dirs.is_some());
-    }
-
-    #[test]
-    fn test_stack_terms_normalized_and_capped() {
-        let d = Discovery {
-            frameworks: vec!["cargo".into(), "rust-workspace".into(), "react".into(), "node".into()],
-            languages: vec![("rust".to_string(), 40), ("typescript".to_string(), 12), ("javascript".to_string(), 3)],
-            ..Default::default()
-        };
-        let terms = stack_terms(&d);
-        assert_eq!(terms[0], "react", "frameworks come first");
-        assert!(!terms.contains(&"node".to_string()), "generic terms dropped");
-        assert!(!terms.contains(&"rust-workspace".to_string()), "aliases normalized");
-        assert!(terms.contains(&"rust".to_string()));
-        assert!(terms.len() <= 5);
-    }
-
-    #[test]
-    fn test_parse_find_candidates_real_output() {
-        // Mirrors actual `npx skills find react` output incl. ANSI color wrapping
-        let sample = "\n\u{1b}[38;5;102mInstall with\u{1b}[0m npx skills add <owner/repo@skill>\n\n\u{1b}[38;5;145mvercel-labs/agent-skills@vercel-react-best-practices\u{1b}[0m \u{1b}[36m662.8K installs\u{1b}[0m\n\u{1b}[38;5;102m└ https://skills.sh/vercel-labs/agent-skills\u{1b}[0m\n\u{1b}[38;5;145mgoogle-labs-code/stitch-skills@react:components\u{1b}[0m \u{1b}[36m50.6K installs\u{1b}[0m\n";
-        let cands = parse_find_candidates(sample, 2);
-        assert_eq!(cands[0], "vercel-labs/agent-skills@vercel-react-best-practices", "rank order preserved");
-        assert_eq!(cands[1], "google-labs-code/stitch-skills@react:components");
-    }
-
-    #[test]
-    fn test_parse_find_candidates_rejects_garbage() {
-        assert!(parse_find_candidates("", 2).is_empty());
-        let junk = "https://skills.sh/foo/bar 12 installs\nnot-a-skill 3 installs\na/b@c 5 installs";
-        let cands = parse_find_candidates(junk, 5);
-        assert_eq!(cands, vec!["a/b@c".to_string()]);
-    }
-
-    #[test]
-    fn test_sanitize_dir_name() {
-        assert_eq!(sanitize_dir_name("react:components"), "react-components");
-        assert_eq!(sanitize_dir_name("plain-skill_1.0"), "plain-skill_1.0");
     }
 
     #[test]

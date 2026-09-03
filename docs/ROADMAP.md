@@ -1,10 +1,18 @@
 # Coderun Roadmap
 
-## Current Version: v0.8.0
+> ⚠️ **Partially superseded by [V1_RUNTIME_SPEC.md](01-architecture/V1_RUNTIME_SPEC.md)** —
+> the V1 product definition (Runtime vs Coderun boundaries, out-of-scope list).
+> Where the sections below still show Model Router / Skill Engine as part of the
+> runtime, they reflect removed capabilities (Model Router v0.8.6; Skill Engine and
+> workflow — see `01-architecture/REMOVED_TOOLS.md`); the V1 spec wins where they
+> conflict.
 
-**Released:** August 28, 2026
+## Current Version: v0.9.0
+
+**Released:** September 3, 2026
 **Status:** Active
 **Crates:** 12 workspace members (+ `coderun-workflow` excluded, in `future/workflow/`)
+**Tests:** ~400
 
 ---
 
@@ -49,7 +57,7 @@
 
 **Released:** August 24, 2026 | **Tests:** 165
 
-- DBOS Transact durable workflows (optional sidecar)
+
 - Prometheus metrics (`GET /metrics`), Grafana dashboard
 - Token-bucket rate limiting, HMAC-SHA256 request signing
 - Distribution: Dockerfile, Homebrew Formula, docker-compose
@@ -79,7 +87,7 @@
 - Real `Hmac<Sha256>` (was `sha256(secret+body)`)
 - OpenSpec hook compat: `chat.message` primary + `message.updated` shim
 - Extended languages feature (Go, Java, C, C++ behind `extended-languages` flag)
-- Duplicate collapse: single skill scorer, single HMAC, single UDS listener
+- Duplicate collapse: single HMAC, single UDS listener
 
 ### v0.7.0 — Single-Command Bootstrap ✅
 
@@ -101,30 +109,57 @@
 - DBOS isolated to `future/workflow/` — not required for v1
 - `coderun doctor` works without DBOS
 
-### v0.8.0 — Current ✅
+### v0.8.0 — Minimal v1 Stack ✅
 
 **Released:** August 28, 2026
 
 - Minimal v1 stack: Tree-sitter + Tantivy + SQLite(metadata) + Git (RTK/LiteLLM optional)
-- Removed MkDocs ingestion (docs remain as plain markdown), Knowledge Hub collapsed to Repository Context, FlashRank/Engram/cbm already removed
-- Retrieval latency: global INDEX_CACHE + cached_reader, avoid STORED content fetch for candidates (CODERUN_CANDIDATE_K sweep), graph gated for doc_count>5000
-- `coderun init --community-skills` opt-in (default OFF)
-- `docs/00-project/V1_PLAN.md` + `V1_MINIMAL_STACK_PLAN.md` + `ENGRAM_CBM_REMOVAL.md`/`FLASHRANK_REMOVAL.md` ADRs
+- Removed MkDocs ingestion (docs remain as plain markdown), Knowledge Hub collapsed to Repository Context
+- Retrieval latency: global INDEX_CACHE + cached_reader, graph gated for doc_count>5000
+
+### v0.8.5 — Docs + Retrieval ✅
+
+**Released:** August 29, 2026
+
+- First-class docs indexing without tree-sitter
+- Generic ranking + docs/code split, removed domain-specific eShop code
+- Version bumped to 0.8.5
+
+### v0.8.6 — Retrieval Refactor ✅
+
+**Released:** August 30, 2026
+
+- Retrieval engine refactor + in-process ast-grep structural search
+- Removed LLM Model Router / LiteLLM — BuildContext now deterministic (MCP retained)
+- candidateK/maxFiles sweep, sanitization fix, large-repo auto-tune, MCP stdio
+
+### v0.9.0 — Retrieval Engine v1 ✅
+
+**Released:** September 3, 2026 | **Tests:** ~400
+
+- **Retrieval Engine:** Intent detection → query expansion → BM25 + structural search (ast-grep) → graph boost → ranking
+- **CombinedRetriever** orchestrates the full pipeline with configurable `RetrievalPolicy`
+- **Benchmark suite:** 4 benchmarks (components, mattermost, dt, retrieval) — 27-106× faster than grep
+- **Watch mode:** Two auto-index modes — `commit` (default, polls git HEAD) and `filesystem` (real-time via notify)
+- **Dependency updates:** tantivy 0.26.1, git2 0.21, tantivy-tokenizer-api 0.7, tree-sitter-language-pack 1.16.1
+- **Cleanup:** Removed engram, FlashRank, LiteLLM, MkDocs, DBOS workflow, `coderun replay`
+- **Benchmark report:** `docs/BENCHMARKS_V1.md`
 
 ---
 
 ## Current Architecture
 
-See [Architecture](01-architecture/ARCHITECTURE.md) and [Components](01-architecture/COMPONENTS.md) for the full specification.
+See [Architecture](01-architecture/ARCHITECTURE.md), [Components](01-architecture/COMPONENTS.md), and the V1 product definition in [V1 Runtime Spec](01-architecture/V1_RUNTIME_SPEC.md).
 
 ### Core Pipeline
 
 ```
 Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context Pack (YAML)
-                ↓                                      ↓              ↓
-          Execution Optimizer              Repository Intel    Model Router → LiteLLM
-          (tool output compression)        Knowledge Hub       → Model Provider
-                                            Skill Engine
+                ↓                                      ↓
+          Execution Optimizer              Repository Intel
+          (tool output compression)        Knowledge Hub
+                                            Retrieval Engine
+                                            (intent → expansion → BM25 + structural → graph → ranking)
 ```
 
 ### Workspace Crates
@@ -136,9 +171,7 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 | `coderun-cli` | CLI commands (init, index, preview, doctor, etc.) |
 | `coderun-context` | BuildContext pipeline, token budgeting |
 | `coderun-repo-intel` | tree-sitter, ripgrep, tantivy, graph, watcher |
-| `coderun-knowledge` | Knowledge Hub, retrieval (engram removed) |
-| `coderun-skills` | Skill matching engine |
-| `coderun-router` | Model routing, LiteLLM gateway |
+| `coderun-knowledge` | Knowledge Hub, retrieval |
 | `coderun-optimizer` | RTK compression, tool output optimization |
 | `coderun-events` | Event bus (in-memory ring buffer) |
 | `coderun-storage` | SQLite + tantivy persistence |
@@ -150,13 +183,12 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 |------|------|--------|
 | tree-sitter | AST parsing | ✅ First-class |
 | ripgrep | Text search | ✅ First-class |
-| tree-sitter Query API | Structural search (in-process `StructuralRetriever`) | ✅ First-class |
+| ast-grep | Structural search (in-process `AstGrepBackend`) | ✅ First-class |
 | tantivy | BM25 full-text index | ✅ First-class |
 | tiktoken-rs | Local token counting | ✅ First-class |
-| RTK | Tool output compression | ✅ First-class (binary) |
-| LiteLLM | Model gateway | ✅ First-class |
-| engram | Cross-session memory | ❌ Removed — see `01-architecture/ENGRAM_CBM_REMOVAL.md` |
-| codebase-memory-mcp | Dependency graph | ❌ Removed — see `01-architecture/ENGRAM_CBM_REMOVAL.md` |
+| RTK | Tool output compression | ✅ Optional (binary, built-in fallback) |
+| git2 | Commit-based auto-indexing | ✅ First-class (non-optional) |
+| notify | Filesystem watcher (real-time mode) | ✅ Optional |
 
 ---
 
@@ -176,17 +208,22 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 
 ## Future Plans
 
-### v0.8.0 — Retrieval Quality
+### v0.10.0 — Graph Boost + Cache Warming
 
-- Evaluation-driven retrieval improvements
+- Enable graph boost for cross-layer queries (Go ↔ React)
+- Pre-compute common query patterns, warm trie on repo open
+- Sub-10ms for cached queries
+
+### v1.1 — Retrieval Quality
+
 - Recall@5 target: 0.4 on 50-task eval dataset (current: ~0.29)
-- Index-time representation improvements (PascalCase splitting, symbol fields)
-- Query sanitization for code-aware tokenization
+- Structural query improvement for exhaustive "find all X" patterns
+- Tantivy phrase query panic fix (waiting for upstream tantivy 0.26.2+)
 
 ### v2.0 — Platform Extensions
 
 - Multi-repository support
-- Conversation memory (engram removed — deferred)
+- Conversation memory
 - Plugin system
 - Web dashboard
 - Distributed deployment
@@ -199,19 +236,21 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for development guidelines.
 
 ### Priority Areas
 
-1. **Retrieval quality** — Improve Recall@5 via index-time representation
-2. **Integration tests** — Test against real codebases (eShopOnWeb, etc.)
-3. **Benchmarks** — Context build p95, indexing throughput, RTK compression
-4. **Documentation** — Guides, examples, architecture clarification
+1. **Graph boost** — Cross-layer queries (Go ↔ React, backend ↔ frontend)
+2. **Cache warming** — Pre-compute common query patterns
+3. **Structural recall** — Improve exhaustive "find all X" queries
+4. **Benchmarks** — Context build p95, indexing throughput
 
 ---
 
 ## Success Metrics
 
-| Metric | v0.1.0 | v0.3.0 | v0.5.0 | v0.7.5 (current) |
-|--------|--------|--------|--------|-------------------|
-| Test coverage | 108 | 147 | 166 | ~184 |
-| Languages | 4 (tree-sitter) | 10+ | 111 (arborium) | 111 (arborium) |
-| Latency (p95) | <100ms | <50ms | <50ms | <50ms |
-| Workflow | — | Noop | DBOS (optional) | DBOS → `future/` |
-| Tool compliance | 58% | 90%+ | 15/16 | 15/16 (LSP optional) |
+| Metric | v0.1.0 | v0.3.0 | v0.5.0 | v0.7.5 | v0.9.0 (current) |
+|--------|--------|--------|--------|--------|------------------|
+| Tests | 108 | 147 | 166 | ~184 | ~400 |
+| Languages | 4 | 10+ | 111 | 111 | 111 |
+| Latency P50 | <100ms | <50ms | <50ms | <50ms | 27-49ms |
+| Speedup vs grep | — | — | — | — | 27-106× |
+| Novelty | — | — | — | — | 53-89% |
+| Workflow | — | Noop | DBOS (opt) | DBOS → future/ | Removed |
+| Tool compliance | 58% | 90%+ | 15/16 | 15/16 | 15/16 |

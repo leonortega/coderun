@@ -36,9 +36,11 @@ tree-sitter-language-pack = "1"
 ast-grep-core = "0.45"
 ast-grep-language = "0.45"
 
-# First-class Git trigger (v0.5.0): notify + git2 primary, polling fallback
+# Git is required for commit-based auto-reindex (default mode)
+git2 = "0.21"
+
+# File system watcher (optional — only needed for filesystem watch mode)
 notify = { version = "6", optional = true }
-git2 = { version = "0.21", optional = true }
 
 [features]
-git-watcher = ["dep:notify", "dep:git2"]
+fs-watcher = ["dep:notify"]

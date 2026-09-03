@@ -11,8 +11,7 @@ path = "src/main.rs"
 coderun-core.workspace = true
 coderun-storage.workspace = true
 coderun-events.workspace = true
-coderun-repo-intel.workspace = true
-coderun-skills.workspace = true
+coderun-repo-intel = { workspace = true, features = ["fs-watcher"] }
 coderun-context.workspace = true
 coderun-knowledge.workspace = true
 coderun-optimizer.workspace = true
@@ -31,5 +30,3 @@ tree-sitter-language-pack = "1"
 
 [features]
 default = []
-# v1: workflow preserved in future/workflow — not part of default workspace
-workflow = []

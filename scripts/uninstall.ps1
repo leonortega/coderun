@@ -217,9 +217,8 @@ if ($KeepBuild -or -not $doRemoveRepo) {
 Info "Removing opencode plugins..."
 $pluginProject = Join-Path $Root ".opencode\plugins\coderun.ts"
 $pluginGlobal = Join-Path $env:USERPROFILE ".config\opencode\plugins\coderun.ts"
-$hardcodedGlobalPlugin = "C:\Users\marce\.config\opencode\plugins\coderun.ts"
-# Global plugin (outside repo) - always delete (hardcoded path as requested) - plugin 'coderun'
-foreach ($g in @($pluginGlobal, $hardcodedGlobalPlugin) | Select-Object -Unique) {
+# Global plugin (outside repo) - always delete - plugin 'coderun'
+foreach ($g in @($pluginGlobal) | Select-Object -Unique) {
   if (Test-Path $g) {
     if ($PSCmdlet.ShouldProcess($g, "Remove-Item")) {
       try { Remove-Item -LiteralPath $g -Force -ErrorAction Stop; Ok "removed global plugin 'coderun'" } catch { Warn "failed to remove global plugin 'coderun': $_" }

@@ -10,6 +10,7 @@ use crate::adapter::{AdapterConfig, AdapterLayer};
 use coderun_core::Config;
 use coderun_events::EventBus;
 use coderun_knowledge::{KnowledgeConfig, KnowledgeHub};
+use coderun_repo_intel::watcher::RepoWatcher;
 use coderun_repo_intel::RepositoryIntelligence;
 use coderun_storage::Database;
 
@@ -22,6 +23,9 @@ pub struct DaemonState {
     pub db: Arc<Database>,
     pub event_bus: EventBus,
     pub context_engine: Arc<tokio::sync::Mutex<coderun_context::ContextEngine>>,
+    /// Auto-reindex watcher — owned by the state so graceful shutdown can call
+    /// `stop()` and end its poll loops instead of letting them run until process exit.
+    pub watcher: RepoWatcher,
     pub optimizer: coderun_optimizer::ExecutionOptimizer,
     pub shutdown_flag: Arc<AtomicBool>,
     pub force_shutdown_flag: Arc<AtomicBool>,
@@ -56,6 +60,9 @@ impl DaemonState {
         let repo_path = std::env::current_dir()
             .map_err(|e| format!("Failed to get current directory: {}", e))?;
 
+        // Auto-reindex watcher (started in serve(); owned here so shutdown can stop it)
+        let watcher = RepoWatcher::new(repo_path.clone()).with_mode(config.index.watch_mode);
+
         let repo_db_path = expand_path(&config.database.path);
         let repo_db = Database::open(&repo_db_path)
             .map_err(|e| format!("Failed to open database for repo-intel: {}", e))?;
@@ -72,28 +79,13 @@ impl DaemonState {
             .map_err(|e| format!("Failed to open database for knowledge: {}", e))?;
 
         let knowledge_config = KnowledgeConfig {
-            rerank_enabled: false,
             max_knowledge_entries: config.knowledge.max_knowledge_entries,
         };
-        let mut knowledge_hub = KnowledgeHub::new(
+        let knowledge_hub = KnowledgeHub::new(
             knowledge_db,
             event_bus.clone(),
             knowledge_config,
         );
-
-        // TASK-037b: merged skills view — repo-local `.coderun/skills` first, then the
-        // global `~/.coderun/skills` library. Best-effort, never fatal.
-        {
-            let mut skill_dirs = vec![std::path::PathBuf::from(".coderun/skills")];
-            skill_dirs.push(expand_path("~/.coderun/skills"));
-            match knowledge_hub.load_skills_from_dirs(&skill_dirs) {
-                Ok(count) => {
-                    let loaded: Vec<String> = skill_dirs.iter().filter(|d| d.is_dir()).map(|d| d.display().to_string()).collect();
-                    info!(skills = count, dirs = ?loaded, "loaded skills library (repo + global)")
-                }
-                Err(e) => warn!(error = %e, "failed to load skills (continuing without)"),
-            }
-        }
 
         // Initialize context engine
         let context_config = coderun_context::ContextConfig {
@@ -121,6 +113,7 @@ impl DaemonState {
             db: Arc::new(db),
             event_bus,
             context_engine: Arc::new(tokio::sync::Mutex::new(context_engine)),
+            watcher,
             optimizer,
             shutdown_flag,
             force_shutdown_flag,
@@ -134,50 +127,123 @@ impl DaemonState {
         // Print startup banner
         print_banner(&self.config);
 
-        // Start background indexing
+        // ── Readiness signal ────────────────────────────────────────────────
+        // Default is already Indexing, but set it explicitly so the state machine
+        // is obvious: indexing → ready → (indexing during auto-reindexes) → ready.
+        crate::metrics::global().set_readiness(crate::metrics::Readiness::Indexing);
+
+        // ── HTTP health/metrics listener binds FIRST ────────────────────────
+        // GET /health and GET /metrics are reachable while the initial index runs
+        // so clients can poll readiness; POST /hook returns 503 (daemon_indexing)
+        // until the index completes instead of queueing on the engine lock.
+        let http_state = crate::http_server::HttpServerState {
+            context_engine: self.context_engine.clone(),
+            optimizer: std::sync::Arc::new(self.optimizer.clone()),
+        };
+        let http_port = 9527;
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = crate::http_server::start_http_server(http_port, http_state).await {
+                error!(error = %e, "HTTP server error");
+            }
+        });
+
+        // ── Startup indexing — READINESS GATED ──────────────────────────────
+        // The UDS/MessagePack adapter does NOT bind until the initial index
+        // finishes (success or failure), so no request on the primary transport can
+        // ever wait on the engine lock mid-index or race a half-built index.
+        // Indexing goes through the ContextEngine — the SAME single index path the
+        // auto-reindex watcher uses below — and runs on tokio's blocking pool.
+        // (A Ctrl+C/SIGTERM during this phase terminates the process; only the
+        // health/metrics HTTP listener is up, so there is nothing to drain.)
         let indexing_db_path = expand_path(&self.config.database.path);
-        let event_bus_clone = self.event_bus.clone();
-        let repo_path = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current directory: {}", e))?;
-        let repo_path_clone = repo_path.clone();
-        let indexing_handle = tokio::spawn(async move {
-            info!("Starting background indexing...");
-            let indexing_db = match Database::open(&indexing_db_path) {
-                Ok(db) => db,
-                Err(e) => {
-                    error!(error = %e, "Failed to open database for indexing");
-                    return;
+        let indexing_engine = self.context_engine.clone();
+        info!("Running initial repository indexing (UDS adapter binds when it completes; HTTP /hook returns 503 until ready)...");
+        // blocking_lock is safe here: spawn_blocking thread, never an async task.
+        let result = tokio::task::spawn_blocking(move || {
+            indexing_engine.blocking_lock().reindex_repository(None)
+        })
+        .await;
+        match result {
+            Ok(Ok(stats)) => {
+                // TASK-034/F-5: report the REAL indexed-file count from SQLite —
+                // `files_indexed` is per-run (incremental runs are small); the store
+                // handle used by reindex_repository is already dropped.
+                let file_count = Database::open(&indexing_db_path).and_then(|db| db.get_file_count());
+                match file_count {
+                    Ok(count) => crate::metrics::global().set_index_files(count),
+                    Err(_) => crate::metrics::global().set_index_files(stats.files_indexed),
                 }
-            };
-            let mut repo_intel = RepositoryIntelligence::new(
-                repo_path_clone,
-                indexing_db,
-                event_bus_clone,
-            );
-            let result = repo_intel.index_repository();
-            drop(repo_intel);
-            match result {
+                info!(
+                    files = stats.files_indexed,
+                    symbols = stats.symbols_extracted,
+                    duration_ms = stats.duration_ms,
+                    "Initial indexing complete — binding listeners"
+                );
+            }
+            Ok(Err(e)) => {
+                // Bind anyway: retrieval degrades to the ripgrep fallback and the
+                // watcher below keeps retrying on repo changes.
+                crate::metrics::global().inc_fail_open();
+                error!(error = %e, "Initial indexing failed — binding listeners anyway");
+            }
+            Err(join_err) => {
+                crate::metrics::global().inc_fail_open();
+                error!(error = %join_err, "Initial indexing panicked — binding listeners anyway");
+            }
+        }
+
+        // Initial index done (success or failure — we serve either way): flip
+        // readiness so /hook accepts requests and clients stop polling.
+        crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
+
+        // ── Auto-reindex watcher ────────────────────────────────────────────
+        // Re-indexes when the repo changes after startup (mode from `[index].watch_mode`:
+        // "commit" on new git commits, "filesystem" on any file change). The initial
+        // index above already finished (readiness gate), so the watcher starts here and
+        // the two never write to the SQLite/tantivy stores concurrently. `self.watcher`
+        // is owned by DaemonState so graceful shutdown can call `stop()` — the poll
+        // loop exits instead of running until process exit.
+        let watcher_db_path = expand_path(&self.config.database.path);
+        let watcher_engine = self.context_engine.clone();
+        info!(mode = %self.watcher.mode(), "Starting auto-reindex watcher");
+
+        // Callback runs on tokio's blocking pool — safe to do a full index walk.
+        // Re-indexing goes THROUGH the shared ContextEngine (not an ad-hoc
+        // RepositoryIntelligence), so the engine's cached tantivy handles are
+        // invalidated on completion and queries issued right after a change serve
+        // the fresh commit immediately instead of from a stale reader.
+        // `blocking_lock` is deliberate: this runs on a blocking thread, never
+        // inside an async task, so it cannot deadlock the runtime.
+        // The JoinHandle is retained so graceful shutdown can await the loop's exit.
+        let watch_handle = self.watcher.spawn(move || {
+            // Flip to indexing so /health + /metrics report the reindex and /hook
+            // 503s — clients back off instead of queueing on the engine lock.
+            crate::metrics::global().set_readiness(crate::metrics::Readiness::Indexing);
+            let t0 = std::time::Instant::now();
+            let engine = watcher_engine.blocking_lock();
+            match engine.reindex_repository(None) {
                 Ok(stats) => {
-                    // TASK-034/F-5: report the REAL indexed-file count from SQLite after
-                    // indexing completes — `files_indexed` is per-run (incremental runs are small).
-                    // Re-open a connection since `indexing_db` was moved into repo_intel.
-                    let file_count = Database::open(&indexing_db_path).and_then(|db| db.get_file_count());
-                    match file_count {
-                        Ok(count) => crate::metrics::global().set_index_files(count),
-                        Err(_) => crate::metrics::global().set_index_files(stats.files_indexed),
-                    }
+                    // Report the REAL indexed-file count from SQLite (the reindex
+                    // wrote through the engine's DB connection to the same store).
+                    let file_count = Database::open(&watcher_db_path)
+                        .and_then(|db| db.get_file_count())
+                        .unwrap_or(stats.files_indexed);
+                    crate::metrics::global().set_index_files(file_count);
                     info!(
                         files = stats.files_indexed,
                         symbols = stats.symbols_extracted,
                         duration_ms = stats.duration_ms,
-                        "Background indexing complete"
+                        took_ms = t0.elapsed().as_millis(),
+                        "Auto-reindex complete"
                     );
                 }
                 Err(e) => {
                     crate::metrics::global().inc_fail_open();
-                    error!(error = %e, "Background indexing failed");
+                    error!(error = %e, "Auto-reindex failed");
                 }
             }
+            // Reindex done (success or failure) — serve again.
+            crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
         });
 
         // Start UDS/MessagePack adapter (primary per spec §2) + HTTP fallback
@@ -230,10 +296,39 @@ impl DaemonState {
                     let hook_type = request.hook_type.clone();
                     // TASK-021 single trace: request→context→router→model→optimizer with repository_id+timestamp
                     tracing::info!(correlation_id=%correlation_id, repository_id=%request.repository_id, timestamp=%request.timestamp, hook_type=?hook_type, "UDS request received — trace start");
+
+                    // Readiness probe — lightweight parity with GET /health: never
+                    // gated (must answer during indexing), never rate-limited, no
+                    // engine lock. Clients poll until `state == "ready"` before
+                    // sending real requests.
+                    fn probe_payload() -> ResponsePayload {
+                        let m = crate::metrics::global();
+                        ResponsePayload::Probe {
+                            state: m.readiness_str().to_string(),
+                            index_files: m.index_files(),
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                        }
+                    }
+                    if matches!(&request.payload, RequestPayload::Probe) {
+                        let resp = AgentResponse {
+                            correlation_id: correlation_id.clone(),
+                            hook_type: hook_type.clone(),
+                            payload: probe_payload(),
+                            latency_ms: 0,
+                            error: None,
+                        };
+                        let bytes = rmp_serde::to_vec(&resp).map_err(|e| format!("encode: {e}"))?;
+                        let len_bytes = (bytes.len() as u32).to_be_bytes();
+                        stream.write_all(&len_bytes).await.map_err(|e| format!("write len: {e}"))?;
+                        stream.write_all(&bytes).await.map_err(|e| format!("write body: {e}"))?;
+                        return Ok(());
+                    }
+
                     // Rate limiting per session_id
                     let session_key = match &request.payload {
                         RequestPayload::MessageRewrite { session_id, .. } => session_id.clone(),
                         RequestPayload::ToolOutput { tool_name, .. } => tool_name.clone(),
+                        RequestPayload::Probe => "probe".to_string(),
                     };
                     if rate_limiter.is_rate_limited(&session_key) {
                         crate::metrics::global().inc_fail_open();
@@ -251,6 +346,7 @@ impl DaemonState {
                     let repository_path = match &payload_clone {
                         RequestPayload::MessageRewrite { repository_path, .. } => repository_path.clone(),
                         RequestPayload::ToolOutput { repository_path, .. } => repository_path.clone(),
+                        RequestPayload::Probe => None,
                     };
                     let fut = async {
                         match payload_clone {
@@ -270,7 +366,7 @@ impl DaemonState {
                                 let eng = engine.lock().await;
                                 match eng.build_context(&task).await {
                                     Ok(pack) => {
-                                        crate::metrics::global().inc_requests("PreGeneration", "balanced");
+                                        crate::metrics::global().inc_requests("PreGeneration");
                                         crate::metrics::global().observe_context_tokens(pack.token_usage.total_tokens);
                                         let recall = if !pack.code_context.is_empty() { 0.85 } else { 0.0 };
                                         crate::metrics::global().set_retrieval_recall(recall);
@@ -301,6 +397,8 @@ impl DaemonState {
                                 tracing::info!(tool=%tool_name, saved=%r.original_tokens.saturating_sub(r.compressed_tokens), "trace: optimizer (UDS)");
                                 ResponsePayload::CompressedOutput { original: content, compressed: r.compressed, original_tokens: r.original_tokens, compressed_tokens: r.compressed_tokens }
                             }
+                            // Unreachable (probes return before rate limiting) but honest if reached.
+                            RequestPayload::Probe => probe_payload(),
                         }
                     };
                     let payload = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
@@ -357,18 +455,6 @@ impl DaemonState {
         })
         };
 
-        // HTTP server remains as fallback for Windows/dev convenience (JSON over TCP 9527)
-        let http_state = crate::http_server::HttpServerState {
-            context_engine: self.context_engine.clone(),
-            optimizer: std::sync::Arc::new(self.optimizer.clone()),
-        };
-        let http_port = 9527;
-        let http_handle = tokio::spawn(async move {
-            if let Err(e) = crate::http_server::start_http_server(http_port, http_state).await {
-                error!(error = %e, "HTTP server error");
-            }
-        });
-
         // Wait for shutdown signal
         info!("Daemon ready. Press Ctrl+C to shutdown.");
         wait_for_shutdown(self.shutdown_flag.clone(), self.force_shutdown_flag.clone()).await;
@@ -380,8 +466,10 @@ impl DaemonState {
         let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
         let _ = tokio::time::timeout(Duration::from_secs(5), adapter_handle).await;
 
-        // Wait for indexing to finish
-        let _ = tokio::time::timeout(Duration::from_secs(10), indexing_handle).await;
+        // Stop the auto-reindex watcher and wait for its poll loop to exit
+        // (commit mode: within one poll interval; filesystem: within ~1s + debounce).
+        self.watcher.stop();
+        let _ = tokio::time::timeout(Duration::from_secs(10), watch_handle).await;
 
         // Cleanup
         cleanup(&self.config.daemon.socket_path);
