@@ -12,7 +12,6 @@ members = [
     "crates/knocode-storage",
     "crates/knocode-bench",
 ]
-exclude = ["crates/knocode-workflow", "future/workflow", "workflow/dbos"]
 
 [workspace.package]
 # ── VERSION SINGLE SOURCE OF TRUTH ─────────────────────────────────────
@@ -84,7 +83,6 @@ knocode-context = { path = "crates/knocode-context" }
 knocode-optimizer = { path = "crates/knocode-optimizer" }
 knocode-daemon = { path = "crates/knocode-daemon" }
 knocode-cli = { path = "crates/knocode-cli" }
-# future/workflow — opt-in only: knocode-workflow = { path = "crates/knocode-workflow" }
 
 # ── Disk space optimization ────────────────────────────────────────────────
 [profile.dev]

@@ -1,14 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Knocode installer v0.8.0 minimal (Windows PowerShell 5.1)
+  Knocode installer v0.9.6 minimal (Windows PowerShell 5.1)
   Installs minimal v1 stack + uses prebuilt knocode (no compile/test). Idempotent - re-run to update.
 
 .DESCRIPTION
   Minimal v1: Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
          RTK (optional) - no Rust needed (prebuilt binaries; compile via scripts/compile.*)
   Deferred/optional: promptfoo - install only with -WithOptional
-  Prebuilt: target/release/knocode.exe + knocode-daemon.exe are used directly (no cargo build/test).
+  Agent integrations: OpenCode, Codex, Copilot (VS Code), Cursor - select one or more at install
+  (default: all). Prebuilt: target/release/knocode.exe + knocode-daemon.exe are used directly.
 
 .PARAMETER SkipBuild
   Deprecated - build is always skipped (prebuilt binary at target/release/knocode.exe is used). Kept for compat.
@@ -16,11 +17,25 @@
 .PARAMETER SkipExternal
   Skip external tool installs (only config + doctor)
 
+.PARAMETER Agents
+  Comma-separated agent list to wire, e.g. "-Agents opencode,codex". Valid: opencode, codex, copilot, cursor.
+
+.PARAMETER AllAgents
+  Install agent integrations for all supported agents (default when interactive prompt is not possible).
+
+.PARAMETER NoAgents
+  Skip agent integrations entirely (binaries + config + doctor only).
+
+.PARAMETER SkipPrereqs
+  Do not auto-install missing prerequisites (Node.js, Git) - only warn/fail.
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1
-  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -SkipExternal
+  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode,cursor
+  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -AllAgents
+  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -NoAgents -SkipExternal
 #>
-param([switch]$SkipBuild, [switch]$SkipExternal, [switch]$WithOptional)
+param([switch]$SkipBuild, [switch]$SkipExternal, [switch]$WithOptional, [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$SkipPrereqs)
 
 $ErrorActionPreference = "Stop"
 # Always English in scripts (avoid localized ShouldProcess/WhatIf)
@@ -35,7 +50,94 @@ function Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Skip($m) { Write-Host "  [SKIP] $m" -ForegroundColor DarkGray }
 function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
 
+# Prerequisite auto-install helpers - the installer installs what it needs,
+# nothing depends on the user (use -SkipPrereqs to opt out).
+function Add-ToUserPath($dir) {
+  try {
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($null -eq $userPath) { $userPath = "" }
+    $entries = $userPath -split ';' | Where-Object { $_ -ne '' }
+    if ($entries -notcontains $dir) { [Environment]::SetEnvironmentVariable('Path', (($entries + $dir) -join ';'), 'User') }
+  } catch { Warn "could not persist PATH for $dir : $_" }
+  if (($env:Path -split ';') -notcontains $dir) { $env:Path = "$dir;$env:Path" }
+}
+function Install-NodeIfMissing {
+  Info "Installing Node.js LTS (per-user, no admin)..."
+  try {
+    $idx = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -UseBasicParsing -TimeoutSec 30
+    $lts = $idx | Where-Object { $_.lts } | Select-Object -First 1
+    if (-not $lts) { throw "could not determine Node.js LTS version" }
+    $ver = $lts.version
+    $tmp = Join-Path $env:TEMP ("knocode_node_" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    try {
+      $zip = Join-Path $tmp "node.zip"
+      Invoke-WebRequest -Uri "https://nodejs.org/dist/$ver/node-$ver-win-x64.zip" -OutFile $zip -UseBasicParsing
+      $ex = Join-Path $tmp "x"
+      Expand-Archive -LiteralPath $zip -DestinationPath $ex -Force
+      $nodeRoot = Get-ChildItem -LiteralPath $ex -Directory | Select-Object -First 1
+      if (-not $nodeRoot) { throw "Node.js archive is malformed" }
+      $nodeDir = Join-Path $env:LOCALAPPDATA "Programs\nodejs"
+      New-Item -ItemType Directory -Force -Path $nodeDir | Out-Null
+      Copy-Item -Path (Join-Path $nodeRoot.FullName "*") -Destination $nodeDir -Recurse -Force
+      Add-ToUserPath $nodeDir
+      Ok "Node.js $ver installed to $nodeDir"
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+  } catch { Warn "Node.js auto-install failed: $($_.Exception.Message)" }
+}
+function Install-GitIfMissing {
+  Info "Installing Git for Windows (per-user, silent)..."
+  try {
+    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ "User-Agent" = "knocode-installer" } -UseBasicParsing
+    $asset = $rel.assets | Where-Object { $_.name -match "^\d+\.\d+\.\d+.*-64-bit\.exe$" } | Select-Object -First 1
+    if (-not $asset) { throw "no 64-bit installer asset found in $($rel.tag_name)" }
+    $exe = Join-Path $env:TEMP "git-setup.exe"
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exe -UseBasicParsing
+    $p = Start-Process -FilePath $exe -ArgumentList "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/CURRENTUSER" -Wait -PassThru
+    Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+    if ($p.ExitCode -ne 0) { throw "git installer exited with code $($p.ExitCode)" }
+    $gitCmd = Join-Path $env:LOCALAPPDATA "Programs\Git\cmd"
+    if (Test-Path (Join-Path $gitCmd "git.exe")) { Add-ToUserPath $gitCmd }
+    Ok "Git installed (per-user, $($rel.tag_name))"
+  } catch { Warn "Git auto-install failed: $($_.Exception.Message)" }
+}
+
+# --- Agent catalog & selection -------------------------------------------------
+$AgentCatalog = @("opencode", "codex", "copilot", "cursor")
+
+function Select-Agents {
+  if ($NoAgents) { return @() }
+  if ($Agents -ne "") {
+    $sel = @()
+    foreach ($a in ($Agents -split ",")) {
+      $a = $a.Trim().ToLower()
+      if ($AgentCatalog -contains $a) { $sel += $a } else { Warn "unknown agent '$a' - valid: $($AgentCatalog -join ', ')" }
+    }
+    if ($sel.Count -eq 0) { Fail "no valid agents in -Agents ('$Agents')" }
+    return ($sel | Select-Object -Unique)
+  }
+  if ($AllAgents) { return @($AgentCatalog) }
+
+  # Interactive multi-select when stdin is a console; default to ALL otherwise
+  $interactive = $true
+  try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { $interactive = $false }
+  if (-not $interactive) {
+    Info "non-interactive run - installing agent integrations for ALL agents (use -Agents opencode,cursor or -NoAgents to change)"
+    return @($AgentCatalog)
+  }
+  Info "Which agent integrations should be installed? (default Yes for each)"
+  $sel = @()
+  foreach ($a in $AgentCatalog) {
+    $r = Read-Host "  Wire up $a ? [Y/n]"
+    if ($r -eq "" -or $r -match "^(y|yes)$") { $sel += $a } else { Skip "$a skipped" }
+  }
+  if ($sel.Count -eq 0) { Info "no agent integrations selected" }
+  return $sel
+}
+
 Info "Knocode installer"
+$agentSel = @(Select-Agents)
+if ($agentSel.Count -gt 0) { Info "Agent integrations: $($agentSel -join ', ')" } else { Info "Agent integrations: none" }
 
 # 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~\.knocode\bin)
 # and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
@@ -49,7 +151,9 @@ foreach ($procName in @("knocode-daemon", "knocode")) {
 #    compile. Source builds use scripts/compile.* (or CI). Rust/clippy were removed from the
 #    installer when it stopped compiling.
 
-if (-not (Test-Cmd node)) { Warn "node not found - install Node >=20 https://nodejs.org then re-run"; } else { Ok "node $(node --version)" }
+if (-not (Test-Cmd node)) {
+  if ($SkipPrereqs) { Warn "node not found - install Node >=20 https://nodejs.org (or re-run without -SkipPrereqs)" } else { Install-NodeIfMissing }
+} else { Ok "node $(node --version)" }
 if (-not (Test-Cmd python) -and -not (Test-Cmd python3)) {
   Info "python not found - installing Python 3.13..."
   try {
@@ -70,7 +174,9 @@ if (-not (Test-Cmd python) -and -not (Test-Cmd python3)) {
     if (Test-Cmd python -or Test-Cmd python3) { Ok "python $((python --version 2>&1) -join ' ')" } else { Warn "python install attempted but python not on PATH - install manually: https://www.python.org/downloads/ (check 'Add to PATH')" }
   } catch { Warn "python auto-install failed - $_ (install manually: https://www.python.org/downloads/)" }
 } else { Ok "python $((python --version 2>&1) -join ' ')" }
-if (-not (Test-Cmd git)) { Fail "git not found" } else { Ok "git $(git --version)" }
+if (-not (Test-Cmd git)) {
+  if ($SkipPrereqs) { Fail "git not found" } else { Install-GitIfMissing; if (-not (Test-Cmd git)) { Fail "git not found after auto-install" } }
+} else { Ok "git $(git --version)" }
 
 if ($SkipExternal) { Info "Skipping external tools (--SkipExternal)" }
 else {
@@ -209,117 +315,160 @@ $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try { & $installedCli doctor } catch {}
 $ErrorActionPreference = $prevEA2
 
-# 3. opencode plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
-Info "Configuring opencode plugin..."
-$opencodeDir = Join-Path $Root ".opencode"   # legacy project dir - cleaned below
-$ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
-$ocGlobalCfg = Join-Path $ocGlobalDir "opencode.jsonc"
-New-Item -ItemType Directory -Force -Path $ocGlobalDir | Out-Null
-# Global config: plugin only
-$opencodeJsonc = @"
+# =====================================================================================
+# 3. Agent integrations (OpenCode / Codex / Copilot / Cursor) - selected above
+# =====================================================================================
+if ($agentSel.Count -gt 0) {
+  $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
+  $mcpDist = Join-Path $Root "packages\knocode-mcp\dist\index.js"
+  $wantMcp = @($agentSel | Where-Object { $_ -in @("codex", "copilot", "cursor") }).Count -gt 0
+
+  # --- shared MCP server build (Codex, Copilot, Cursor all use knocode-mcp) ---
+  if ($wantMcp) {
+    $mcpDir = Join-Path $Root "packages\knocode-mcp"
+    if (Test-Path $mcpDir) {
+      if (-not (Test-Path $mcpDist)) {
+        if (Test-Cmd npm) {
+          Info "Building knocode-mcp MCP server..."
+          Push-Location $mcpDir
+          try {
+            & npm install --silent 2>&1 | Out-Null
+            & npm run build --silent 2>&1 | Out-Null
+            if (Test-Path $mcpDist) { Ok "knocode-mcp built to packages/knocode-mcp/dist" } else { Warn "knocode-mcp build failed - run: cd packages/knocode-mcp; npm install; npm run build" }
+          } catch { Warn "knocode-mcp build failed: $_" }
+          Pop-Location
+        } else { Warn "npm not found - cannot build knocode-mcp (MCP agents need Node.js)" }
+      } else { Ok "knocode-mcp dist at packages/knocode-mcp/dist/index.js" }
+    } else { Warn "packages/knocode-mcp not found - skipping MCP server build" }
+  }
+
+  $mcpServer = @{ command = "node"; args = @($mcpDist); env = @{ KNOCODE_DAEMON_URL = "http://127.0.0.1:9527" } }
+
+  # --- OpenCode: global plugin + skill (~/.config/opencode) ---
+  if ($agentSel -contains "opencode") {
+    Info "Configuring opencode plugin (GLOBAL: ~/.config/opencode)..."
+    New-Item -ItemType Directory -Force -Path $ocGlobalDir | Out-Null
+    $ocGlobalCfg = Join-Path $ocGlobalDir "opencode.jsonc"
+    $opencodeJsonc = @"
 {
     "`$schema": "https://opencode.ai/config.json",
     "plugin": ["opencode-knocode"]
 }
 "@
-try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode plugin at $ocGlobalCfg" } catch { Warn "failed to write $ocGlobalCfg : $_" }
-# Remove legacy paths
-$globalPlugin = "$env:USERPROFILE\.config\opencode\plugins\knocode.ts"
-if (Test-Path $globalPlugin) { try { Remove-Item -LiteralPath $globalPlugin -Force } catch {} }
-$localPlugin = Join-Path $opencodeDir "plugins\knocode.ts"
-if (Test-Path $localPlugin) { try { Remove-Item -LiteralPath $localPlugin -Force } catch {} }
-foreach ($f in @((Join-Path $opencodeDir "opencode.jsonc"), (Join-Path $opencodeDir "opencode.json"), (Join-Path $opencodeDir "package.json"), (Join-Path $opencodeDir "package-lock.json"))) {
-  if (Test-Path $f) { try { Remove-Item -LiteralPath $f -Force } catch {} }
-}
-
-# Ensure npm plugin is built
-$pluginDir = Join-Path $Root "packages\opencode-knocode"
-$pluginDist = Join-Path $pluginDir "dist\index.js"
-if (Test-Path $pluginDir) {
-  if (-not (Test-Path $pluginDist)) {
-    if (Test-Cmd npm) {
-      Info "Building opencode-knocode npm package..."
-      Push-Location $pluginDir
-      try {
-        & npm install --silent 2>&1 | Out-Null
-        & npm run build --silent 2>&1 | Out-Null
-        if (Test-Path $pluginDist) { Ok "opencode-knocode built to packages/opencode-knocode/dist" } else { Warn "opencode-knocode build failed - run: cd packages/opencode-knocode; npm install; npm run build" }
-      } catch { Warn "opencode-knocode build failed: $_" }
-      Pop-Location
-    } else { Warn "npm not found - cannot build opencode-knocode (install Node.js 18+)" }
-  } else { Ok "opencode-knocode dist at packages/opencode-knocode/dist/index.js" }
-  if (Test-Cmd npm) {
-    $pkgJson = Join-Path $ocGlobalDir "package.json"
-    $pluginFileRef = "file:" + ((Join-Path $Root "packages\opencode-knocode") -replace '\\','/')
-    if (-not (Test-Path $pkgJson)) {
-      try { Set-Content -LiteralPath $pkgJson -Value (@{ dependencies = @{ "@opencode-ai/plugin" = "1.18.22"; "opencode-knocode" = $pluginFileRef } } | ConvertTo-Json -Depth 10) -Encoding UTF8 } catch {}
-    } else {
-      try {
-        $j = Get-Content -LiteralPath $pkgJson -Raw | ConvertFrom-Json
-        if (-not $j.dependencies) { $j | Add-Member -NotePropertyName dependencies -NotePropertyValue @{} }
-        $j.dependencies."opencode-knocode" = $pluginFileRef
-        if (-not $j.dependencies.PSObject.Properties["@opencode-ai/plugin"]) { $j.dependencies | Add-Member -NotePropertyName "@opencode-ai/plugin" -NotePropertyValue "1.18.22" }
-        $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJson -Encoding UTF8
-      } catch {}
+    try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode plugin at $ocGlobalCfg" } catch { Warn "failed to write $ocGlobalCfg : $_" }
+    # Remove legacy paths
+    $globalPlugin = "$env:USERPROFILE\.config\opencode\plugins\knocode.ts"
+    if (Test-Path $globalPlugin) { try { Remove-Item -LiteralPath $globalPlugin -Force } catch {} }
+    $localPlugin = Join-Path $Root ".opencode\plugins\knocode.ts"
+    if (Test-Path $localPlugin) { try { Remove-Item -LiteralPath $localPlugin -Force } catch {} }
+    foreach ($f in @((Join-Path $Root ".opencode\opencode.jsonc"), (Join-Path $Root ".opencode\opencode.json"), (Join-Path $Root ".opencode\package.json"), (Join-Path $Root ".opencode\package-lock.json"))) {
+      if (Test-Path $f) { try { Remove-Item -LiteralPath $f -Force } catch {} }
     }
-    Push-Location $ocGlobalDir
-    try { & npm install --silent 2>&1 | Out-Null; if (Test-Path "node_modules\opencode-knocode\dist\index.js") { Ok "opencode-knocode plugin installed" } else { Warn "opencode-knocode npm install failed" } } catch { Warn "opencode-knocode npm install failed: $_" }
-    Pop-Location
-  }
-} else { Warn "packages/opencode-knocode not found - skipping npm plugin install" }
-
-# 3a. Knocode agent skill (opencode - agent-native discovery; per-agent: opencode is the only supported agent for now)
-# Global ~\.config\opencode\skills\<name>\SKILL.md applies to EVERY project (same pattern as the plugin).
-$ocSkillSrc = Join-Path $Root ".opencode\skills\knocode"
-if (Test-Path (Join-Path $ocSkillSrc "SKILL.md")) {
-  try {
-    New-Item -ItemType Directory -Force -Path (Join-Path $ocGlobalDir "skills") | Out-Null
-    Copy-Item -LiteralPath $ocSkillSrc -Destination (Join-Path $ocGlobalDir "skills\knocode") -Recurse -Force
-    Ok "knocode skill installed to $env:USERPROFILE\.config\opencode\skills\knocode (opencode agent-native)"
-  } catch { Warn "knocode skill copy failed: $_" }
-} else { Warn ".opencode\skills\knocode not found - skipping agent skill install" }
-
-# 3b. knocode-mcp MCP server (agent-agnostic: Codex, Copilot, Claude) — stdio -> http proxy to daemon
-$mcpDir = Join-Path $Root "packages\knocode-mcp"
-$mcpDist = Join-Path $mcpDir "dist\index.js"
-if (Test-Path $mcpDir) {
-  if (-not (Test-Path $mcpDist)) {
-    if (Test-Cmd npm) {
-      Info "Building knocode-mcp MCP server..."
-      Push-Location $mcpDir
+    # Ensure npm plugin is built + installed into the global opencode config
+    $pluginDir = Join-Path $Root "packages\opencode-knocode"
+    $pluginDist = Join-Path $pluginDir "dist\index.js"
+    if (Test-Path $pluginDir) {
+      if (-not (Test-Path $pluginDist)) {
+        if (Test-Cmd npm) {
+          Info "Building opencode-knocode npm package..."
+          Push-Location $pluginDir
+          try {
+            & npm install --silent 2>&1 | Out-Null
+            & npm run build --silent 2>&1 | Out-Null
+            if (Test-Path $pluginDist) { Ok "opencode-knocode built to packages/opencode-knocode/dist" } else { Warn "opencode-knocode build failed - run: cd packages/opencode-knocode; npm install; npm run build" }
+          } catch { Warn "opencode-knocode build failed: $_" }
+          Pop-Location
+        } else { Warn "npm not found - cannot build opencode-knocode (install Node.js 18+)" }
+      } else { Ok "opencode-knocode dist at packages/opencode-knocode/dist/index.js" }
+      if (Test-Cmd npm) {
+        $pkgJson = Join-Path $ocGlobalDir "package.json"
+        $pluginFileRef = "file:" + ((Join-Path $Root "packages\opencode-knocode") -replace '\\','/')
+        if (-not (Test-Path $pkgJson)) {
+          try { Set-Content -LiteralPath $pkgJson -Value (@{ dependencies = @{ "@opencode-ai/plugin" = "1.18.22"; "opencode-knocode" = $pluginFileRef } } | ConvertTo-Json -Depth 10) -Encoding UTF8 } catch {}
+        } else {
+          try {
+            $j = Get-Content -LiteralPath $pkgJson -Raw | ConvertFrom-Json
+            if (-not $j.dependencies) { $j | Add-Member -NotePropertyName dependencies -NotePropertyValue @{} }
+            $j.dependencies."opencode-knocode" = $pluginFileRef
+            if (-not $j.dependencies.PSObject.Properties["@opencode-ai/plugin"]) { $j.dependencies | Add-Member -NotePropertyName "@opencode-ai/plugin" -NotePropertyValue "1.18.22" }
+            $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJson -Encoding UTF8
+          } catch {}
+        }
+        Push-Location $ocGlobalDir
+        try { & npm install --silent 2>&1 | Out-Null; if (Test-Path "node_modules\opencode-knocode\dist\index.js") { Ok "opencode-knocode plugin installed" } else { Warn "opencode-knocode npm install failed" } } catch { Warn "opencode-knocode npm install failed: $_" }
+        Pop-Location
+      }
+    } else { Warn "packages/opencode-knocode not found - skipping npm plugin install" }
+    # Knocode agent skill (opencode - agent-native discovery)
+    $ocSkillSrc = Join-Path $Root ".opencode\skills\knocode"
+    if (Test-Path (Join-Path $ocSkillSrc "SKILL.md")) {
       try {
-        & npm install --silent 2>&1 | Out-Null
-        & npm run build --silent 2>&1 | Out-Null
-        if (Test-Path $mcpDist) { Ok "knocode-mcp built to packages/knocode-mcp/dist" } else { Warn "knocode-mcp build failed - run: cd packages/knocode-mcp; npm install; npm run build" }
-      } catch { Warn "knocode-mcp build failed: $_" }
-      Pop-Location
-    } else { Warn "npm not found - cannot build knocode-mcp" }
-  } else { Ok "knocode-mcp dist at packages/knocode-mcp/dist/index.js" }
-  # Write Codex config ~/.codex/config.toml mcp_servers.knocode
-  $codexDir = Join-Path $env:USERPROFILE ".codex"
-  $codexCfg = Join-Path $codexDir "config.toml"
-  try {
-    New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-    $mcpCmd = "node `"$mcpDist`""
-    $codexEntry = "`n[mcp_servers.knocode]`ncommand = `"node`"`nargs = [`"$mcpDist`"]`n"
-    if (-not (Test-Path $codexCfg) -or -not ((Get-Content -LiteralPath $codexCfg -Raw -ErrorAction SilentlyContinue) -match "mcp_servers.knocode")) {
-      Add-Content -LiteralPath $codexCfg -Value $codexEntry -Encoding UTF8
-      Ok "Codex MCP config at $codexCfg (mcp_servers.knocode stdio)"
-    } else { Skip "Codex MCP already configured at $codexCfg" }
-  } catch { Warn "failed to write Codex MCP config: $_" }
-  # Write VS Code Copilot .vscode/mcp.json at repo root (if .vscode exists)
-  $vscodeMcp = Join-Path $Root ".vscode\mcp.json"
-  try {
-    $mcpJson = @{ servers = @{ knocode = @{ command = "node"; args = @($mcpDist); env = @{ KNOCODE_DAEMON_URL = "http://127.0.0.1:9527" } } } } | ConvertTo-Json -Depth 10
-    if (-not (Test-Path $vscodeMcp)) {
-      New-Item -ItemType Directory -Force -Path (Split-Path $vscodeMcp -Parent) | Out-Null
-      Set-Content -LiteralPath $vscodeMcp -Value $mcpJson -Encoding UTF8
-      Ok "VS Code MCP at $vscodeMcp"
-    } else { Skip "VS Code mcp.json already exists at $vscodeMcp" }
-  } catch { Warn "failed to write VS Code mcp.json: $_" }
-} else { Warn "packages/knocode-mcp not found - skipping MCP server install" }
+        New-Item -ItemType Directory -Force -Path (Join-Path $ocGlobalDir "skills") | Out-Null
+        Copy-Item -LiteralPath $ocSkillSrc -Destination (Join-Path $ocGlobalDir "skills\knocode") -Recurse -Force
+        Ok "knocode skill installed to $env:USERPROFILE\.config\opencode\skills\knocode (opencode agent-native)"
+      } catch { Warn "knocode skill copy failed: $_" }
+    } else { Warn ".opencode\skills\knocode not found - skipping agent skill install" }
+    Info "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
+  }
 
-Info "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
+  # --- Codex: ~/.codex/config.toml mcp_servers.knocode ---
+  if ($agentSel -contains "codex") {
+    $codexDir = Join-Path $env:USERPROFILE ".codex"
+    $codexCfg = Join-Path $codexDir "config.toml"
+    try {
+      New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+      $codexEntry = "`n[mcp_servers.knocode]`ncommand = `"node`"`nargs = [`"$mcpDist`"]`n"
+      if (-not (Test-Path $codexCfg) -or -not ((Get-Content -LiteralPath $codexCfg -Raw -ErrorAction SilentlyContinue) -match "mcp_servers.knocode")) {
+        Add-Content -LiteralPath $codexCfg -Value $codexEntry -Encoding UTF8
+        Ok "Codex MCP config at $codexCfg (mcp_servers.knocode stdio)"
+      } else { Skip "Codex MCP already configured at $codexCfg" }
+    } catch { Warn "failed to write Codex MCP config: $_" }
+  }
+
+  # --- Copilot (VS Code): user-level mcp.json (%APPDATA%\Code\User\mcp.json) ---
+  if ($agentSel -contains "copilot") {
+    try {
+      $codeUserDir = Join-Path $env:APPDATA "Code\User"
+      $vscodeMcp = Join-Path $codeUserDir "mcp.json"
+      $mcpJson = @{ servers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10
+      New-Item -ItemType Directory -Force -Path $codeUserDir | Out-Null
+      if (-not (Test-Path $vscodeMcp)) {
+        Set-Content -LiteralPath $vscodeMcp -Value $mcpJson -Encoding UTF8
+        Ok "VS Code Copilot MCP at $vscodeMcp (user scope)"
+      } else {
+        try {
+          $existing = Get-Content -LiteralPath $vscodeMcp -Raw | ConvertFrom-Json
+          if (-not $existing.servers) { $existing | Add-Member -NotePropertyName servers -NotePropertyValue @{} }
+          $existing.servers.knocode = $mcpServer
+          $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $vscodeMcp -Encoding UTF8
+          Ok "VS Code Copilot MCP updated at $vscodeMcp"
+        } catch { Skip "VS Code mcp.json exists but could not merge knocode into $vscodeMcp" }
+      }
+    } catch { Warn "failed to write VS Code Copilot MCP config: $_" }
+  }
+
+  # --- Cursor: user-level ~/.cursor/mcp.json ---
+  if ($agentSel -contains "cursor") {
+    try {
+      $cursorDir = Join-Path $env:USERPROFILE ".cursor"
+      $cursorMcp = Join-Path $cursorDir "mcp.json"
+      $mcpJson = @{ mcpServers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10
+      New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null
+      if (-not (Test-Path $cursorMcp)) {
+        Set-Content -LiteralPath $cursorMcp -Value $mcpJson -Encoding UTF8
+        Ok "Cursor MCP at $cursorMcp (user scope)"
+      } else {
+        try {
+          $existing = Get-Content -LiteralPath $cursorMcp -Raw | ConvertFrom-Json
+          if (-not $existing.mcpServers) { $existing | Add-Member -NotePropertyName mcpServers -NotePropertyValue @{} }
+          $existing.mcpServers.knocode = $mcpServer
+          $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cursorMcp -Encoding UTF8
+          Ok "Cursor MCP updated at $cursorMcp"
+        } catch { Skip "Cursor mcp.json exists but could not merge knocode into $cursorMcp" }
+      }
+    } catch { Warn "failed to write Cursor MCP config: $_" }
+  }
+}
 
 # 4. Start daemon - knocode must be in RUNNING state after installation
 # TASK-037: launch the daemon from ~\.knocode\bin (installed copy) so the runtime keeps
@@ -358,5 +507,5 @@ if ($daemonUp) {
   $ErrorActionPreference = $prevEA3
 }
 
-Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | knocode preview 'add auth' | curl http://127.0.0.1:9527/metrics | knocode doctor"
+Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | knocode doctor"
 Info "Docs: docs/*.md plain | promptfoo eval --config eval/promptfooconfig.yaml (optional: -WithOptional) | knocode doctor"

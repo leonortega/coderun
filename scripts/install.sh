@@ -1,14 +1,56 @@
 #!/usr/bin/env bash
-# Knocode installer v0.8.0 minimal (Unix: Linux/macOS, bash)
+# Knocode installer v0.9.6 minimal (Unix: Linux/macOS, bash)
 # Minimal v1: Git + SQLite(bundled)/tree-sitter/tantivy/tiktoken embedded + RTK optional (no Rust - prebuilt binaries; compile via scripts/compile.sh)
-# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external] [--with-optional]
+# Agent integrations (OpenCode/Codex/Copilot/Cursor) are selectable: --agents opencode,codex | --all-agents | --no-agents
+# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external] [--with-optional] [--agents a,b,c|--all-agents|--no-agents] [--skip-prereqs]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SKIP_BUILD=false; SKIP_EXTERNAL=false; WITH_OPTIONAL=false
-for arg in "$@"; do case "$arg" in --skip-build) SKIP_BUILD=true;; --skip-external) SKIP_EXTERNAL=true;; --with-optional) WITH_OPTIONAL=true;; esac; done
-info(){ echo -e "\033[36m[knocode]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; }
+SKIP_BUILD=false; SKIP_EXTERNAL=false; WITH_OPTIONAL=false; AGENTS=""; ALL_AGENTS=false; NO_AGENTS=false; SKIP_PREREQS=false
+for arg in "$@"; do case "$arg" in
+  --skip-build) SKIP_BUILD=true;;
+  --skip-external) SKIP_EXTERNAL=true;;
+  --with-optional) WITH_OPTIONAL=true;;
+  --agents) AGENTS="$2"; shift;;
+  --agents=*) AGENTS="${arg#--agents=}";;
+  --all-agents) ALL_AGENTS=true;;
+  --no-agents) NO_AGENTS=true;;
+  --skip-prereqs) SKIP_PREREQS=true;;
+  -h|--help) echo "Usage: $0 [--skip-build] [--skip-external] [--with-optional] [--agents opencode,codex,copilot,cursor | --all-agents | --no-agents] [--skip-prereqs]"; exit 0;;
+esac; done
+info(){ echo -e "\033[36m[knocode]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; } ; skip(){ echo -e "  \033[90m[SKIP]\033[0m $*"; }
+
+# --- Agent catalog & selection -------------------------------------------------
+AGENT_CATALOG="opencode codex copilot cursor"
+select_agents() {
+  if [ "$NO_AGENTS" = true ]; then echo ""; return; fi
+  if [ -n "$AGENTS" ]; then
+    local sel=""
+    IFS=',' read -ra parts <<< "$AGENTS"
+    for a in "${parts[@]}"; do
+      a="$(echo "$a" | tr '[:upper:]' '[:lower:]' | xargs)"
+      case " $AGENT_CATALOG " in *" $a "*) sel="$sel $a";; *) warn "unknown agent '$a' - valid: opencode, codex, copilot, cursor";; esac
+    done
+    if [ -z "$sel" ]; then echo "error: no valid agents in --agents ('$AGENTS')" >&2; exit 1; fi
+    echo "$sel"; return
+  fi
+  if [ "$ALL_AGENTS" = true ]; then echo "$AGENT_CATALOG"; return; fi
+  # Interactive multi-select when stdin is a terminal; default to ALL otherwise
+  if [ ! -t 0 ]; then
+    info "non-interactive run - installing agent integrations for ALL agents (use --agents opencode,cursor or --no-agents to change)"
+    echo "$AGENT_CATALOG"; return
+  fi
+  local sel=""
+  for a in $AGENT_CATALOG; do
+    printf "  Wire up %s? [Y/n] " "$a"
+    read -r r
+    case "$r" in ""|y|Y|yes|YES) sel="$sel $a";; *) skip "$a skipped";; esac
+  done
+  echo "$sel"
+}
 
 info "Knocode installer"
+AGENT_SEL="$(select_agents)"
+if [ -n "$AGENT_SEL" ]; then info "Agent integrations:$(echo "$AGENT_SEL")"; else info "Agent integrations: none"; fi
 
 # 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~/.knocode/bin)
 # and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
@@ -18,7 +60,16 @@ done
 
 # No Rust needed: knocode ships prebuilt (target/release) and the installer does not compile.
 # Source builds use scripts/compile.sh (or CI).
-command -v node >/dev/null || warn "node not found - install Node >=20 https://nodejs.org"; command -v node >/dev/null && ok "node $(node --version)"
+if ! command -v node >/dev/null 2>&1; then
+  if [ "$SKIP_PREREQS" = true ]; then warn "node not found - install Node >=20 https://nodejs.org (or re-run without --skip-prereqs)"
+  else
+    info "Installing Node.js (LTS)..."
+    if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y nodejs npm 2>/dev/null && ok "node $(node --version)" || warn "node apt install failed - install manually: https://nodejs.org"
+    elif command -v brew >/dev/null 2>&1; then brew install node 2>/dev/null && ok "node $(node --version)" || warn "node brew install failed"
+    elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y nodejs npm 2>/dev/null && ok "node $(node --version)" || warn "node dnf install failed"
+    else warn "no package manager for node - install manually: https://nodejs.org"; fi
+  fi
+else ok "node $(node --version)"; fi
 if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
   info "python3 not found - attempting install..."
   if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y python3 python3-pip 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 apt install failed - install manually: https://www.python.org/downloads/"
@@ -26,7 +77,14 @@ if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; 
   elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y python3 python3-pip 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 dnf install failed"
   else warn "python3 not found - install Python 3.11+ https://www.python.org/downloads/ (required for promptfoo)"; fi
 else command -v python3 >/dev/null 2>&1 && ok "python3 $(python3 --version)" || ok "python $(python --version)"; fi
-command -v git >/dev/null || { echo "git not found"; exit 1; }; ok "$(git --version)"
+if ! command -v git >/dev/null 2>&1; then
+  if [ "$SKIP_PREREQS" = true ]; then echo "git not found"; exit 1; fi
+  info "Installing git..."
+  if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y git 2>/dev/null && ok "$(git --version)" || { echo "git install failed"; exit 1; }
+  elif command -v brew >/dev/null 2>&1; then brew install git 2>/dev/null && ok "$(git --version)" || { echo "git install failed"; exit 1; }
+  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y git 2>/dev/null && ok "$(git --version)" || { echo "git install failed"; exit 1; }
+  else echo "git not found - install manually: https://git-scm.com"; exit 1; fi
+else ok "$(git --version)"; fi
 
 if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-external)"; else
   info "Installing first-class external tools..."
@@ -99,68 +157,117 @@ case ":$PATH:" in *":$BIN_DIR:"*) ;; *) export PATH="$BIN_DIR:$PATH" ;; esac
 info "Verifying installation (doctor)..."
 "$INSTALLED_CLI" doctor
 
-# 3. opencode plugin (GLOBAL: ~/.config/opencode - loaded in EVERY project)
-OC_GLOBAL="$HOME/.config/opencode"
-OC_GLOBAL_CFG="$OC_GLOBAL/opencode.jsonc"
-ROOT_OPENCODE="$ROOT/.opencode"   # legacy project dir - cleaned below
-info "Configuring opencode plugin (global ~/.config/opencode)..."
-mkdir -p "$OC_GLOBAL"
-# Global config: plugin only
-cat > "$OC_GLOBAL_CFG" <<EOF
+# =====================================================================================
+# 3. Agent integrations (OpenCode / Codex / Copilot / Cursor) - selected above
+# =====================================================================================
+if [ -n "$AGENT_SEL" ]; then
+  OC_GLOBAL="$HOME/.config/opencode"
+  MCP_DIST="$ROOT/packages/knocode-mcp/dist/index.js"
+  WANT_MCP=false
+  for a in $AGENT_SEL; do case "$a" in codex|copilot|cursor) WANT_MCP=true;; esac; done
+
+  # --- shared MCP server build (Codex, Copilot, Cursor all use knocode-mcp) ---
+  if [ "$WANT_MCP" = true ]; then
+    if [ -d "$ROOT/packages/knocode-mcp" ]; then
+      if [ ! -f "$MCP_DIST" ]; then
+        if command -v npm >/dev/null 2>&1; then
+          info "Building knocode-mcp MCP server..."
+          (cd "$ROOT/packages/knocode-mcp" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null && ok "knocode-mcp built to packages/knocode-mcp/dist") || warn "knocode-mcp build failed - run: cd packages/knocode-mcp && npm install && npm run build"
+        else warn "npm not found - cannot build knocode-mcp (MCP agents need Node.js)"; fi
+      else ok "knocode-mcp dist at packages/knocode-mcp/dist/index.js"; fi
+    else warn "packages/knocode-mcp not found - skipping MCP server build"; fi
+  fi
+
+  # --- OpenCode: global plugin + skill (~/.config/opencode) ---
+  if echo "$AGENT_SEL" | grep -qw opencode; then
+    OC_GLOBAL_CFG="$OC_GLOBAL/opencode.jsonc"
+    info "Configuring opencode plugin (global ~/.config/opencode)..."
+    mkdir -p "$OC_GLOBAL"
+    cat > "$OC_GLOBAL_CFG" <<EOF
 {
     "\$schema": "https://opencode.ai/config.json",
     "plugin": ["opencode-knocode"]
 }
 EOF
-ok "opencode plugin GLOBAL at $OC_GLOBAL_CFG (plugin: opencode-knocode, MCPs used internally by daemon)"
-# Remove legacy global path plugin (now npm)
-GLOBAL_PLUGIN="$HOME/.config/opencode/plugins/knocode.ts"
-if [ -f "$GLOBAL_PLUGIN" ]; then rm -f "$GLOBAL_PLUGIN" 2>/dev/null && info "Removed legacy global path plugin knocode.ts" || true; fi
-LOCAL_PLUGIN="$ROOT/.opencode/plugins/knocode.ts"
-if [ -f "$LOCAL_PLUGIN" ]; then rm -f "$LOCAL_PLUGIN" 2>/dev/null && info "Removed legacy local path plugin .opencode/plugins/knocode.ts" || true; fi
-# Migrate: remove per-project opencode config/deps (plugin is global now)
-for f in "$ROOT_OPENCODE/opencode.jsonc" "$ROOT_OPENCODE/opencode.json" "$ROOT_OPENCODE/package.json" "$ROOT_OPENCODE/package-lock.json"; do
-  if [ -f "$f" ]; then rm -f "$f" 2>/dev/null && info "Removed legacy project $(basename "$f") (MCPs/plugin are global now)" || true; fi
-done
-# Ensure npm plugin is built
-if [ -d "$ROOT/packages/opencode-knocode" ]; then
-  if [ ! -f "$ROOT/packages/opencode-knocode/dist/index.js" ]; then
-    if command -v npm >/dev/null 2>&1; then
-      info "Building opencode-knocode npm package..."
-      (cd "$ROOT/packages/opencode-knocode" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null && ok "opencode-knocode built to packages/opencode-knocode/dist") || warn "opencode-knocode build failed - run: cd packages/opencode-knocode && npm install && npm run build"
+    ok "opencode plugin GLOBAL at $OC_GLOBAL_CFG (plugin: opencode-knocode, MCPs used internally by daemon)"
+    # Remove legacy global path plugin (now npm)
+    GLOBAL_PLUGIN="$HOME/.config/opencode/plugins/knocode.ts"
+    if [ -f "$GLOBAL_PLUGIN" ]; then rm -f "$GLOBAL_PLUGIN" 2>/dev/null && info "Removed legacy global path plugin knocode.ts" || true; fi
+    LOCAL_PLUGIN="$ROOT/.opencode/plugins/knocode.ts"
+    if [ -f "$LOCAL_PLUGIN" ]; then rm -f "$LOCAL_PLUGIN" 2>/dev/null && info "Removed legacy local path plugin .opencode/plugins/knocode.ts" || true; fi
+    # Migrate: remove per-project opencode config/deps (plugin is global now)
+    for f in "$ROOT/.opencode/opencode.jsonc" "$ROOT/.opencode/opencode.json" "$ROOT/.opencode/package.json" "$ROOT/.opencode/package-lock.json"; do
+      if [ -f "$f" ]; then rm -f "$f" 2>/dev/null && info "Removed legacy project $(basename "$f") (MCPs/plugin are global now)" || true; fi
+    done
+    # Ensure npm plugin is built
+    if [ -d "$ROOT/packages/opencode-knocode" ]; then
+      if [ ! -f "$ROOT/packages/opencode-knocode/dist/index.js" ]; then
+        if command -v npm >/dev/null 2>&1; then
+          info "Building opencode-knocode npm package..."
+          (cd "$ROOT/packages/opencode-knocode" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null && ok "opencode-knocode built to packages/opencode-knocode/dist") || warn "opencode-knocode build failed - run: cd packages/opencode-knocode && npm install && npm run build"
+        else warn "npm not found - cannot build opencode-knocode (install Node.js 18+)"; fi
+      else ok "opencode-knocode dist at packages/opencode-knocode/dist/index.js"; fi
+      # Install npm plugin GLOBALLY (~/.config/opencode/node_modules) via file: reference to this repo
+      if command -v npm >/dev/null 2>&1; then
+        info "Installing opencode-knocode globally (~/.config/opencode)..."
+        PKG_JSON="$OC_GLOBAL/package.json"
+        PLUGIN_REF="file:$ROOT/packages/opencode-knocode"
+        if [ ! -f "$PKG_JSON" ]; then
+          printf '%s\n' '{' '  "dependencies": {' '    "@opencode-ai/plugin": "1.18.22",' "    \"opencode-knocode\": \"$PLUGIN_REF\"" '  }' '}' > "$PKG_JSON"
+        elif command -v node >/dev/null 2>&1; then
+          PKG_JSON_PATH="$PKG_JSON" PLUGIN_REF="$PLUGIN_REF" node -e "const fs=require('fs');const p=process.env.PKG_JSON_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};j.dependencies=j.dependencies||{};j.dependencies['opencode-knocode']=process.env.PLUGIN_REF;j.dependencies['@opencode-ai/plugin']=j.dependencies['@opencode-ai/plugin']||'1.18.22';fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null || true
+        fi
+        (cd "$OC_GLOBAL" && npm install --silent 2>/dev/null && [ -f node_modules/opencode-knocode/dist/index.js ] && ok "opencode-knocode installed to ~/.config/opencode/node_modules (global)") || warn "opencode-knocode npm install failed - try: cd ~/.config/opencode && npm install"
+      else warn "npm not found - skipping global opencode plugin install (install Node.js 18+)"; fi
+    else warn "packages/opencode-knocode not found - skipping npm plugin install"; fi
+    # Knocode agent skill (opencode - agent-native discovery; per-agent: opencode is the only supported agent for now)
+    OC_SKILL_SRC="$ROOT/.opencode/skills/knocode"
+    if [ -f "$OC_SKILL_SRC/SKILL.md" ]; then
+      mkdir -p "$OC_GLOBAL/skills" && cp -rf "$OC_SKILL_SRC" "$OC_GLOBAL/skills/" 2>/dev/null && ok "knocode skill installed to $OC_GLOBAL/skills/knocode (opencode agent-native)" || warn "knocode skill copy failed (source: $OC_SKILL_SRC)"
+    else warn ".opencode/skills/knocode not found - skipping agent skill install"; fi
+    info "Restart opencode to load global plugin 'opencode-knocode' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode)."
+  fi
+
+  # --- Codex: ~/.codex/config.toml mcp_servers.knocode ---
+  if echo "$AGENT_SEL" | grep -qw codex; then
+    CODEX_DIR="$HOME/.codex"; CODEX_CFG="$CODEX_DIR/config.toml"
+    mkdir -p "$CODEX_DIR"
+    if [ -f "$CODEX_CFG" ] && grep -qs "mcp_servers.knocode" "$CODEX_CFG"; then
+      skip "Codex MCP already configured at $CODEX_CFG"
     else
-      warn "npm not found - cannot build opencode-knocode (install Node.js 18+)"
+      printf '\n[mcp_servers.knocode]\ncommand = "node"\nargs = ["%s"]\n' "$MCP_DIST" >> "$CODEX_CFG"
+      ok "Codex MCP config at $CODEX_CFG (mcp_servers.knocode stdio)"
     fi
-  else
-    ok "opencode-knocode dist at packages/opencode-knocode/dist/index.js"
   fi
-  # Install npm plugin GLOBALLY (~/.config/opencode/node_modules) via file: reference to this repo
-  if command -v npm >/dev/null 2>&1; then
-    info "Installing opencode-knocode globally (~/.config/opencode)..."
-    PKG_JSON="$OC_GLOBAL/package.json"
-    PLUGIN_REF="file:$ROOT/packages/opencode-knocode"
-    if [ ! -f "$PKG_JSON" ]; then
-      printf '%s\n' '{' '  "dependencies": {' '    "@opencode-ai/plugin": "1.18.22",' "    \"opencode-knocode\": \"$PLUGIN_REF\"" '  }' '}' > "$PKG_JSON"
-    elif command -v node >/dev/null 2>&1; then
-      # Merge + always refresh the file: ref (repo may have moved)
-      PKG_JSON_PATH="$PKG_JSON" PLUGIN_REF="$PLUGIN_REF" node -e "const fs=require('fs');const p=process.env.PKG_JSON_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};j.dependencies=j.dependencies||{};j.dependencies['opencode-knocode']=process.env.PLUGIN_REF;j.dependencies['@opencode-ai/plugin']=j.dependencies['@opencode-ai/plugin']||'1.18.22';fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null || true
+
+  # --- Copilot (VS Code): user-level mcp.json (~/.config/Code/User/mcp.json) ---
+  if echo "$AGENT_SEL" | grep -qw copilot; then
+    CODE_USER_DIR="$HOME/.config/Code/User"; VSCODE_MCP="$CODE_USER_DIR/mcp.json"
+    mkdir -p "$CODE_USER_DIR"
+    if [ ! -f "$VSCODE_MCP" ]; then
+      printf '{\n  "servers": {\n    "knocode": { "command": "node", "args": ["%s"], "env": { "KNOCODE_DAEMON_URL": "http://127.0.0.1:9527" } }\n  }\n}\n' "$MCP_DIST" > "$VSCODE_MCP"
+      ok "VS Code Copilot MCP at $VSCODE_MCP (user scope)"
+    else
+      if command -v node >/dev/null 2>&1; then
+        VSCODE_MCP_PATH="$VSCODE_MCP" MCP_DIST="$MCP_DIST" node -e "const fs=require('fs');const p=process.env.VSCODE_MCP_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};j.servers=j.servers||{};j.servers.knocode={command:'node',args:[process.env.MCP_DIST],env:{KNOCODE_DAEMON_URL:'http://127.0.0.1:9527'}};fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null && ok "VS Code Copilot MCP updated at $VSCODE_MCP" || skip "VS Code mcp.json exists but could not merge knocode into $VSCODE_MCP"
+      else skip "VS Code mcp.json exists but could not merge knocode (node missing)"; fi
     fi
-    (cd "$OC_GLOBAL" && npm install --silent 2>/dev/null && [ -f node_modules/opencode-knocode/dist/index.js ] && ok "opencode-knocode installed to ~/.config/opencode/node_modules (global)") || warn "opencode-knocode npm install failed - try: cd ~/.config/opencode && npm install"
-  else
-    warn "npm not found - skipping global opencode plugin install (install Node.js 18+)"
   fi
-else
-  warn "packages/opencode-knocode not found - skipping npm plugin install"
+
+  # --- Cursor: user-level ~/.cursor/mcp.json ---
+  if echo "$AGENT_SEL" | grep -qw cursor; then
+    CURSOR_DIR="$HOME/.cursor"; CURSOR_MCP="$CURSOR_DIR/mcp.json"
+    mkdir -p "$CURSOR_DIR"
+    if [ ! -f "$CURSOR_MCP" ]; then
+      printf '{\n  "mcpServers": {\n    "knocode": { "command": "node", "args": ["%s"], "env": { "KNOCODE_DAEMON_URL": "http://127.0.0.1:9527" } }\n  }\n}\n' "$MCP_DIST" > "$CURSOR_MCP"
+      ok "Cursor MCP at $CURSOR_MCP (user scope)"
+    else
+      if command -v node >/dev/null 2>&1; then
+        CURSOR_MCP_PATH="$CURSOR_MCP" MCP_DIST="$MCP_DIST" node -e "const fs=require('fs');const p=process.env.CURSOR_MCP_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};j.mcpServers=j.mcpServers||{};j.mcpServers.knocode={command:'node',args:[process.env.MCP_DIST],env:{KNOCODE_DAEMON_URL:'http://127.0.0.1:9527'}};fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null && ok "Cursor MCP updated at $CURSOR_MCP" || skip "Cursor mcp.json exists but could not merge knocode into $CURSOR_MCP"
+      else skip "Cursor mcp.json exists but could not merge knocode (node missing)"; fi
+    fi
+  fi
 fi
-# Knocode agent skill (opencode - agent-native discovery; per-agent: opencode is the only supported agent for now)
-# Global ~/.config/opencode/skills/<name>/SKILL.md applies to EVERY project (same pattern as the plugin).
-OC_SKILL_SRC="$ROOT/.opencode/skills/knocode"
-if [ -f "$OC_SKILL_SRC/SKILL.md" ]; then
-  mkdir -p "$OC_GLOBAL/skills" && cp -rf "$OC_SKILL_SRC" "$OC_GLOBAL/skills/" 2>/dev/null && ok "knocode skill installed to $OC_GLOBAL/skills/knocode (opencode agent-native)" || warn "knocode skill copy failed (source: $OC_SKILL_SRC)"
-else
-  warn ".opencode/skills/knocode not found - skipping agent skill install"
-fi
-info "Restart opencode to load global plugin 'opencode-knocode' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode)."
 
 # 4. Start daemon - knocode must be in RUNNING state after installation
 # TASK-037: launch from ~/.knocode/bin (installed copy), repo-independent working dir.
@@ -189,5 +296,5 @@ else
   if [ "$DAEMON_UP" = yes ]; then ok "knocode daemon RUNNING (http://127.0.0.1:9527, from $INSTALLED_DAEMON)"; else warn "daemon not responding on :9527 within 20s - start manually: $INSTALLED_DAEMON"; fi
 fi
 
-info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | knocode preview 'add auth' | curl http://127.0.0.1:9527/metrics | knocode doctor"
+info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | knocode doctor"
 info "Docs: docs/*.md plain | promptfoo eval --config eval/promptfooconfig.yaml (optional: --with-optional) | knocode doctor"

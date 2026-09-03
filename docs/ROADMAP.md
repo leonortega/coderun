@@ -7,7 +7,7 @@
 > workflow — see `01-architecture/REMOVED_TOOLS.md`); the V1 spec wins where they
 > conflict.
 
-## Current Version: v0.9.0
+## Current Version: v0.9.6
 
 **Released:** September 3, 2026
 **Status:** Active
@@ -245,7 +245,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for development guidelines.
 
 ## Success Metrics
 
-| Metric | v0.1.0 | v0.3.0 | v0.5.0 | v0.7.5 | v0.9.0 (current) |
+| Metric | v0.1.0 | v0.3.0 | v0.5.0 | v0.7.5 | v0.9.0 |
 |--------|--------|--------|--------|--------|------------------|
 | Tests | 108 | 147 | 166 | ~184 | ~400 |
 | Languages | 4 | 10+ | 111 | 111 | 111 |

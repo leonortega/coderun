@@ -1,6 +1,6 @@
 # === Rust / Cargo ===
 /target
-Cargo.lock
+# Cargo.lock is tracked (binary workspace — reproducible release builds)
 **/*.rs.bk
 *.pdb
 

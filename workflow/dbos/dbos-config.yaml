@@ -1,5 +1,0 @@
-# DBOS Transact config — single-node SQLite + Litestream (v0.4.0 §1.2)
-# For production, set DBOS_LITESTREAM_REPLICA_URL=s3://bucket/knocode or file://~/.knocode/replica
-database_url: sqlite://~/.knocode/dbos.db
-app_db_migrations: ./migrations
-system_database_url: sqlite://~/.knocode/dbos_system.db

@@ -71,6 +71,48 @@ At 27-49ms, Knocode is fast enough to run on every keystroke in an AI coding ass
 
 ---
 
+## Install (end users)
+
+Prebuilt Windows x64 binaries are published to every [GitHub Release](https://github.com/leonortega/knocode/releases).
+
+**Scoop** (recommended — per-user, no admin; installs Git as a dependency automatically):
+
+```bash
+scoop bucket add knocode https://github.com/leonortega/knocode
+scoop install knocode
+scoop update knocode    # after new releases
+```
+
+**Winget** (once the manifest is merged in [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) — see `winget/README.md`):
+
+```powershell
+winget install Knocode.knocode
+winget upgrade Knocode.knocode
+```
+
+**Direct download** — grab `knocode-<ver>-x86_64-pc-windows-msvc.zip` (with `.sha256` checksum) from the Release and unzip it anywhere; add the folder to your PATH. The `knocode-install.ps1` asset in each Release is the one-liner installer that automates this into `%USERPROFILE%\.knocode\bin`.
+
+> Need agent integrations (opencode plugin, MCP server), RTK, or the full developer environment? Run `scripts/install.ps1` / `scripts/install.sh` from a source checkout.
+
+### Agent integrations
+
+The installers ask which agents to wire up — pick one or more of **OpenCode**, **Codex**, **Copilot (VS Code)**, and **Cursor** (default: all in the developer installers; none in the release one-liner).
+
+```bash
+# developer installers (source checkout)
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode,codex
+bash scripts/install.sh --agents opencode,cursor
+
+# release one-liner (end users)
+powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Agents opencode,cursor
+```
+
+- **OpenCode** — plugin `opencode-knocode` + agent skill in `~/.config/opencode`
+- **Codex** — MCP server `knocode-mcp` in `~/.codex/config.toml`
+- **Copilot / Cursor** — the same `knocode-mcp` server in the VS Code / Cursor user-level `mcp.json`
+
+The integration bundles (`opencode-knocode`, `knocode-mcp`) ship inside every release zip — no npm registry needed; they only require Node.js, which the installer installs automatically if missing (along with Git). Pass `-AllAgents`/`--all-agents` to skip the prompt, `-NoAgents`/`--no-agents` to wire nothing, or `-SkipPrereqs`/`--skip-prereqs` to disable automatic prerequisite installs. Agent configs are written idempotently (re-running updates them).
+
 ## Quick Start
 
 ```bash
@@ -432,7 +474,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | Context build error | OriginalPassthrough | "error" |
 | Any internal error | OriginalPassthrough | "fail-open" |
 
-## Implementation Status (v0.9.0)
+## Implementation Status (v0.9.6)
 
 | Component | Status | Notes |
 |-----------|--------|-------|

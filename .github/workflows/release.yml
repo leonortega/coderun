@@ -5,11 +5,16 @@ name: Release
 # installer script (installers/knocode-install.ps1). The Release is created
 # automatically if it does not exist yet; re-pushing the same tag updates it.
 #
-#   git tag v0.9.0 && git push origin v0.9.0
+#   git tag v0.9.6 && git push origin v0.9.6
 #   (or: cargo install cargo-release && cargo release patch)
 #
-# Releases for other platforms can be added later by extending the matrix —
+# Releases for other platforms can be added later by extending the matrix -
 # see installers/knocode-install.ps1 for the x64-only assumption.
+#
+# After publishing, the scoop bucket manifest (repo-root knocode.json) and the
+# winget manifests (winget/Knocode/knocode/<ver>/) are refreshed with the real
+# version/hash and committed back to dev. That step runs only on tag pushes
+# (no workflow loop) and assumes tags are cut from dev.
 
 on:
   push:
@@ -52,6 +57,30 @@ jobs:
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
 
+      - name: Build agent integration packages (bundled dist)
+        shell: pwsh
+        run: |
+          # Both packages have zero runtime deps - build their dist/ and bundle them
+          # into the release zip so agent wiring never needs the npm registry.
+          foreach ($pkg in @("opencode-knocode", "knocode-mcp")) {
+            Push-Location "packages/$pkg"
+            try {
+              if (Test-Path package-lock.json) { npm ci --silent } else { npm install --silent }
+              npm run build --silent
+            } finally { Pop-Location }
+          }
+          New-Item -ItemType Directory -Force -Path "integrations" | Out-Null
+          foreach ($pkg in @("opencode-knocode", "knocode-mcp")) {
+            $dst = "integrations/$pkg"
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item "packages/$pkg/package.json" -Destination $dst -Force
+            Copy-Item "packages/$pkg/dist" -Destination $dst -Recurse -Force
+          }
+          Get-ChildItem -Recurse integrations | Select-Object -First 8 FullName
+
+      - name: Test workspace (release)
+        run: cargo test --release --workspace --quiet
+
       - name: Smoke test binaries
         shell: bash
         run: |
@@ -62,9 +91,26 @@ jobs:
         shell: pwsh
         run: |
           $asset = "knocode-$env:version-x86_64-pc-windows-msvc.zip"
-          Compress-Archive -Path "target/release/knocode.exe", "target/release/knocode-daemon.exe" -DestinationPath $asset -CompressionLevel Optimal
-          Get-Item $asset | Select-Object Name, Length
+          Compress-Archive -Path "target/release/knocode.exe", "target/release/knocode-daemon.exe", "integrations", "LICENSE" -DestinationPath $asset -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii
+          Get-Item $asset, "$asset.sha256" | Select-Object Name, Length
           "asset=$asset" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Extract changelog release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Capture the "## [<version>]" section from CHANGELOG.md up to the next "## ["
+          body="$(awk -v v="${version}" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md)"
+          if [ -z "${body}" ]; then
+            body="Knocode ${GITHUB_REF_NAME} release."
+          fi
+          printf '%s\n' "${body}" > release-body.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
@@ -73,6 +119,103 @@ jobs:
           name: Knocode ${{ github.ref_name }}
           files: |
             ${{ env.asset }}
+            ${{ env.asset }}.sha256
             installers/knocode-install.ps1
+          body_path: release-body.md
           draft: false
           prerelease: false
+
+      - name: Refresh package manifests (scoop + winget)
+        shell: pwsh
+        run: |
+          git fetch origin dev --quiet
+          git checkout dev --quiet
+          $ver = $env:version
+          $asset = "knocode-$ver-x86_64-pc-windows-msvc.zip"
+          $hash = ((Get-Content -LiteralPath "$asset.sha256") -split "\s+")[0].Trim().ToLower()
+
+          # --- scoop: repo-root knocode.json ---
+          $mf = Get-Content -LiteralPath "knocode.json" -Raw | ConvertFrom-Json
+          $mf.version = $ver
+          $mf.architecture."64bit".url = "https://github.com/leonortega/knocode/releases/download/v$ver/$asset"
+          $mf.architecture."64bit".hash = $hash
+          $mf | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath "knocode.json" -Encoding utf8
+
+          # --- winget: winget/Knocode/knocode/<ver>/ ---
+          $wgDir = "winget/Knocode/knocode"
+          Get-ChildItem -LiteralPath $wgDir -Directory | Where-Object { $_.Name -ne $ver } | Remove-Item -Recurse -Force
+          $vDir = Join-Path $wgDir $ver
+          New-Item -ItemType Directory -Force -Path $vDir | Out-Null
+          $upperHash = $hash.ToUpper()
+
+          @"
+          # Created by the Knocode release pipeline. Submit to microsoft/winget-pkgs - see winget/README.md.
+          PackageIdentifier: Knocode.knocode
+          PackageVersion: $ver
+          InstallerType: portable
+          InstallModes:
+            - silent
+            - silentWithProgress
+          Commands:
+            - knocode
+            - knocode-daemon
+          Installers:
+            - Architecture: x64
+              InstallerLocale: en-US
+              InstallerUrl: https://github.com/leonortega/knocode/releases/download/v$ver/$asset
+              InstallerSha256: $upperHash
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          "@ | Set-Content -LiteralPath (Join-Path $vDir "Knocode.installer.yaml") -Encoding utf8
+
+          @"
+          # Created by the Knocode release pipeline. Submit to microsoft/winget-pkgs - see winget/README.md.
+          PackageIdentifier: Knocode.knocode
+          PackageVersion: $ver
+          PackageLocale: en-US
+          Publisher: Knocode
+          PublisherUrl: https://github.com/leonortega/knocode
+          PackageName: Knocode
+          PackageUrl: https://github.com/leonortega/knocode
+          License: MIT
+          LicenseUrl: https://github.com/leonortega/knocode/blob/dev/LICENSE
+          ShortDescription: AI Runtime for coding agents - local daemon that enriches agent requests with repository context.
+          Description: Knocode is a local AI runtime that makes coding agents faster at finding relevant code. It runs as a local daemon, intercepting agent requests and enriching them with repository context (semantic retrieval over the indexed codebase), and hosts an MCP surface (POST /mcp) plus /hook fallback on 127.0.0.1:9527. Ships knocode (CLI) and knocode-daemon.
+          Moniker: knocode
+          Tags:
+            - ai
+            - agent
+            - runtime
+            - daemon
+            - retrieval
+            - mcp
+            - context
+          ManifestType: locale
+          ManifestVersion: 1.6.0
+          "@ | Set-Content -LiteralPath (Join-Path $vDir "Knocode.locale.en-US.yaml") -Encoding utf8
+
+          @"
+          # Created by the Knocode release pipeline. Submit to microsoft/winget-pkgs - see winget/README.md.
+          PackageIdentifier: Knocode.knocode
+          PackageVersion: $ver
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          "@ | Set-Content -LiteralPath (Join-Path $vDir "Knocode.yaml") -Encoding utf8
+
+          Write-Host "refreshed scoop + winget manifests for v$ver (hash $hash)"
+
+      - name: Commit manifest refresh to dev
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add knocode.json winget/
+          if git diff --cached --quiet; then
+            echo "no manifest changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(release): refresh scoop/winget manifests for ${GITHUB_REF_NAME}"
+          git push origin dev || echo "::warning::manifest refresh push failed — commit is local to the runner, refresh manually"
+
+
