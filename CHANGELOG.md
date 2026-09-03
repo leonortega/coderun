@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-09-03 — GitHub Releases + Lean Installers
+
+### Added — Release Pipeline
+- **GitHub Actions release workflow** `.github/workflows/release.yml` — on `v*` tag push: verifies the tag matches `workspace.package.version` in `Cargo.toml` (aborts on mismatch so releases can't be mislabeled), builds `knocode` + `knocode-daemon` (Windows x64, `--release`), packages `knocode-<ver>-x86_64-pc-windows-msvc.zip`, and publishes it to the tag's GitHub Release (auto-created if missing, updated on re-tag) together with the end-user installer
+- **End-user installer** `installers/knocode-install.ps1` — ships in every Release: downloads the matching prebuilt archive (latest by default, or pinned via `-Version`), installs `knocode.exe` + `knocode-daemon.exe` to `~/.knocode/bin`, persists that dir on the USER PATH (idempotent), and verifies with `knocode --version`. One-liner: `powershell -ExecutionPolicy Bypass -c "irm https://github.com/leonortega/knocode/releases/latest/download/knocode-install.ps1 | iex"`
+
+### Changed — Installers (prebuilt-only, no Rust)
+- **Removed Rust/rustup + clippy from `scripts/install.ps1`/`install.sh`** — the installers no longer compile (they consume the `target/release/` prebuilt binaries; source builds use `scripts/compile.*` or CI), so the rustup install/update, rustc checks, and `rustup component add clippy` are gone
+- **Removed ast-grep CLI** (`npm @ast-grep/cli`) — structural search is the embedded `ast-grep-core` crate, no external binary required
+- **Removed eslint** global install — the `cargo clippy`/`eslint` analyzer gates have no runtime call sites (reserved for the excluded workflow crate)
+- **`-SkipExternal` now skips RTK + promptfoo too** in `install.ps1` (brace placement fixed) — matches `install.sh` and the documented semantics; promptfoo/Python remain developer-only eval tooling
+- **Coderun → Knocode rename** in uninstall messaging and related configuration
+
+### Changed — CI
+- **GitHub Actions on the Node 24 runtime** — `actions/checkout@v5` + `softprops/action-gh-release@v3` (v2.6.2 was the last Node 20 release), clearing the Node 20 deprecation warnings
+
+### Changed
+- Version `0.9.0 → 0.9.5` in `Cargo.toml` (`workspace.package`) and `release.toml`
+
+### Docs
+- AI Runtime V1 Specification added; roadmap updated
+
+---
+
 ## [0.9.0] - 2026-09-03 — Retrieval Engine v1 + Benchmarks
 
 ### Added — Retrieval Engine
