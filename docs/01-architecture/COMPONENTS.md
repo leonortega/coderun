@@ -386,7 +386,7 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 - Does not make AI-based relevance judgments
 - Does not modify source code
 - Does not manage version control
-- Only reads repository, never writes to it (except to .coderun/)
+- Only reads repository, never writes to it (except to .knocode/)
 - Optional LSP enrichment is never a hard dependency
 
 ### Implementation Requirements
@@ -500,7 +500,7 @@ One organizational surface for project docs, ADRs, templates, and long-term memo
 
 ## 5. Skill Engine — [REMOVED]
 
-> The Skill Engine (`coderun-skills` crate, skill load/match, `behavioral_skills`)
+> The Skill Engine (`knocode-skills` crate, skill load/match, `behavioral_skills`)
 > was removed — agents own skill discovery natively (see `REMOVED_TOOLS.md`).
 
 
@@ -799,14 +799,14 @@ Provide command-line interface for daemon management, repository inspection, and
 
 | Command | Description |
 |---------|-------------|
-| `coderun serve` | Start the daemon |
-| `coderun init` | Initialize runtime for current repository |
-| `coderun index` | Trigger repository re-indexing |
-| `coderun preview <prompt>` | Preview what BuildContext would produce for a prompt |
-| `coderun status` | Show daemon status and metrics |
-| `coderun config show` | Show effective configuration |
-| `coderun config validate` | Validate configuration file |
-| `coderun doctor` | Health check: verify all dependencies are available |
+| `knocode serve` | Start the daemon |
+| `knocode init` | Initialize runtime for current repository |
+| `knocode index` | Trigger repository re-indexing |
+| `knocode preview <prompt>` | Preview what BuildContext would produce for a prompt |
+| `knocode status` | Show daemon status and metrics |
+| `knocode config show` | Show effective configuration |
+| `knocode config validate` | Validate configuration file |
+| `knocode doctor` | Health check: verify all dependencies are available |
 
 ### Dependencies
 
@@ -815,7 +815,7 @@ Provide command-line interface for daemon management, repository inspection, and
 
 ### Runtime Behavior
 
-#### `coderun serve`
+#### `knocode serve`
 
 1. Load configuration
 2. Initialize logging
@@ -826,16 +826,16 @@ Provide command-line interface for daemon management, repository inspection, and
 7. Print startup banner with socket path
 8. Wait for shutdown signal
 
-#### `coderun init`
+#### `knocode init`
 
-1. Create `.coderun/` directory in current repo
-2. Create default `.coderun/config.toml`
+1. Create `.knocode/` directory in current repo
+2. Create default `.knocode/config.toml`
 3. Initialize SQLite database
 4. Create BM25/tantivy index
 5. Run initial indexing
 6. Print success message with statistics
 
-#### `coderun preview <prompt>`
+#### `knocode preview <prompt>`
 
 1. Connect to daemon via UDS
 2. Send PreGeneration request with prompt
@@ -850,7 +850,7 @@ Provide command-line interface for daemon management, repository inspection, and
 | Error | Behavior |
 |-------|----------|
 | Configuration not found | Print helpful message with setup instructions |
-| Daemon not running | Print message to run `coderun serve` first |
+| Daemon not running | Print message to run `knocode serve` first |
 | Invalid arguments | Print clap-generated help |
 
 ### Boundaries

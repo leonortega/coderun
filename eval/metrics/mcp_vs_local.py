@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare codebase-memory-mcp search_graph vs full local pipeline (coderun preview).
+"""Compare codebase-memory-mcp search_graph vs full local pipeline (knocode preview).
 
 MCP search_graph uses dependency graph + BM25 for natural language queries.
 Local pipeline uses BM25 + tree-sitter symbols.
@@ -18,7 +18,7 @@ import pathlib
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-CBM_BIN = os.path.expanduser("~/.coderun/bin/codebase-memory-mcp.exe")
+CBM_BIN = os.path.expanduser("~/.knocode/bin/codebase-memory-mcp.exe")
 if not os.path.exists(CBM_BIN):
     # legacy ~/bin fallback
     _legacy = os.path.expanduser("~/bin/codebase-memory-mcp.exe")
@@ -94,7 +94,7 @@ def search_mcp(query, project, top_k=50):
 
 
 def search_local(query, binary, repo, timeout=15):
-    """Search using coderun preview (full local pipeline)."""
+    """Search using knocode preview (full local pipeline)."""
     try:
         proc = subprocess.run(
             [binary, "preview", query],
@@ -129,7 +129,7 @@ def main():
     ap.add_argument("--dataset", default="eval/datasets/eshop_tasks.yaml")
     ap.add_argument("--repo", default="C:/LeonRepository/eShopOnWeb")
     ap.add_argument(
-        "--binary", default="C:/LeonRepository/coderun/target/release/coderun.exe"
+        "--binary", default="C:/LeonRepository/knocode/target/release/knocode.exe"
     )
     ap.add_argument("--out", default="eval/results/mcp_vs_local.json")
     ap.add_argument("--timeout", type=int, default=15)

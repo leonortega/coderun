@@ -1,24 +1,24 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/coderun-core",
-    "crates/coderun-daemon",
-    "crates/coderun-cli",
-    "crates/coderun-repo-intel",
-    "crates/coderun-knowledge",
-    "crates/coderun-context",
-    "crates/coderun-optimizer",
-    "crates/coderun-events",
-    "crates/coderun-storage",
-    "crates/coderun-bench",
+    "crates/knocode-core",
+    "crates/knocode-daemon",
+    "crates/knocode-cli",
+    "crates/knocode-repo-intel",
+    "crates/knocode-knowledge",
+    "crates/knocode-context",
+    "crates/knocode-optimizer",
+    "crates/knocode-events",
+    "crates/knocode-storage",
+    "crates/knocode-bench",
 ]
-exclude = ["crates/coderun-workflow", "future/workflow", "workflow/dbos"]
+exclude = ["crates/knocode-workflow", "future/workflow", "workflow/dbos"]
 
 [workspace.package]
 # ── VERSION SINGLE SOURCE OF TRUTH ─────────────────────────────────────
-# This is THE version of coderun. All crates inherit it (version.workspace = true);
+# This is THE version of knocode. All crates inherit it (version.workspace = true);
 # /health + daemon banner derive it at compile time (CARGO_PKG_VERSION); the npm
-# plugin consumes it via packages/opencode-coderun/scripts/sync-version.mjs on build.
+# plugin consumes it via packages/opencode-knocode/scripts/sync-version.mjs on build.
 # To release: change this line, run scripts/compile.ps1, then tag vX.Y.Z and push.
 version = "0.9.0"
 edition = "2021"
@@ -75,16 +75,16 @@ ast-grep-core = "0.45"
 ast-grep-language = "0.45"
 
 # Internal crates
-coderun-core = { path = "crates/coderun-core" }
-coderun-events = { path = "crates/coderun-events" }
-coderun-storage = { path = "crates/coderun-storage" }
-coderun-repo-intel = { path = "crates/coderun-repo-intel" }
-coderun-knowledge = { path = "crates/coderun-knowledge" }
-coderun-context = { path = "crates/coderun-context" }
-coderun-optimizer = { path = "crates/coderun-optimizer" }
-coderun-daemon = { path = "crates/coderun-daemon" }
-coderun-cli = { path = "crates/coderun-cli" }
-# future/workflow — opt-in only: coderun-workflow = { path = "crates/coderun-workflow" }
+knocode-core = { path = "crates/knocode-core" }
+knocode-events = { path = "crates/knocode-events" }
+knocode-storage = { path = "crates/knocode-storage" }
+knocode-repo-intel = { path = "crates/knocode-repo-intel" }
+knocode-knowledge = { path = "crates/knocode-knowledge" }
+knocode-context = { path = "crates/knocode-context" }
+knocode-optimizer = { path = "crates/knocode-optimizer" }
+knocode-daemon = { path = "crates/knocode-daemon" }
+knocode-cli = { path = "crates/knocode-cli" }
+# future/workflow — opt-in only: knocode-workflow = { path = "crates/knocode-workflow" }
 
 # ── Disk space optimization ────────────────────────────────────────────────
 [profile.dev]

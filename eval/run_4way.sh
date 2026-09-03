@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-C:/LeonRepository/eShopOnWeb}"
-BINARY="C:/LeonRepository/coderun/target/release/coderun.exe"
+BINARY="C:/LeonRepository/knocode/target/release/knocode.exe"
 RESULTS_DIR="$SCRIPT_DIR/results"
 DATASET="$SCRIPT_DIR/datasets/eshop_tasks.yaml"
 
@@ -14,12 +14,12 @@ if [ ! -f "$BINARY" ]; then echo "ERROR: Binary not found"; exit 1; fi
 mkdir -p "$RESULTS_DIR"
 
 reindex() {
-    rm -rf "$HOME/.coderun/index" 2>/dev/null
-    cd "$REPO" && CODERUN_SYMBOLS_ENABLED=$1 C:/LeonRepository/coderun/target/release/coderun.exe init 2>&1 | grep -E "Tantivy|Symbols|Graph" | head -5
+    rm -rf "$HOME/.knocode/index" 2>/dev/null
+    cd "$REPO" && KNOCODE_SYMBOLS_ENABLED=$1 C:/LeonRepository/knocode/target/release/knocode.exe init 2>&1 | grep -E "Tantivy|Symbols|Graph" | head -5
 }
 
 run_eval() {
-    CODERUN_MCP_ENABLED=$2 CODERUN_SYMBOLS_ENABLED=$3 \
+    KNOCODE_MCP_ENABLED=$2 KNOCODE_SYMBOLS_ENABLED=$3 \
         python3 "$SCRIPT_DIR/metrics/retrieval.py" \
         --dataset "$DATASET" --repo "$REPO" --binary "$BINARY" \
         --out "$RESULTS_DIR/$4" --timeout 30 2>&1 | grep "Summary:" -A8

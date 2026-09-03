@@ -8,7 +8,7 @@
 
 ## Context
 
-FlashRank is a cross-encoder neural reranker that reorders BM25 search results using a small ONNX model (`rank-T5-flan`, int8 quantized). It was integrated into Coderun as an optional reranking step after BM25 candidate generation.
+FlashRank is a cross-encoder neural reranker that reorders BM25 search results using a small ONNX model (`rank-T5-flan`, int8 quantized). It was integrated into Knocode as an optional reranking step after BM25 candidate generation.
 
 The question was: **does FlashRank improve retrieval enough to justify its runtime cost in v1?**
 
@@ -69,7 +69,7 @@ FlashRank
 ### Removed from
 
 - **Runtime path** — `rerank.rs` is now a passthrough
-- **Cargo dependencies** — `ort` feature removed from `coderun-knowledge`
+- **Cargo dependencies** — `ort` feature removed from `knocode-knowledge`
 - **Context engine** — FlashRank reranking section removed
 - **Eval scripts** — `--rerank` flag removed
 - **Benchmarks** — BM25+FlashRank benchmark replaced with BM25-only
@@ -90,7 +90,7 @@ FlashRank
 
 ## References
 
-- `crates/coderun-knowledge/src/rerank.rs` — module docs with benchmark numbers
+- `crates/knocode-knowledge/src/rerank.rs` — module docs with benchmark numbers
 - `eval/run_comparison.sh` — the evaluation script
 - `eval/metrics/retrieval.py` — the metrics implementation
 - Benchmark dataset: `eval/datasets/eshop_tasks.yaml` (48 tasks)

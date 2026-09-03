@@ -2,7 +2,7 @@
 """
 Retrieval quality metrics (TASK-006): Recall@5, Recall@10, MRR, tokens, latency, duplicate ratio.
 Compares BuildContext code_context vs expected_files from repository_tasks.yaml
-No mock fallback — fails hard if coderun preview times out so Recall@5/10 is honest.
+No mock fallback — fails hard if knocode preview times out so Recall@5/10 is honest.
 
 Usage:
   python eval/metrics/retrieval.py --dataset eval/datasets/repository_tasks.yaml --k 5,10
@@ -122,7 +122,7 @@ def main():
     ap.add_argument("--k", default="5,10", help="Comma-separated k values for recall@k")
     ap.add_argument("--out", default="eval/results/evaluation.json")
     ap.add_argument("--timeout", type=int, default=15, help="Seconds before preview times out")
-    ap.add_argument("--binary", default=None, help="Path to coderun binary")
+    ap.add_argument("--binary", default=None, help="Path to knocode binary")
 
     ap.add_argument("--repo", default=".", help="Repository root for file reads")
     ap.add_argument("--diag", action="store_true", help="Enable per-query retrieval diagnostic (classify misses)")
@@ -153,9 +153,9 @@ def main():
             if args.binary:
                 binary = args.binary
             else:
-                binary = os.path.join("target", "release", "coderun.exe")
+                binary = os.path.join("target", "release", "knocode.exe")
                 if not os.path.exists(binary):
-                    binary = os.path.join("target", "release", "coderun")
+                    binary = os.path.join("target", "release", "knocode")
             cmd = [binary, "preview", task_str]
             if args.diag and expected:
                 cmd.extend(["--diag", "--expected-files", ",".join(expected)])
@@ -171,7 +171,7 @@ def main():
             latency_ms = int((time.time() - t0) * 1000)
             if proc.returncode != 0 and not proc.stdout:
                 raise RuntimeError(
-                    f"coderun preview failed (rc={proc.returncode}) stderr={(proc.stderr or '')[:500]}"
+                    f"knocode preview failed (rc={proc.returncode}) stderr={(proc.stderr or '')[:500]}"
                 )
             out = (proc.stdout or "") + (proc.stderr or "")
             # Only accept real file-path anchors:  // <path with separator>.<ext>[:line]
@@ -189,7 +189,7 @@ def main():
                     retrieved.append(p)
         except subprocess.TimeoutExpired:
             print(
-                f"ERROR: coderun preview timeout ({args.timeout}s) for task '{task_str[:60]}'",
+                f"ERROR: knocode preview timeout ({args.timeout}s) for task '{task_str[:60]}'",
                 file=sys.stderr,
             )
             sys.exit(2)

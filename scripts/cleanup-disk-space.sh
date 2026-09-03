@@ -150,7 +150,7 @@ if $IS_WINDOWS; then
 else
     echo -e "  ${CYAN}Not Windows, skipping${NC}"
     # Linux/macOS temp
-    remove_if_exists "/tmp/coderun-*" "Coderun temp files"
+    remove_if_exists "/tmp/knocode-*" "Knocode temp files"
 fi
 echo ""
 
@@ -159,7 +159,7 @@ echo ""
 # ═══════════════════════════════════════════════════════════════════════════════
 echo -e "${GREEN}[5/5] Miscellaneous${NC}"
 remove_if_exists ".opencode/cache/"    "OpenCode cache"
-remove_if_exists ".coderun/cache/"     "Coderun cache"
+remove_if_exists ".knocode/cache/"     "Knocode cache"
 remove_if_exists "eval/results/"       "Evaluation results"
 remove_if_exists "experiments/"        "All experiments (already in .gitignore)"
 echo ""

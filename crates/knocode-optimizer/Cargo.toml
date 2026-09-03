@@ -1,0 +1,16 @@
+[package]
+name = "knocode-optimizer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knocode-core.workspace = true
+knocode-events.workspace = true
+tokio.workspace = true
+serde.workspace = true
+regex.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+tiktoken-rs.workspace = true
+uuid.workspace = true
+chrono.workspace = true

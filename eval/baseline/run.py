@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Baseline vs Coderun harness (TASK-004/TASK-017).
-Real implementation: uses tiktoken (if available) + coderun preview + GET /metrics
+Baseline vs Knocode harness (TASK-004/TASK-017).
+Real implementation: uses tiktoken (if available) + knocode preview + GET /metrics
 instead of the previous mock `tokens 1200 vs 2500`.
 
 Measures per task: task_success, input/output/tool/total tokens, latency, cost, context_recall, MRR.
 
 Usage:
-  python eval/baseline/run.py --dataset eval/datasets/repository_tasks.yaml --out eval/results/baseline_vs_coderun.json
+  python eval/baseline/run.py --dataset eval/datasets/repository_tasks.yaml --out eval/results/baseline_vs_knocode.json
 """
 
 import argparse
@@ -44,10 +44,10 @@ def get_metrics():
 
 
 def parse_preview(task_str: str, timeout: int = 10):
-    """Call `coderun preview <task>` and parse code_context paths + token usage if present."""
+    """Call `knocode preview <task>` and parse code_context paths + token usage if present."""
     t0 = time.time()
     proc = subprocess.run(
-        ["cargo", "run", "-p", "coderun-cli", "--quiet", "--", "preview", task_str],
+        ["cargo", "run", "-p", "knocode-cli", "--quiet", "--", "preview", task_str],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -68,17 +68,17 @@ def parse_preview(task_str: str, timeout: int = 10):
     cost_usd = 0.0
     metrics_body = get_metrics()
     if metrics_body:
-        m_cost = re.search(r"coderun_requests_total", metrics_body)
+        m_cost = re.search(r"knocode_requests_total", metrics_body)
         # cost not in metrics, keep heuristic until LiteLLM wired
         cost_usd = 0.0
     return retrieved, total_tokens, latency_ms, out
 
 
-def run_task(task, with_coderun: bool):
+def run_task(task, with_knocode: bool):
     task_str = task["task"]
     expected = task.get("expected_files", [])
-    if not with_coderun:
-        # Baseline: no Coderun context — token count is raw task text + naive file reads
+    if not with_knocode:
+        # Baseline: no Knocode context — token count is raw task text + naive file reads
         input_tokens = count_tokens_tiktoken(task_str) + 800
         output_tokens = 400
         tool_tokens = 600
@@ -94,7 +94,7 @@ def run_task(task, with_coderun: bool):
         return {
             "task": task_str,
             "category": task.get("category", ""),
-            "with_coderun": False,
+            "with_knocode": False,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "tool_tokens": tool_tokens,
@@ -128,7 +128,7 @@ def run_task(task, with_coderun: bool):
             return {
                 "task": task_str,
                 "category": task.get("category", ""),
-                "with_coderun": True,
+                "with_knocode": True,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "tool_tokens": tool_tokens,
@@ -141,7 +141,7 @@ def run_task(task, with_coderun: bool):
                 "actual_success": actual_success,
             }
         except subprocess.TimeoutExpired:
-            print(f"ERROR: coderun preview timeout for '{task_str[:60]}' — failing hard (no mock)", file=sys.stderr)
+            print(f"ERROR: knocode preview timeout for '{task_str[:60]}' — failing hard (no mock)", file=sys.stderr)
             sys.exit(2)
         except Exception as e:
             # Fail hard rather than mock — per TASK-004/006
@@ -152,7 +152,7 @@ def run_task(task, with_coderun: bool):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="eval/datasets/repository_tasks.yaml")
-    ap.add_argument("--out", default="eval/results/baseline_vs_coderun.json")
+    ap.add_argument("--out", default="eval/results/baseline_vs_knocode.json")
     ap.add_argument("--k", default="5,10")
     ap.add_argument("--timeout", type=int, default=10)
     args = ap.parse_args()
@@ -168,20 +168,20 @@ def main():
     # Also write evaluation.json aggregate for MRR/latency/duplicate_ratio (TASK-004 companion)
     eval_path = pathlib.Path("eval/results/evaluation.json")
     eval_path.parent.mkdir(parents=True, exist_ok=True)
-    # Aggregate Coderun-only stats
-    coderun = [r for r in results if r["with_coderun"]]
-    baseline = [r for r in results if not r["with_coderun"]]
-    avg_recall = sum(r.get("context_recall", 0) for r in coderun) / len(coderun) if coderun else 0
-    avg_mrr = sum(r.get("mrr", 0) for r in coderun) / len(coderun) if coderun else 0
-    avg_latency = sum(r.get("latency_ms", 0) for r in coderun) / len(coderun) if coderun else 0
+    # Aggregate Knocode-only stats
+    knocode = [r for r in results if r["with_knocode"]]
+    baseline = [r for r in results if not r["with_knocode"]]
+    avg_recall = sum(r.get("context_recall", 0) for r in knocode) / len(knocode) if knocode else 0
+    avg_mrr = sum(r.get("mrr", 0) for r in knocode) / len(knocode) if knocode else 0
+    avg_latency = sum(r.get("latency_ms", 0) for r in knocode) / len(knocode) if knocode else 0
 
     open(args.out, "w").write(json.dumps(results, indent=2))
     print(f"Wrote {len(results)} results to {args.out}")
     # Summary
-    if baseline and coderun:
+    if baseline and knocode:
         print(f"Baseline total_tokens avg: {sum(r['input_tokens']+r['output_tokens']+r['tool_tokens'] for r in baseline)/len(baseline):.0f}")
-        print(f"Coderun total_tokens avg: {sum(r['input_tokens']+r['output_tokens']+r['tool_tokens'] for r in coderun)/len(coderun):.0f}")
-        print(f"Coderun avg recall@10: {avg_recall:.3f} avg MRR: {avg_mrr:.3f} avg latency: {avg_latency:.0f}ms (real tiktoken + preview + /metrics)")
+        print(f"Knocode total_tokens avg: {sum(r['input_tokens']+r['output_tokens']+r['tool_tokens'] for r in knocode)/len(knocode):.0f}")
+        print(f"Knocode avg recall@10: {avg_recall:.3f} avg MRR: {avg_mrr:.3f} avg latency: {avg_latency:.0f}ms (real tiktoken + preview + /metrics)")
     # Duplicate aggregate
     dup_payload = {
         "summary": {
@@ -189,7 +189,7 @@ def main():
             "avg_mrr": round(avg_mrr, 4),
             "avg_latency_ms": round(avg_latency, 1),
         },
-        "counts": {"coderun": len(coderun), "baseline": len(baseline)},
+        "counts": {"knocode": len(knocode), "baseline": len(baseline)},
     }
     if not eval_path.exists():
         eval_path.write_text(json.dumps(dup_payload, indent=2))

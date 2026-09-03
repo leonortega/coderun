@@ -110,7 +110,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Skill Engine
 
-**Definition:** [REMOVED] Coderun's deterministic tag-based skill matching component was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`).
+**Definition:** [REMOVED] Knocode's deterministic tag-based skill matching component was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`).
 
 ### Context
 
@@ -154,7 +154,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### engram
 
-**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies. **Removed** from Coderun v1 — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (replaced by SQLite+tantivy local).
+**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies. **Removed** from Knocode v1 — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (replaced by SQLite+tantivy local).
 
 **Scope:** Used for persistent memory in the Knowledge Hub.
 

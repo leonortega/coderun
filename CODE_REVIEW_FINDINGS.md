@@ -1,4 +1,4 @@
-# Code Review Findings — Coderun Repository
+# Code Review Findings — Knocode Repository
 
 **Date:** 2026-08-31  
 **Reviewer:** Buffy (Codebuff AI)
@@ -7,30 +7,30 @@
 
 ## 1. Duplicated Files (Exact Copies)
 
-### 1.1 Benchmark Files — `benches/` vs `crates/coderun-bench/benches/`
+### 1.1 Benchmark Files — `benches/` vs `crates/knocode-bench/benches/`
 
-The root-level `benches/` directory contains **identical copies** of files in `crates/coderun-bench/benches/`:
+The root-level `benches/` directory contains **identical copies** of files in `crates/knocode-bench/benches/`:
 
 | Root (leftover) | Active location | Status |
 |---|---|---|
-| `benches/context_bench.rs` | `crates/coderun-bench/benches/context_bench.rs` | **Exact duplicate** |
-| `benches/rtk_bench.rs` | `crates/coderun-bench/benches/rtk_bench.rs` | **Exact duplicate** |
+| `benches/context_bench.rs` | `crates/knocode-bench/benches/context_bench.rs` | **Exact duplicate** |
+| `benches/rtk_bench.rs` | `crates/knocode-bench/benches/rtk_bench.rs` | **Exact duplicate** |
 
-**Recommendation:** Delete the root `benches/` directory. Only `crates/coderun-bench/` is a workspace member.
+**Recommendation:** Delete the root `benches/` directory. Only `crates/knocode-bench/` is a workspace member.
 
-### 1.2 Workflow Code — `future/workflow/` vs `crates/coderun-workflow/`
+### 1.2 Workflow Code — `future/workflow/` vs `crates/knocode-workflow/`
 
-The `future/workflow/src/` directory is a **complete copy** of `crates/coderun-workflow/src/`:
+The `future/workflow/src/` directory is a **complete copy** of `crates/knocode-workflow/src/`:
 
-| File | `future/workflow/` | `crates/coderun-workflow/` | Status |
+| File | `future/workflow/` | `crates/knocode-workflow/` | Status |
 |---|---|---|---|
 | `lib.rs` | ✅ | ✅ | **Identical** |
 | `dbos.rs` | ✅ | ✅ | **Identical** |
 | `types.rs` | ✅ | ✅ | **Identical** |
 
-`future/workflow/` is excluded from the workspace in `Cargo.toml` (`exclude = ["crates/coderun-workflow", "future/workflow"]`), so it's dead code.
+`future/workflow/` is excluded from the workspace in `Cargo.toml` (`exclude = ["crates/knocode-workflow", "future/workflow"]`), so it's dead code.
 
-**Recommendation:** Delete `future/workflow/` entirely. If it's a "future" prototype, the active code lives in `crates/coderun-workflow/`.
+**Recommendation:** Delete `future/workflow/` entirely. If it's a "future" prototype, the active code lives in `crates/knocode-workflow/`.
 
 ---
 
@@ -39,12 +39,12 @@ The `future/workflow/src/` directory is a **complete copy** of `crates/coderun-w
 **File:** `scripts/uninstall.ps1` line ~280  
 **Code:**
 ```powershell
-$hardcodedGlobalPlugin = "C:\Users\marce\.config\opencode\plugins\coderun.ts"
+$hardcodedGlobalPlugin = "C:\Users\marce\.config\opencode\plugins\knocode.ts"
 ```
 
 This is a **hardcoded developer username** (`marce`) embedded in the uninstall script. It will fail on any other user's machine.
 
-**Recommendation:** Replace with `$env:USERPROFILE\.config\opencode\plugins\coderun.ts` (which is already `$pluginGlobal` defined earlier in the same block, making this line fully redundant).
+**Recommendation:** Replace with `$env:USERPROFILE\.config\opencode\plugins\knocode.ts` (which is already `$pluginGlobal` defined earlier in the same block, making this line fully redundant).
 
 ---
 
@@ -54,20 +54,20 @@ This is a **hardcoded developer username** (`marce`) embedded in the uninstall s
 
 | Location | Item | Notes |
 |---|---|---|
-| `coderun-context/src/lib.rs:15` | `STOP_WORDS` constant | Only used in `classify_misses()` (inline copy, not this constant). The constant is truly dead. |
-| `coderun-context/src/lib.rs:37` | `is_valid_file_path()` | Not called anywhere in production code. |
-| `coderun-repo-intel/src/lib.rs:39` | `import_pattern` field | Unused struct field. |
-| `coderun-repo-intel/src/lib.rs:117` | `file_hashes` field | Unused struct field. |
-| `coderun-knowledge/src/lib.rs:33` | `config` field | Unused struct field. |
-| `coderun-daemon/src/adapter.rs:20-24` | `socket_path`, `max_concurrent` | Unused struct fields. |
-| `coderun-daemon/src/adapter.rs:203` | `shutdown()` method | Never called. |
-| `coderun-storage/src/tantivy_index.rs:395` | `invalidate_reader_cache()` | Empty no-op method. |
-| `coderun-storage/src/tantivy_index.rs:562` | `expand_query_with_symbols()` | Never called. |
-| `coderun-daemon/src/lifecycle.rs:21` | `db`, `event_bus` fields | Marked dead_code but part of `DaemonState` — likely intentional for future use. |
+| `knocode-context/src/lib.rs:15` | `STOP_WORDS` constant | Only used in `classify_misses()` (inline copy, not this constant). The constant is truly dead. |
+| `knocode-context/src/lib.rs:37` | `is_valid_file_path()` | Not called anywhere in production code. |
+| `knocode-repo-intel/src/lib.rs:39` | `import_pattern` field | Unused struct field. |
+| `knocode-repo-intel/src/lib.rs:117` | `file_hashes` field | Unused struct field. |
+| `knocode-knowledge/src/lib.rs:33` | `config` field | Unused struct field. |
+| `knocode-daemon/src/adapter.rs:20-24` | `socket_path`, `max_concurrent` | Unused struct fields. |
+| `knocode-daemon/src/adapter.rs:203` | `shutdown()` method | Never called. |
+| `knocode-storage/src/tantivy_index.rs:395` | `invalidate_reader_cache()` | Empty no-op method. |
+| `knocode-storage/src/tantivy_index.rs:562` | `expand_query_with_symbols()` | Never called. |
+| `knocode-daemon/src/lifecycle.rs:21` | `db`, `event_bus` fields | Marked dead_code but part of `DaemonState` — likely intentional for future use. |
 
 ### 3.2 Legacy alias
 
-**File:** `coderun-context/src/lib.rs`  
+**File:** `knocode-context/src/lib.rs`  
 ```rust
 pub fn estimate_tokens(text: &str) -> usize {
     count_tokens(text)
@@ -81,8 +81,8 @@ This is a legacy alias. Should be deprecated with `#[deprecated]` or removed if 
 
 The stop words list is defined in **two places** and they're independent copies:
 
-1. **`coderun-context/src/lib.rs:15`** — `STOP_WORDS` constant (dead, never used)
-2. **`coderun-context/src/lib.rs:923`** — Inline `stop_words` variable inside `classify_misses()`
+1. **`knocode-context/src/lib.rs:15`** — `STOP_WORDS` constant (dead, never used)
+2. **`knocode-context/src/lib.rs:923`** — Inline `stop_words` variable inside `classify_misses()`
 
 The inline copy is the one actually used. The `STOP_WORDS` constant is dead code.
 
@@ -111,18 +111,18 @@ There are **78+ `eprintln!` calls** across production (non-test) Rust code, used
 
 | Location | Count | Notes |
 |---|---|---|
-| `coderun-context/src/lib.rs` | 8 | `prof()` + explain logging |
-| `coderun-storage/src/tantivy_index.rs` | 2 | `[profile]` logging |
-| `coderun-repo-intel/src/lib.rs` | 2 | `[profile]` logging |
-| `coderun-cli/src/main.rs` | 2 | `println!` for banner |
-| `coderun-daemon/src/lifecycle.rs` | 8 | Banner `println!` |
-| `coderun-daemon/src/main.rs` | 4 | Error `eprintln!` |
-| `coderun-core/src/ipc.rs` | 12 | Retrieval diagnostic display |
+| `knocode-context/src/lib.rs` | 8 | `prof()` + explain logging |
+| `knocode-storage/src/tantivy_index.rs` | 2 | `[profile]` logging |
+| `knocode-repo-intel/src/lib.rs` | 2 | `[profile]` logging |
+| `knocode-cli/src/main.rs` | 2 | `println!` for banner |
+| `knocode-daemon/src/lifecycle.rs` | 8 | Banner `println!` |
+| `knocode-daemon/src/main.rs` | 4 | Error `eprintln!` |
+| `knocode-core/src/ipc.rs` | 12 | Retrieval diagnostic display |
 
-Some are gated behind `CODERUN_PROFILE` env var (good), but many are unconditional.
+Some are gated behind `KNOCODE_PROFILE` env var (good), but many are unconditional.
 
 **Recommendation:** 
-- Keep `prof()` and `[profile]` lines gated behind `CODERUN_PROFILE`
+- Keep `prof()` and `[profile]` lines gated behind `KNOCODE_PROFILE`
 - Convert unconditional `eprintln!` to `tracing::debug!` / `tracing::warn!` for structured logging
 - The banner `println!` in `lifecycle.rs` is fine for startup, but should use `tracing::info!`
 
@@ -134,10 +134,10 @@ There are **189 `unwrap()` calls** across the codebase. Most are in test code (a
 
 | Location | Risk |
 |---|---|
-| `coderun-events/src/lib.rs:103,125,136,152` | Mutex lock `.unwrap()` — will panic if poisoned |
-| `coderun-daemon/src/ratelimit.rs:32` | Mutex lock `.unwrap()` — same risk |
-| `coderun-storage/src/tantivy_index.rs:185` | `.pop().unwrap()` on Vec — could panic on empty |
-| `coderun-repo-intel/src/graph.rs:180-184` | Regex compilation `.unwrap()` — will panic on bad pattern |
+| `knocode-events/src/lib.rs:103,125,136,152` | Mutex lock `.unwrap()` — will panic if poisoned |
+| `knocode-daemon/src/ratelimit.rs:32` | Mutex lock `.unwrap()` — same risk |
+| `knocode-storage/src/tantivy_index.rs:185` | `.pop().unwrap()` on Vec — could panic on empty |
+| `knocode-repo-intel/src/graph.rs:180-184` | Regex compilation `.unwrap()` — will panic on bad pattern |
 
 The regex ones are `lazy_static` / `LazyLock`-style patterns (acceptable for known-valid regex). The mutex ones are the main concern.
 
@@ -197,12 +197,12 @@ These orphaned `done`/`fi` statements suggest incomplete editing. The script may
 **File:** `Cargo.toml`
 
 ```toml
-exclude = ["crates/coderun-workflow", "future/workflow"]
+exclude = ["crates/knocode-workflow", "future/workflow"]
 ```
 
-Both `coderun-workflow` and `future/workflow` are excluded from the workspace. The `future/workflow` copy is dead code (see §1.2), but `crates/coderun-workflow` being excluded means it's **not built or tested** as part of the workspace.
+Both `knocode-workflow` and `future/workflow` are excluded from the workspace. The `future/workflow` copy is dead code (see §1.2), but `crates/knocode-workflow` being excluded means it's **not built or tested** as part of the workspace.
 
-**Recommendation:** Either include `crates/coderun-workflow` in the workspace, or document why it's intentionally excluded.
+**Recommendation:** Either include `crates/knocode-workflow` in the workspace, or document why it's intentionally excluded.
 
 ---
 

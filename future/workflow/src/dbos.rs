@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use coderun_core::{traits::IWorkflowEngine, Config, TaskRequest};
-use coderun_core::error::{CoderunError, Result};
+use knocode_core::{traits::IWorkflowEngine, Config, TaskRequest};
+use knocode_core::error::{KnocodeError, Result};
 use tracing::{warn};
 
 /// DBOS Transact sidecar engine — HTTP bridge to Node process (v0.6.0 native async)
@@ -23,7 +23,7 @@ impl DBOSWorkflowEngine {
 
     fn hmac_header(&self, body: &str) -> Option<String> {
         let secret = self.shared_secret.as_ref()?;
-        Some(coderun_core::secrets::hmac_hex(secret, body))
+        Some(knocode_core::secrets::hmac_hex(secret, body))
     }
 }
 
@@ -45,21 +45,21 @@ impl IWorkflowEngine for DBOSWorkflowEngine {
             .post(format!("{}/workflow/start", endpoint))
             .header("Content-Type", "application/json")
             .body(body_str.clone());
-        if let Some(sig) = hmac { req = req.header("X-Coderun-Signature", sig); }
+        if let Some(sig) = hmac { req = req.header("X-Knocode-Signature", sig); }
 
         match tokio::time::timeout(Duration::from_millis(5000), req.send()).await {
             Ok(Ok(resp)) if resp.status().is_success() => Ok(workflow_id),
             Ok(Ok(resp)) => {
                 warn!(status = %resp.status(), "DBOS start failed");
-                Err(CoderunError::InvalidRequest(format!("DBOS start failed: {}", resp.status())))
+                Err(KnocodeError::InvalidRequest(format!("DBOS start failed: {}", resp.status())))
             }
             Ok(Err(e)) => {
                 warn!(error = %e, "DBOS request error");
-                Err(CoderunError::InvalidRequest(format!("DBOS request error: {}", e)))
+                Err(KnocodeError::InvalidRequest(format!("DBOS request error: {}", e)))
             }
             Err(_) => {
                 warn!("DBOS start timeout (5s)");
-                Err(CoderunError::Timeout("DBOS start timeout".to_string()))
+                Err(KnocodeError::Timeout("DBOS start timeout".to_string()))
             }
         }
     }
@@ -76,9 +76,9 @@ impl IWorkflowEngine for DBOSWorkflowEngine {
                 let text = r.text().await.unwrap_or_else(|_| format!("{{\"workflow_id\":\"{}\",\"status\":\"running\"}}", workflow_id));
                 Ok(text)
             }
-            Ok(Ok(r)) => Err(CoderunError::InvalidRequest(format!("Workflow {} status {} ", workflow_id, r.status()))),
-            Ok(Err(e)) => Err(CoderunError::InvalidRequest(format!("Workflow {} error {}", workflow_id, e))),
-            Err(_) => Err(CoderunError::Timeout(format!("Workflow {} timeout", workflow_id))),
+            Ok(Ok(r)) => Err(KnocodeError::InvalidRequest(format!("Workflow {} status {} ", workflow_id, r.status()))),
+            Ok(Err(e)) => Err(KnocodeError::InvalidRequest(format!("Workflow {} error {}", workflow_id, e))),
+            Err(_) => Err(KnocodeError::Timeout(format!("Workflow {} timeout", workflow_id))),
         }
     }
 
@@ -91,7 +91,7 @@ impl IWorkflowEngine for DBOSWorkflowEngine {
     }
 }
 
-pub use coderun_core::secrets::verify_hmac;
+pub use knocode_core::secrets::verify_hmac;
 
 #[cfg(test)]
 mod tests {
@@ -100,12 +100,12 @@ mod tests {
     fn test_hmac_verify_core() {
         let secret = "s3cret";
         let body = r#"{"task":"hi"}"#;
-        let sig = coderun_core::secrets::hmac_hex(secret, body);
+        let sig = knocode_core::secrets::hmac_hex(secret, body);
         assert!(verify_hmac(secret, body, &sig));
         assert!(!verify_hmac(secret, body, "bad"));
         assert!(!verify_hmac("other", body, &sig));
         // empty body
-        let empty_sig = coderun_core::secrets::hmac_hex(secret, "");
+        let empty_sig = knocode_core::secrets::hmac_hex(secret, "");
         assert!(verify_hmac(secret, "", &empty_sig));
         assert!(!verify_hmac(secret, "x", &empty_sig));
     }

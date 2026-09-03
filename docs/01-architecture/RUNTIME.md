@@ -19,7 +19,7 @@ The runtime runs as a single Rust daemon process. The daemon hosts a Unix domain
 ### Process Lifecycle
 
 ```
-Start (coderun serve)
+Start (knocode serve)
   │
   ├── Load configuration
   ├── Initialize logging + metrics
@@ -73,9 +73,9 @@ Start (coderun serve)
 ### Step 1: Configuration Loading
 
 ```
-1. Check for project-local config: .coderun/config.toml
-2. Check for user config: ~/.config/coderun/config.toml
-3. Check for environment variables: CODERUN_*
+1. Check for project-local config: .knocode/config.toml
+2. Check for user config: ~/.config/knocode/config.toml
+3. Check for environment variables: KNOCODE_*
 4. Merge in order: user < project < environment
 5. Validate all required fields are present
 6. Fail with clear error message if required fields are missing
@@ -95,7 +95,7 @@ Start (coderun serve)
 ### Step 3: Database Initialization
 
 ```
-1. Open SQLite at configured path (default: ~/.coderun/data.db)
+1. Open SQLite at configured path (default: ~/.knocode/data.db)
 2. Create tables if they do not exist (migration 001)
 3. Set WAL mode for concurrent reads
 4. Initialize connection pool (max 5 connections)
@@ -144,7 +144,7 @@ Start (coderun serve)
 ### Step 7: UDS/MessagePack Adapter Bind
 
 ```
-1. Create Unix socket at configured path (default: /tmp/coderun.sock)
+1. Create Unix socket at configured path (default: /tmp/knocode.sock)
 2. Set socket permissions (owner read/write only)
 3. Bind — only after the initial index completed (readiness gate)
 4. Log server startup with socket path
@@ -157,26 +157,26 @@ Start (coderun serve)
 
 | Priority | Path | Purpose |
 |----------|------|---------|
-| 1 (lowest) | `~/.config/coderun/config.toml` | User-wide defaults |
-| 2 | `.coderun/config.toml` | Project-specific overrides |
-| 3 (highest) | Environment variables `CODERUN_*` | Runtime overrides |
+| 1 (lowest) | `~/.config/knocode/config.toml` | User-wide defaults |
+| 2 | `.knocode/config.toml` | Project-specific overrides |
+| 3 (highest) | Environment variables `KNOCODE_*` | Runtime overrides |
 
 ### Configuration Schema
 
 ```toml
-# ~/.config/coderun/config.toml
+# ~/.config/knocode/config.toml
 
 [daemon]
-socket_path = "/tmp/coderun.sock"    # Unix socket path
+socket_path = "/tmp/knocode.sock"    # Unix socket path
 max_concurrent = 10                   # Max concurrent requests
 request_timeout_ms = 30000            # Max time for BuildContext (fail-open)
 
 [database]
-path = "~/.coderun/data.db"          # SQLite database path
+path = "~/.knocode/data.db"          # SQLite database path
 max_connections = 5                   # Connection pool size
 
 [index]
-path = "~/.coderun/index/"           # Tantivy index directory
+path = "~/.knocode/index/"           # Tantivy index directory
 languages = ["rust", "typescript", "javascript", "python"]  # 111 languages supported via arborium; add any from arborium's language list
 
 [knowledge]
@@ -205,7 +205,7 @@ compression_level = "balanced"        # light, balanced, aggressive
 
 [logging]
 level = "info"                        # Log level: error, warn, info, debug, trace
-file_path = "~/.coderun/logs/coderun.log"  # Log file path
+file_path = "~/.knocode/logs/knocode.log"  # Log file path
 max_size_mb = 100                     # Max log file size
 retention_days = 7                    # Log retention
 ```
@@ -214,13 +214,13 @@ retention_days = 7                    # Log retention
 
 | Variable | Overrides | Default |
 |----------|-----------|---------|
-| `CODERUN_DAEMON_SOCKET` | daemon.socket_path | /tmp/coderun.sock |
-| `CODERUN_DATABASE_PATH` | database.path | ~/.coderun/data.db |
-| `CODERUN_LOG_LEVEL` | logging.level | info |
-| `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `CODERUN_ENGRAM_ENDPOINT` | *removed* — engram retired (see ENGRAM_CBM_REMOVAL.md) | — |
-| `CODERUN_MODEL_DEFAULT` | *removed v0.8.6* — model router deleted | — |
-| `CODERUN_LITELLM_URL` | *removed v0.8.6* — LiteLLM deleted | — |
+| `KNOCODE_DAEMON_SOCKET` | daemon.socket_path | /tmp/knocode.sock |
+| `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
+| `KNOCODE_LOG_LEVEL` | logging.level | info |
+| `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
+| `KNOCODE_ENGRAM_ENDPOINT` | *removed* — engram retired (see ENGRAM_CBM_REMOVAL.md) | — |
+| `KNOCODE_MODEL_DEFAULT` | *removed v0.8.6* — model router deleted | — |
+| `KNOCODE_LITELLM_URL` | *removed v0.8.6* — LiteLLM deleted | — |
 
 ## IPC Protocol
 
@@ -308,9 +308,9 @@ indexing ──(initial index completes)──► ready ──(auto-reindex star
 | Surface | When not ready | When ready |
 |---------|----------------|------------|
 | HTTP `GET /health` | `{"state": "indexing", "index_files": N}` | `{"status": "ok", "state": "ready", ...}` |
-| HTTP `GET /metrics` | `coderun_daemon_ready 0` | `coderun_daemon_ready 1` |
+| HTTP `GET /metrics` | `knocode_daemon_ready 0` | `knocode_daemon_ready 1` |
 | HTTP `POST /hook` | HTTP `503` `reason: "daemon_indexing"` | processes the request |
-| Daemon MCP `POST /mcp` | `tools/call` -> JSON-RPC error `-32001 daemon_indexing` (HTTP `200`) | `tools/call` processes (`coderun_context` / `coderun_compress`) |
+| Daemon MCP `POST /mcp` | `tools/call` -> JSON-RPC error `-32001 daemon_indexing` (HTTP `200`) | `tools/call` processes (`knocode_context` / `knocode_compress`) |
 | UDS `Probe` payload | `Probe { state: "indexing", ... }` | `Probe { state: "ready", ... }` |
 
 Wire example (UDS/MessagePack primary):

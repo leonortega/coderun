@@ -14,10 +14,10 @@ The **AI Runtime** is the product: a local layer between coding agents and their
 models/providers that provides capabilities agents consistently benefit from but
 should not have to implement independently.
 
-**Coderun is a subsystem** of the Runtime — its repository/context intelligence
+**Knocode is a subsystem** of the Runtime — its repository/context intelligence
 — not the whole product. This keeps the Runtime model-agnostic and agent-agnostic
-and leaves room for capabilities beyond Coderun to be added later without turning
-Coderun into a monolith.
+and leaves room for capabilities beyond Knocode to be added later without turning
+Knocode into a monolith.
 
 The Runtime **improves existing coding agents**. It does not replace them, and it
 is not an autonomous SDLC orchestrator.
@@ -26,10 +26,10 @@ is not an autonomous SDLC orchestrator.
 
 | Pillar | Purpose | Confidence | Primary crates |
 |--------|---------|------------|----------------|
-| **Observability** | See what the agent + runtime are doing (traces, metrics, costs) | 🟢🟢 | `coderun-daemon` (metrics), `coderun-events`, `coderun-storage` |
-| **Intelligence** | Understand the repository and build token-efficient context | 🟢🟢 | `coderun-repo-intel`, `coderun-context`, `coderun-knowledge` |
-| **Execution Optimization** | Reduce useless tool output (token waste) | 🟢 | `coderun-optimizer` |
-| **Local Runtime** | Fast, fail-open infrastructure (IPC, lifecycle, readiness) | 🟢🟢 | `coderun-daemon`, `coderun-core`, `coderun-cli` |
+| **Observability** | See what the agent + runtime are doing (traces, metrics, costs) | 🟢🟢 | `knocode-daemon` (metrics), `knocode-events`, `knocode-storage` |
+| **Intelligence** | Understand the repository and build token-efficient context | 🟢🟢 | `knocode-repo-intel`, `knocode-context`, `knocode-knowledge` |
+| **Execution Optimization** | Reduce useless tool output (token waste) | 🟢 | `knocode-optimizer` |
+| **Local Runtime** | Fast, fail-open infrastructure (IPC, lifecycle, readiness) | 🟢🟢 | `knocode-daemon`, `knocode-core`, `knocode-cli` |
 
 ## 2. Ownership Boundaries
 
@@ -38,13 +38,13 @@ is not an autonomous SDLC orchestrator.
 - The **Runtime API** (UDS/MessagePack primary, HTTP fallback), the daemon
   lifecycle, and fail-open guarantees.
 - **Readiness**: `GET /health` (`state: indexing|ready`), `GET /metrics`
-  (`coderun_daemon_ready`), HTTP `503 daemon_indexing`, and the UDS `Probe`
+  (`knocode_daemon_ready`), HTTP `503 daemon_indexing`, and the UDS `Probe`
   payload. Clients wait on readiness before sending requests.
 - **Observability**: per-request traces, metrics, and (V1 gap) cost attribution.
 - **Execution optimization**: tool-output compression/filtering.
-- The **Intelligence pillar**, implemented by Coderun (§2.2).
+- The **Intelligence pillar**, implemented by Knocode (§2.2).
 
-### 2.2 What Coderun owns (the Intelligence subsystem)
+### 2.2 What Knocode owns (the Intelligence subsystem)
 
 - **Repository Intelligence** — index → symbols → structural understanding →
   retrieval → dependency relationships. Incremental indexing (tree-sitter +
@@ -70,9 +70,9 @@ is not an autonomous SDLC orchestrator.
 | Capability | Status in this repo | Rationale |
 |------------|--------------------|-----------|
 | Skill Engine | Removed (see `REMOVED_TOOLS.md`) | Modern agents have their own discovery; a second selection system adds complexity without demonstrated outcome gains. Runtime does not *own* the skill concept. |
-| Model Router | Removed (v0.8.6; `coderun-router` no longer in the workspace) | Cannot prove the runtime consistently beats agent/provider/user choice; capabilities change fast. Runtime stays model-agnostic. |
-| Workflow Engine | Removed (`coderun-workflow` no longer in the workspace) | Not required to make the Runtime valuable. |
-| Durable Event Store as a product surface | In-memory ring buffer only (`coderun-events`) | Traces/events remain — they are the observability substrate — but persistence/replay is not a V1 product feature. |
+| Model Router | Removed (v0.8.6; `knocode-router` no longer in the workspace) | Cannot prove the runtime consistently beats agent/provider/user choice; capabilities change fast. Runtime stays model-agnostic. |
+| Workflow Engine | Removed (`knocode-workflow` no longer in the workspace) | Not required to make the Runtime valuable. |
+| Durable Event Store as a product surface | In-memory ring buffer only (`knocode-events`) | Traces/events remain — they are the observability substrate — but persistence/replay is not a V1 product feature. |
 | Capability Scheduler / Mission Manager | Never built | Out of scope. |
 | Autonomous SDLC / multi-agent orchestration | Never built | Contradicts the V1 constraint: improve agents, don't replace them. |
 
@@ -115,7 +115,7 @@ V1 trace questions the Runtime must answer:
 - Why did this agent consume N tokens? (per-request breakdown by source)
 - Which tools are producing useless output?
 - Which repository searches are slow?
-- How much context did Coderun actually add, and did retrieval change the outcome?
+- How much context did Knocode actually add, and did retrieval change the outcome?
 - Which operations are failing, and where is the latency?
 
 **V1 gaps (build work, not relabeling):**
@@ -127,7 +127,7 @@ V1 trace questions the Runtime must answer:
 3. **Outcome hooks** — correlating "context injected" with "result improved"
    needs evaluation scaffolding beyond current benchmarks.
 
-### 3.2 Intelligence (Coderun)
+### 3.2 Intelligence (Knocode)
 
 - **Repository Intelligence** — incremental indexing; tree-sitter (111 langs),
   tantivy BM25, ast-grep structural, dependency graph; `commit`/`filesystem`
@@ -143,7 +143,7 @@ V1 trace questions the Runtime must answer:
 
 ### 3.3 Execution Optimization
 
-- Tool-output compression/filtering (`coderun-optimizer`): built-in compressors,
+- Tool-output compression/filtering (`knocode-optimizer`): built-in compressors,
   optional RTK binary; tee-on-failure; honest savings reporting
   (reduction in the thing measured ≠ reduction in your bill).
 - Inputs: `tool_name`, `output_type`, `content`, `context`. Output:
@@ -181,7 +181,7 @@ V1 trace questions the Runtime must answer:
 | UDS/MessagePack | `RequestPayload::ToolOutput` | Pre-tool: compress output |
 | UDS/MessagePack | `RequestPayload::Probe` | Readiness: `state`, `index_files`, `version` |
 | HTTP | `GET /health` | Readiness + version + index count |
-| HTTP | `GET /metrics` | Prometheus exposition incl. `coderun_daemon_ready` |
+| HTTP | `GET /metrics` | Prometheus exposition incl. `knocode_daemon_ready` |
 | HTTP | `POST /hook` | JSON fallback for the two hooks; `503 daemon_indexing` while not ready |
 
 ## 6. Evolution Path

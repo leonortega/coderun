@@ -1,17 +1,17 @@
-// Coderun adapter for Cursor (Tier 1 — programmatic hooks, v0.4.0)
+// Knocode adapter for Cursor (Tier 1 — programmatic hooks, v0.4.0)
 // Spec §3 Adapter Layer: intercept before generation (rewrite) and before tool call (compress)
 // Uses Cursor's hook/extension API analogous to opencode `chat.message` / `tool.execute.before`.
 // Fail-open on timeout (30s) — returns OriginalPassthrough and logs warning.
 // IPC: UDS + MessagePack primary (rmp), HTTP/JSON fallback on Windows.
-// See .opencode/plugins/coderun.ts for reference implementation and ADAPTERS.md.
+// See .opencode/plugins/knocode.ts for reference implementation and ADAPTERS.md.
 
 import * as net from "net";
 import * as fs from "fs";
 
-const SOCKET_PATH = process.env.CODERUN_SOCKET || "/tmp/coderun.sock";
-const HTTP_FALLBACK = process.env.CODERUN_DAEMON_URL || "http://127.0.0.1:9527";
+const SOCKET_PATH = process.env.KNOCODE_SOCKET || "/tmp/knocode.sock";
+const HTTP_FALLBACK = process.env.KNOCODE_DAEMON_URL || "http://127.0.0.1:9527";
 const TIMEOUT_MS = 30_000;
-const READY_TIMEOUT_MS = Number(process.env.CODERUN_READY_TIMEOUT_MS) || 10_000;
+const READY_TIMEOUT_MS = Number(process.env.KNOCODE_READY_TIMEOUT_MS) || 10_000;
 const READY_POLL_MS = 250;
 const READY_REPOLL_MS = 30_000;
 
@@ -100,5 +100,5 @@ export function activate() {
   //   const compressed = await callDaemon({ type: "ToolOutput", tool_name: tool, output_type: "Other", content: output }, "PreToolCall");
   //   return compressed ?? output;
   // });
-  console.log("[coderun] Cursor adapter registered (Tier 1, UDS+MessagePack primary, HTTP fallback, 30s fail-open)");
+  console.log("[knocode] Cursor adapter registered (Tier 1, UDS+MessagePack primary, HTTP fallback, 30s fail-open)");
 }

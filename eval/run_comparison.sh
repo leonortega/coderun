@@ -5,24 +5,24 @@
 # Usage: ./run_comparison.sh [eshop_repo_path]
 #
 # Note: FlashRank was removed from the v1 runtime path per benchmark evaluation.
-# See crates/coderun-knowledge/src/rerank.rs for rationale.
+# See crates/knocode-knowledge/src/rerank.rs for rationale.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-C:/LeonRepository/eShopOnWeb}"
-BINARY="target/release/coderun.exe"
+BINARY="target/release/knocode.exe"
 RESULTS_DIR="$SCRIPT_DIR/results"
 
 # Ensure binary exists
 if [ ! -f "$BINARY" ]; then
-    echo "ERROR: Binary not found at $BINARY — run 'cargo build --release -p coderun-cli' first"
+    echo "ERROR: Binary not found at $BINARY — run 'cargo build --release -p knocode-cli' first"
     exit 1
 fi
 
 # Ensure eShopOnWeb is indexed
 echo "=== Checking eShopOnWeb index ==="
-if [ ! -d "$REPO/.coderun" ]; then
+if [ ! -d "$REPO/.knocode" ]; then
     echo "Indexing eShopOnWeb..."
     cd "$REPO" && "$BINARY" init 2>&1 | tail -5
 fi
@@ -37,7 +37,7 @@ echo ""
 
 # ── Configuration 1: Baseline BM25 (no symbols, no MCP) ────────
 echo "━━━ [1/3] Baseline BM25 (no symbols, no MCP) ━━━"
-CODERUN_MCP_ENABLED=false CODERUN_SYMBOLS_ENABLED=false \
+KNOCODE_MCP_ENABLED=false KNOCODE_SYMBOLS_ENABLED=false \
     python3 "$SCRIPT_DIR/metrics/retrieval.py" \
         --dataset "$SCRIPT_DIR/datasets/eshop_tasks.yaml" \
         --repo "$REPO" \
@@ -49,7 +49,7 @@ echo ""
 
 # ── Configuration 2: BM25 + tree-sitter symbols ────────────────
 echo "━━━ [2/3] BM25 + tree-sitter symbols ━━━"
-CODERUN_MCP_ENABLED=false CODERUN_SYMBOLS_ENABLED=true \
+KNOCODE_MCP_ENABLED=false KNOCODE_SYMBOLS_ENABLED=true \
     python3 "$SCRIPT_DIR/metrics/retrieval.py" \
         --dataset "$SCRIPT_DIR/datasets/eshop_tasks.yaml" \
         --repo "$REPO" \
@@ -61,7 +61,7 @@ echo ""
 
 # ── Configuration 3: BM25 + symbols + codebase-memory-mcp graph ──
 echo "━━━ [3/3] BM25 + symbols + MCP graph ━━━"
-CODERUN_MCP_ENABLED=true CODERUN_SYMBOLS_ENABLED=true \
+KNOCODE_MCP_ENABLED=true KNOCODE_SYMBOLS_ENABLED=true \
     python3 "$SCRIPT_DIR/metrics/retrieval.py" \
         --dataset "$SCRIPT_DIR/datasets/eshop_tasks.yaml" \
         --repo "$REPO" \

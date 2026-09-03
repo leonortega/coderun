@@ -6,14 +6,14 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 def run_bm25(query, timeout=30):
-    binary = os.path.join("target", "release", "coderun.exe")
+    binary = os.path.join("target", "release", "knocode.exe")
     if not os.path.exists(binary):
-        binary = os.path.join("target", "release", "coderun")
+        binary = os.path.join("target", "release", "knocode")
     try:
         proc = subprocess.run(
             [binary, "preview", query],
             capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=timeout, cwd=r"C:\LeonRepository\coderun"
+            timeout=timeout, cwd=r"C:\LeonRepository\knocode"
         )
         files = []
         for line in (proc.stdout or "").splitlines():
@@ -32,11 +32,11 @@ def run_bm25(query, timeout=30):
 
 def run_mcp(query, timeout=60):
     try:
-        cmd = f'npx codebase-memory-mcp cli search_code --pattern "{query}" --project coderun --file-pattern "*.rs" --limit 10 --json'
+        cmd = f'npx codebase-memory-mcp cli search_code --pattern "{query}" --project knocode --file-pattern "*.rs" --limit 10 --json'
         proc = subprocess.run(
             cmd,
             capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=timeout, cwd=r"C:\LeonRepository\coderun", shell=True
+            timeout=timeout, cwd=r"C:\LeonRepository\knocode", shell=True
         )
         out = proc.stdout or ""
         files = []

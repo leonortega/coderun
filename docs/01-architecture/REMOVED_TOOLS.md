@@ -9,21 +9,21 @@ explains why the rest is gone.
 
 | Tool / component | Removed (version) | What it was | Why removed (one line) | ADR / evidence |
 |---|---|---|---|---|
-| LLM Model Router + LiteLLM | v0.8.6 | Heuristic tier routing (`capable→balanced→fast`) with a LiteLLM HTTP fallback gateway; whole `coderun-router` crate | Routing couldn't be shown to beat the agent/provider/user choice, and model capabilities move too fast to encode | `LLM_ROUTING_REMOVAL.md` |
+| LLM Model Router + LiteLLM | v0.8.6 | Heuristic tier routing (`capable→balanced→fast`) with a LiteLLM HTTP fallback gateway; whole `knocode-router` crate | Routing couldn't be shown to beat the agent/provider/user choice, and model capabilities move too fast to encode | `LLM_ROUTING_REMOVAL.md` |
 | FlashRank reranker (`ort` int8) | v0.7.6 | Second-stage retrieval reranker, TF-IDF fallback on model-load failure | Measured **MRR degradation** on benchmark eval — ranking got worse, not better | `FLASHRANK_REMOVAL.md` |
 | Engram (cross-session memory) | v0.7.6 | Single Go binary, SQLite+FTS5 memory with MCP-native HTTP/CLI API | Zero recall gain; another external binary to install | `ENGRAM_CBM_REMOVAL.md` |
 | codebase-memory-mcp (graph probe) | v0.7.6 | Node dependency-graph extractor probed via `npx` as a first-class graph source | **0pp R@5 gain** over local AST+regex; fragile Node/npm dependency | `ENGRAM_CBM_REMOVAL.md` |
 | MkDocs integration | v0.9.0 | Ingested docs through the MkDocs build/ingestion path | Docs are plain Markdown — indexed via a first-class path instead | — |
 | DBOS workflow engine | v0.9.0 (code cleanup now) | Workflow/orchestration dependency (v0.6.0 made it "required") | Not required for V1; runtime is a single tokio daemon | — |
-| `coderun replay` CLI | v0.9.0 | Event-replay command over the event log | Replay off the hot path; `tracing` + metrics retained | — |
-| Skill Engine | **current change** | `coderun-skills` crate: tag-based skill matching + full-instruction injection (`.coderun/skills`, `~/.coderun/skills`) | Agents already have native skill discovery (`.claude/skills`, `.agents/skills`, `.cursor/rules`); a second discovery+conflict system added complexity with no demonstrated outcome lift | V1_RUNTIME_SPEC.md §2 |
-| Model map / tier config | **current change** | `ModelConfig { default_tier, routing_enabled }`, "fast/balanced/capable" validation, `CODERUN_MODEL_DEFAULT`, metrics request counter keyed `hook+tier`, `token_usage.model`/`tier` columns | Vestigial after the Model Router removal — nothing reads a tier anymore | `LLM_ROUTING_REMOVAL.md` |
+| `knocode replay` CLI | v0.9.0 | Event-replay command over the event log | Replay off the hot path; `tracing` + metrics retained | — |
+| Skill Engine (runtime) | **current change** | `knocode-skills` crate: tag-based skill matching + full-instruction injection (`.knocode/skills`, `~/.knocode/skills`) | Agents already have native skill discovery (`.claude/skills`, `.agents/skills`, `.cursor/rules`); a second discovery+conflict system added complexity with no demonstrated outcome lift | V1_RUNTIME_SPEC.md §2 |
+| Model map / tier config | **current change** | `ModelConfig { default_tier, routing_enabled }`, "fast/balanced/capable" validation, `KNOCODE_MODEL_DEFAULT`, metrics request counter keyed `hook+tier`, `token_usage.model`/`tier` columns | Vestigial after the Model Router removal — nothing reads a tier anymore | `LLM_ROUTING_REMOVAL.md` |
 
 ## Why things were removed — the reasoning
 
 A component is removed when it fails one of two tests:
 
-1. **No demonstrated value.** Coderun's bar for keeping a capability is a *measured* improvement
+1. **No demonstrated value.** Knocode's bar for keeping a capability is a *measured* improvement
    (recall, MRR, latency, tokens). FlashRank, engram, and codebase-memory-mcp were all evaluated
    head-to-head against the local baseline and lost — see the benchmark numbers below.
 2. **The runtime shouldn't own the problem.** Model selection belongs to the agent/provider/user;
@@ -46,7 +46,7 @@ decision).
 Benchmark evidence (`FLASHRANK_REMOVAL.md`) showed the reranker *degraded* results: adding FlashRank
 was worse than the BM25 + symbol/path baseline on the metrics that matter (MRR). The `ort` int8 model
 was replaced by a passthrough, then the passthrough scaffolding itself was removed (current change) —
-`rerank_enabled` and the `rerank.rs` module are gone from `coderun-knowledge`.
+`rerank_enabled` and the `rerank.rs` module are gone from `knocode-knowledge`.
 
 ### Engram + codebase-memory-mcp (v0.7.6)
 
@@ -58,7 +58,7 @@ fully local (SQLite + tantivy).
 ### DBOS workflow (v0.9.0 → current cleanup)
 
 The workflow engine was isolated out of the runtime in v0.9.0 (v1 is a single tokio daemon). With the
-daemon's `workflow` cargo feature, its cfg-gated HTTP routes, and the archived `crates/coderun-workflow`
+daemon's `workflow` cargo feature, its cfg-gated HTTP routes, and the archived `crates/knocode-workflow`
 crate now deleted, no DBOS code remains anywhere in the repository. (The feature had been default-off;
 nothing depended on it.)
 
@@ -68,14 +68,20 @@ Skills were first demoted in v0.8.0 to an optional, opt-in integration, then rem
 the runtime should not own the concept:
 
 - Modern agents already discover skills natively (`.claude/skills`, `.agents/skills`, `.cursor/rules`).
-  A parallel Coderun skill-selection system (its own discovery + conflict resolution + priority rules)
+  A parallel Knocode skill-selection system (its own discovery + conflict resolution + priority rules)
   is pure added complexity on top of that.
 - No evidence that runtime skill matching improves outcomes over the agent's own tooling — unlike
   retrieval and context, which are measured.
-- Removal is complete: the `coderun-skills` crate, `ContextPack.behavioral_skills`, KnowledgeHub skill
+- Removal is complete: the `knocode-skills` crate, `ContextPack.behavioral_skills`, KnowledgeHub skill
   load/match, the daemon's skill loading, the CLI `skills` subcommand + `--community-skills` install,
-  `[skills]` config, and the repository's skill content (`.coderun/skills`, `.opencode/skills`) are all
+  `[skills]` config, and the bundled skill library (`.knocode/skills`, `~/.knocode/skills`) are all
   gone. Context packs now carry docs + code context only.
+- **Retained — the agent-facing `knocode` skill** (`.opencode/skills/knocode/SKILL.md`). Skills live in
+  the agent's own ecosystem, and knocode ships one skill that teaches the agent how to use the
+  runtime (binary location, init/doctor, MCP tools). The installers copy it to the agent's global
+  skills directory (`~/.config/opencode/skills/knocode/`) per-agent — opencode today, others as
+  adapters land — and the uninstallers remove that copy. This is an agent-native integration, not a
+  runtime-owned concept: the runtime never matches or injects skills itself.
 
 ### Model map / tier config (current change)
 
@@ -83,9 +89,9 @@ After the Model Router removal nothing read `default_tier` / `routing_enabled`, 
 env var, validation, a hard-coded `"balanced"` tier in the metrics request counter, and
 `token_usage.model`/`tier` columns survived. This change deletes the model map entirely:
 
-- `ModelConfig` and `Config.model` removed from `coderun-core` config (with `[model]`/`[routing]`/
-  `[litellm]` TOML samples and `CODERUN_MODEL_DEFAULT`).
-- Metrics request counter keyed by hook type only (`coderun_requests_total`), no tier dimension.
+- `ModelConfig` and `Config.model` removed from `knocode-core` config (with `[model]`/`[routing]`/
+  `[litellm]` TOML samples and `KNOCODE_MODEL_DEFAULT`).
+- Metrics request counter keyed by hook type only (`knocode_requests_total`), no tier dimension.
 - Migration `007` drops the vestigial `token_usage.model` / `token_usage.tier` columns.
 
 ## Never shipped (scoped out in planning, not deleted code)
@@ -107,7 +113,7 @@ Skill Engine as a V1 primitive. See `V1_RUNTIME_SPEC.md`.
 | Daemon IPC: UDS/MessagePack + HTTP `/hook` + **MCP `POST /mcp`** | ✅ core |
 | Readiness (`/health`, `/metrics` gauge, UDS Probe, MCP `-32001`) | ✅ core |
 | Agent adapters (opencode plugin via MCP, Claude/Gemini/Cursor hooks) | ✅ |
-| MCP server package (`packages/coderun-mcp`, for Codex/Copilot/others) | ✅ |
+| MCP server package (`packages/knocode-mcp`, for Codex/Copilot/others) | ✅ |
 
 ## Re-entry rule
 

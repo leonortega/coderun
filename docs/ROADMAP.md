@@ -1,7 +1,7 @@
-# Coderun Roadmap
+# Knocode Roadmap
 
 > ⚠️ **Partially superseded by [V1_RUNTIME_SPEC.md](01-architecture/V1_RUNTIME_SPEC.md)** —
-> the V1 product definition (Runtime vs Coderun boundaries, out-of-scope list).
+> the V1 product definition (Runtime vs Knocode boundaries, out-of-scope list).
 > Where the sections below still show Model Router / Skill Engine as part of the
 > runtime, they reflect removed capabilities (Model Router v0.8.6; Skill Engine and
 > workflow — see `01-architecture/REMOVED_TOOLS.md`); the V1 spec wins where they
@@ -11,7 +11,7 @@
 
 **Released:** September 3, 2026
 **Status:** Active
-**Crates:** 12 workspace members (+ `coderun-workflow` excluded, in `future/workflow/`)
+**Crates:** 12 workspace members (+ `knocode-workflow` excluded, in `future/workflow/`)
 **Tests:** ~400
 
 ---
@@ -50,7 +50,7 @@
 - Knowledge Hub: BM25 → FlashRank pipeline *(FlashRank removed in v0.7.6 — see FLASHRANK_REMOVAL.md, reranker is passthrough)*, *engram deterministic reads — removed (see ENGRAM_CBM_REMOVAL.md)*
 - LiteLLM gateway with fallback chains
 - RTK adoption with tee-on-failure
-- Event bus + `coderun preview`/`replay` CLI
+- Event bus + `knocode preview`/`replay` CLI
 - Interface contracts: `IContextBuilder`, `IModelGateway`, `IWorkflowEngine`
 
 ### v0.4.0 — Production Hardening + DBOS ✅
@@ -93,21 +93,21 @@
 
 **Released:** August 25, 2026
 
-- `coderun init` full bootstrap: scaffold → discovery → indexing → knowledge → engram → profile
+- `knocode init` full bootstrap: scaffold → discovery → indexing → knowledge → engram → profile
 - Repository discovery: language census by extension, framework detection from manifests
 - Knowledge seeding at init: README + ADRs → `store_knowledge(category="docs")`
 - *Engram bootstrap — removed (see ENGRAM_CBM_REMOVAL.md)*
-- Repository profile artifact: `.coderun/profile.json`
+- Repository profile artifact: `.knocode/profile.json`
 - ast-grep via npm prebuilt, RTK prebuilt binary installers
 
 ### v0.7.5 ✅
 
 **Released:** August 27, 2026
 
-- 12 workspace crates (`coderun-workflow` excluded to `future/workflow/`)
+- 12 workspace crates (`knocode-workflow` excluded to `future/workflow/`)
 - Event persistence removed from hot path (in-memory ring buffer only)
 - DBOS isolated to `future/workflow/` — not required for v1
-- `coderun doctor` works without DBOS
+- `knocode doctor` works without DBOS
 
 ### v0.8.0 — Minimal v1 Stack ✅
 
@@ -142,7 +142,7 @@
 - **Benchmark suite:** 4 benchmarks (components, mattermost, dt, retrieval) — 27-106× faster than grep
 - **Watch mode:** Two auto-index modes — `commit` (default, polls git HEAD) and `filesystem` (real-time via notify)
 - **Dependency updates:** tantivy 0.26.1, git2 0.21, tantivy-tokenizer-api 0.7, tree-sitter-language-pack 1.16.1
-- **Cleanup:** Removed engram, FlashRank, LiteLLM, MkDocs, DBOS workflow, `coderun replay`
+- **Cleanup:** Removed engram, FlashRank, LiteLLM, MkDocs, DBOS workflow, `knocode replay`
 - **Benchmark report:** `docs/BENCHMARKS_V1.md`
 
 ---
@@ -166,16 +166,16 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 
 | Crate | Purpose |
 |-------|---------|
-| `coderun-core` | Shared types, config, IPC, traits |
-| `coderun-daemon` | HTTP/UDS server, adapter, metrics |
-| `coderun-cli` | CLI commands (init, index, preview, doctor, etc.) |
-| `coderun-context` | BuildContext pipeline, token budgeting |
-| `coderun-repo-intel` | tree-sitter, ripgrep, tantivy, graph, watcher |
-| `coderun-knowledge` | Knowledge Hub, retrieval |
-| `coderun-optimizer` | RTK compression, tool output optimization |
-| `coderun-events` | Event bus (in-memory ring buffer) |
-| `coderun-storage` | SQLite + tantivy persistence |
-| `coderun-bench` | Criterion benchmarks |
+| `knocode-core` | Shared types, config, IPC, traits |
+| `knocode-daemon` | HTTP/UDS server, adapter, metrics |
+| `knocode-cli` | CLI commands (init, index, preview, doctor, etc.) |
+| `knocode-context` | BuildContext pipeline, token budgeting |
+| `knocode-repo-intel` | tree-sitter, ripgrep, tantivy, graph, watcher |
+| `knocode-knowledge` | Knowledge Hub, retrieval |
+| `knocode-optimizer` | RTK compression, tool output optimization |
+| `knocode-events` | Event bus (in-memory ring buffer) |
+| `knocode-storage` | SQLite + tantivy persistence |
+| `knocode-bench` | Criterion benchmarks |
 
 ### External Integrations
 

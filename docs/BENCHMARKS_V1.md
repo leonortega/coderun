@@ -1,7 +1,7 @@
-# 🚀 CodeRun Retrieval Engine — v1 Benchmark Report
+# 🚀 Knocode Retrieval Engine — v1 Benchmark Report
 
 > **Date:** September 2, 2026  
-> **Engine:** CodeRun Retrieval Engine v0.9.0  
+> **Engine:** Knocode Retrieval Engine v0.9.0  
 > **Methodology:** Each benchmark runs 50 hard queries against a real-world codebase, comparing our retrieval engine against `grep -rE` as the baseline. We measure speed (latency), quality (recall, precision, novelty), and semantic understanding.
 
 ---
@@ -204,7 +204,7 @@ Grep       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 
 ---
 
-## 🧪 Benchmark 3: Component Evaluation (Coderun Repo)
+## 🧪 Benchmark 3: Component Evaluation (Knocode Repo)
 
 **The Challenge:** Evaluating the impact of individual retrieval components (graph boost, candidate_k, query expansion) by comparing with and without each component.
 
@@ -224,7 +224,7 @@ Grep       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 
 > **Note:** 1,455 symbols is the cold-index count (all 158 files read and parsed). On warm re-indexes, the `mtime+size` shortcut skips unchanged files, so subsequent runs show 0–298 symbols (only modified files re-extracted).
 
-**Key Finding:** Query Expansion adds +18.3% recall with only +1ms overhead. This is the only component that meaningfully improves results on the coderun repo.
+**Key Finding:** Query Expansion adds +18.3% recall with only +1ms overhead. This is the only component that meaningfully improves results on the knocode repo.
 
 ---
 
@@ -395,8 +395,8 @@ Even when the engine can't find exact matches, it returns *semantically related*
 
 | Dependency | Before | After | Notes |
 |------------|--------|-------|-------|
-| **tantivy-tokenizer-api** | `"0.2"` (0.2.0) | `"0.7"` (0.7.0) | Updated in `coderun-storage/Cargo.toml` |
-| **git2** (repo-intel) | `"0.19"` (0.19.0) | `"0.21"` (0.21.0) | Updated in `coderun-repo-intel/Cargo.toml` |
+| **tantivy-tokenizer-api** | `"0.2"` (0.2.0) | `"0.7"` (0.7.0) | Updated in `knocode-storage/Cargo.toml` |
+| **git2** (repo-intel) | `"0.19"` (0.19.0) | `"0.21"` (0.21.0) | Updated in `knocode-repo-intel/Cargo.toml` |
 | **tree-sitter-language-pack** | 1.15.8 | **1.16.1** | Updated via `cargo update` |
 | **libgit2-sys** | 0.17.0+1.8.1 | **0.18.8+1.9.7** | Transitive update (git2 0.21) |
 
@@ -426,8 +426,8 @@ Even when the engine can't find exact matches, it returns *semantically related*
 - ✅ Queries no longer crash — graceful degradation
 
 ### ~~Priority 2: Update Critical Dependencies~~ ✅ DONE
-- ✅ Updated `tantivy-tokenizer-api` from `"0.2"` to `"0.7"` in `coderun-storage`
-- ✅ Updated `git2` from `"0.19"` to `"0.21"` in `coderun-repo-intel`
+- ✅ Updated `tantivy-tokenizer-api` from `"0.2"` to `"0.7"` in `knocode-storage`
+- ✅ Updated `git2` from `"0.19"` to `"0.21"` in `knocode-repo-intel`
 - ✅ Ran `cargo update` — tree-sitter-language-pack updated to 1.16.1
 
 ### ~~Priority 3: Improve Structural Query Recall~~ ✅ DONE
@@ -454,7 +454,7 @@ Even when the engine can't find exact matches, it returns *semantically related*
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    CODERUN RETRIEVAL ENGINE v1                    │
+│                    KNOCODE RETRIEVAL ENGINE v1                    │
 │                    ═══════════════════════════                    │
 │                                                                  │
 │  Speed:        21-25× faster than grep (25× on Mattermost)      │
@@ -478,14 +478,14 @@ Even when the engine can't find exact matches, it returns *semantically related*
 ## 🔗 How to Run These Benchmarks
 
 ```bash
-# Component evaluation (coderun repo)
-cargo test -p coderun-context -- --ignored bench_components --nocapture
+# Component evaluation (knocode repo)
+cargo test -p knocode-context -- --ignored bench_components --nocapture
 
 # DefinitelyTyped (53k TypeScript files)
-cargo test -p coderun-context -- --ignored bench_dt_50 --nocapture
+cargo test -p knocode-context -- --ignored bench_dt_50 --nocapture
 
 # Mattermost (9k Go + React files)
-cargo test -p coderun-context -- --ignored bench_mattermost_50 --nocapture
+cargo test -p knocode-context -- --ignored bench_mattermost_50 --nocapture
 ```
 
 **Requirements:**
@@ -495,4 +495,4 @@ cargo test -p coderun-context -- --ignored bench_mattermost_50 --nocapture
 
 ---
 
-*Generated with CodeRun Benchmarks v1 — Updated September 2, 2026*
+*Generated with Knocode Benchmarks v1 — Updated September 2, 2026*

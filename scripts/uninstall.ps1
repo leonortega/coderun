@@ -1,14 +1,14 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Coderun uninstaller (Windows PowerShell 5.1)
+  Knocode uninstaller (Windows PowerShell 5.1)
   Reverses scripts/install.ps1 - removes everything by default, preserves source unless -RemoveRepo.
 
 .DESCRIPTION
-  Default (no flags): stops daemon, removes project build artifacts (target/release/coderun*.exe),
+  Default (no flags): stops daemon, removes project build artifacts (target/release/knocode*.exe),
   opencode plugins (project-local + global), ALL first-class external tools
-  (ast-grep, rtk, litellm, mkdocs, promptfoo, eslint),
-  and ALL user/project data (%USERPROFILE%\.coderun, .coderun/, sockets). Idempotent - safe to re-run.
+  (ast-grep, rtk, promptfoo, eslint),
+  and ALL user/project data (%USERPROFILE%\.knocode, .knocode/, sockets). Idempotent - safe to re-run.
 
   This is strict mode: no fallbacks. Default uninstalls everything. Use -KeepExternal / -KeepData
   to preserve tools or data. -KeepBuild preserves target/.
@@ -17,7 +17,7 @@
   Keep first-class external tools (do not uninstall ast-grep, rtk, npm/pip packages).
 
 .PARAMETER KeepData
-  Keep user and project data (do not delete %USERPROFILE%\.coderun or .coderun/).
+  Keep user and project data (do not delete %USERPROFILE%\.knocode or .knocode/).
 
 .PARAMETER KeepBuild
   Keep target/ build artifacts (skip binary removal).
@@ -51,7 +51,7 @@
   # preview only
 
 .NOTES
-  Repository folders/files (.coderun/, target/, .opencode/, workflow/dbos/node_modules) are NEVER deleted by default.
+  Repository folders/files (.knocode/, target/, .opencode/) are NEVER deleted by default.
   Use -RemoveRepo to also delete repository artifacts (rarely needed).
 #>
 [CmdletBinding(SupportsShouldProcess=$true)]
@@ -73,7 +73,7 @@ $Root = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $Root
 
 function Test-Cmd($cmd) { $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue) }
-function Info($m) { Write-Host "[coderun] $m" -ForegroundColor Cyan }
+function Info($m) { Write-Host "[knocode] $m" -ForegroundColor Cyan }
 function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Skip($m) { Write-Host "  [SKIP] $m" -ForegroundColor DarkGray }
@@ -87,13 +87,13 @@ $doRemoveRepo = $RemoveRepo  # only if explicitly requested
 
 if ($DryRun) { $PSBoundParameters["WhatIf"] = $true; $WhatIfPreference = $true }
 
-Info "Coderun uninstaller"
+Info "Knocode uninstaller"
 if ($WhatIfPreference) { Warn "DryRun/WhatIf active - no changes will be made" }
 Info "Options: RemoveExternal( effective=$doRemoveExternal KeepExternal=$KeepExternal ) RemoveData( effective=$doRemoveData KeepData=$KeepData ) KeepBuild=$KeepBuild Force=$Force"
 
 # 0. Confirmation for destructive data removal - only for repository data (global is safe to delete)
 if ($doRemoveRepo -and $doRemoveData -and -not $Force -and -not $WhatIfPreference) {
-  $msg = "This will permanently delete repository .coderun/ (config, skills, models) at .coderun/. Global ~\.coderun will also be deleted. Continue?"
+  $msg = "This will permanently delete repository .knocode/ (config, index, database) at .knocode/. Global ~\.knocode will also be deleted. Continue?"
   $choice = Read-Host "$msg [y/N]"
   if ($choice -notin @("y","Y","yes","YES")) {
     Info "Aborted by user. Re-run with -Force to skip prompt or -KeepData to keep data."
@@ -104,7 +104,7 @@ if ($doRemoveRepo -and $doRemoveData -and -not $Force -and -not $WhatIfPreferenc
 # 1. Stop daemon / clean socket
 Info "Stopping daemon and cleaning socket..."
 
-foreach ($procName in @("coderun-daemon","coderun")) {
+foreach ($procName in @("knocode-daemon","knocode")) {
   $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
   foreach ($p in $procs) {
     if ($PSCmdlet.ShouldProcess("Process $($p.ProcessName) PID $($p.Id)", "Stop-Process")) {
@@ -115,12 +115,12 @@ foreach ($procName in @("coderun-daemon","coderun")) {
 }
 
 $socketPaths = @(
-  "$env:USERPROFILE\.coderun\coderun.sock",
-  "/tmp/coderun.sock",
-  (Join-Path $Root ".coderun/coderun.sock"),
-  "/tmp/coderun.sock.lock"
+  "$env:USERPROFILE\.knocode\knocode.sock",
+  "/tmp/knocode.sock",
+  (Join-Path $Root ".knocode/knocode.sock"),
+  "/tmp/knocode.sock.lock"
 )
-$configToml = Join-Path $Root ".coderun/config.toml"
+$configToml = Join-Path $Root ".knocode/config.toml"
 if (Test-Path $configToml) {
   try {
     $sockMatch = Select-String -Path $configToml -Pattern 'socket_path\s*=\s*"([^"]+)"' -ErrorAction SilentlyContinue
@@ -135,21 +135,21 @@ foreach ($sp in $socketPaths | Select-Object -Unique) {
   }
 }
 
-# 1b. TASK-037: remove installed binaries (~\.coderun\bin) + revert USER PATH entry.
+# 1b. TASK-037: remove installed binaries (~\.knocode\bin) + revert USER PATH entry.
 # Always executed: PATH is machine state, independent of -KeepData/-RemoveRepo.
-Info "Removing installed coderun binaries from ~\.coderun\bin..."
-$coderunBinDir = Join-Path $env:USERPROFILE ".coderun\bin"
-foreach ($bin in @("coderun.exe", "coderun-daemon.exe")) {
-  $p = Join-Path $coderunBinDir $bin
+Info "Removing installed knocode binaries from ~\.knocode\bin..."
+$knocodeBinDir = Join-Path $env:USERPROFILE ".knocode\bin"
+foreach ($bin in @("knocode.exe", "knocode-daemon.exe")) {
+  $p = Join-Path $knocodeBinDir $bin
   if (Test-Path $p) {
     if ($PSCmdlet.ShouldProcess($p, "Remove-Item")) {
       try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed $p" } catch { Warn "failed to remove ${p}: $_" }
     } else { Skip "would remove $p" }
   } else { Skip "not found $p" }
 }
-if ((Test-Path $coderunBinDir) -and -not (Get-ChildItem -LiteralPath $coderunBinDir -Force -ErrorAction SilentlyContinue)) {
-  if ($PSCmdlet.ShouldProcess($coderunBinDir, "Remove empty dir")) {
-    try { Remove-Item -LiteralPath $coderunBinDir -Force -ErrorAction SilentlyContinue; Ok "removed empty $coderunBinDir" } catch {}
+if ((Test-Path $knocodeBinDir) -and -not (Get-ChildItem -LiteralPath $knocodeBinDir -Force -ErrorAction SilentlyContinue)) {
+  if ($PSCmdlet.ShouldProcess($knocodeBinDir, "Remove empty dir")) {
+    try { Remove-Item -LiteralPath $knocodeBinDir -Force -ErrorAction SilentlyContinue; Ok "removed empty $knocodeBinDir" } catch {}
   }
 }
 # Revert USER PATH (HKCU Environment) — only our exact entry, idempotent
@@ -157,14 +157,14 @@ try {
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if ($userPath) {
     $entries = $userPath -split ';' | Where-Object { $_ -ne '' }
-    if ($entries -contains $coderunBinDir) {
-      $newUserPath = ($entries | Where-Object { $_ -ne $coderunBinDir }) -join ';'
-      if ($PSCmdlet.ShouldProcess("USER PATH", "Remove $coderunBinDir")) {
+    if ($entries -contains $knocodeBinDir) {
+      $newUserPath = ($entries | Where-Object { $_ -ne $knocodeBinDir }) -join ';'
+      if ($PSCmdlet.ShouldProcess("USER PATH", "Remove $knocodeBinDir")) {
         [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
-        Ok "removed $coderunBinDir from USER PATH"
-      } else { Skip "would remove $coderunBinDir from USER PATH" }
-    } else { Skip "$coderunBinDir not on USER PATH" }
-    if (($env:Path -split ';') -contains $coderunBinDir) { $env:Path = (($env:Path -split ';') | Where-Object { $_ -ne $coderunBinDir }) -join ';' }
+        Ok "removed $knocodeBinDir from USER PATH"
+      } else { Skip "would remove $knocodeBinDir from USER PATH" }
+    } else { Skip "$knocodeBinDir not on USER PATH" }
+    if (($env:Path -split ';') -contains $knocodeBinDir) { $env:Path = (($env:Path -split ';') | Where-Object { $_ -ne $knocodeBinDir }) -join ';' }
   }
 } catch { Warn "could not revert USER PATH: $_" }
 
@@ -172,14 +172,13 @@ try {
 if ($KeepBuild -or -not $doRemoveRepo) {
   Info "Skipping build artifact removal (repository folders preserved - use -RemoveRepo to delete target/)"
   Skip "keeping target/ (repository - not deleted)"
-  Skip "keeping workflow/dbos/node_modules + future/workflow/dbos/node_modules (repository - not deleted, v1 future-only)"
 } else {
   Info "Removing build artifacts (--RemoveRepo)..."
   $binaries = @(
-    "$Root\target\release\coderun.exe",
-    "$Root\target\release\coderun-daemon.exe",
-    "$Root\target\debug\coderun.exe",
-    "$Root\target\debug\coderun-daemon.exe"
+    "$Root\target\release\knocode.exe",
+    "$Root\target\release\knocode-daemon.exe",
+    "$Root\target\debug\knocode.exe",
+    "$Root\target\debug\knocode-daemon.exe"
   )
   foreach ($bin in $binaries) {
     $display = $bin -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
@@ -194,45 +193,28 @@ if ($KeepBuild -or -not $doRemoveRepo) {
       try { Remove-Item -LiteralPath "$Root\target" -Recurse -Force -ErrorAction Stop; Ok "removed target/ (cargo clean)" } catch { Warn "failed to remove target/: $_" }
     } else { Skip "would remove target/ (cargo clean)" }
   }
-  # v1: workflow DBOS is future/workflow only -- clean both legacy and future (legacy warned in install)
-  $dbosPaths = @(
-    "$Root\workflow\dbos\node_modules",
-    "$Root\workflow\dbos\package-lock.json",
-    "$Root\future\workflow\dbos\node_modules",
-    "$Root\future\workflow\dbos\package-lock.json",
-    "$Root\future\workflow\dbos\dist"
-  )
-  foreach ($p in $dbosPaths) {
-    $display = $p -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
-    if (Test-Path $p) {
-      if ($PSCmdlet.ShouldProcess($display, "Remove-Item")) {
-        try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; Ok "removed $display (v1 workflow future-only)" } catch { Warn "failed to remove $display : $_" }
-      } else { Skip "would remove $display" }
-    } else { Skip "not found $display" }
-  }
-  if (Test-Path "$Root\future\workflow") { Skip "preserving future/workflow source (use --RemoveRepo + manual rm -rf future/workflow if needed)" }
 }
 
 # 3. Remove opencode plugins - repository plugin is NEVER deleted by default (use -RemoveRepo) - use .opencode folder
 Info "Removing opencode plugins..."
-$pluginProject = Join-Path $Root ".opencode\plugins\coderun.ts"
-$pluginGlobal = Join-Path $env:USERPROFILE ".config\opencode\plugins\coderun.ts"
-# Global plugin (outside repo) - always delete - plugin 'coderun'
+$pluginProject = Join-Path $Root ".opencode\plugins\knocode.ts"
+$pluginGlobal = Join-Path $env:USERPROFILE ".config\opencode\plugins\knocode.ts"
+# Global plugin (outside repo) - always delete - plugin 'knocode'
 foreach ($g in @($pluginGlobal) | Select-Object -Unique) {
   if (Test-Path $g) {
     if ($PSCmdlet.ShouldProcess($g, "Remove-Item")) {
-      try { Remove-Item -LiteralPath $g -Force -ErrorAction Stop; Ok "removed global plugin 'coderun'" } catch { Warn "failed to remove global plugin 'coderun': $_" }
-    } else { Skip "would remove global plugin 'coderun'" }
-  } else { Skip "not found global plugin 'coderun'" }
+      try { Remove-Item -LiteralPath $g -Force -ErrorAction Stop; Ok "removed global plugin 'knocode'" } catch { Warn "failed to remove global plugin 'knocode': $_" }
+    } else { Skip "would remove global plugin 'knocode'" }
+  } else { Skip "not found global plugin 'knocode'" }
 }
-# Repository plugin - keep unless -RemoveRepo (use .opencode folder, plugin 'coderun')
+# Repository plugin - keep unless -RemoveRepo (use .opencode folder, plugin 'knocode')
 if (Test-Path $pluginProject) {
   if ($doRemoveRepo) {
-    if ($PSCmdlet.ShouldProcess(".opencode/plugins/coderun.ts", "Remove-Item")) {
-      try { Remove-Item -LiteralPath $pluginProject -Force -ErrorAction Stop; Ok "removed plugin 'coderun' (--RemoveRepo)" } catch { Warn "failed to remove plugin 'coderun': $_" }
-    } else { Skip "would remove plugin 'coderun'" }
-  } else { Skip "keeping plugin 'coderun' (use -RemoveRepo to delete)" }
-} else { Skip "not found plugin 'coderun'" }
+    if ($PSCmdlet.ShouldProcess(".opencode/plugins/knocode.ts", "Remove-Item")) {
+      try { Remove-Item -LiteralPath $pluginProject -Force -ErrorAction Stop; Ok "removed plugin 'knocode' (--RemoveRepo)" } catch { Warn "failed to remove plugin 'knocode': $_" }
+    } else { Skip "would remove plugin 'knocode'" }
+  } else { Skip "keeping plugin 'knocode' (use -RemoveRepo to delete)" }
+} else { Skip "not found plugin 'knocode'" }
 # Only clean global empty dir by default; repo dir is kept
 if ((Test-Path $env:USERPROFILE\.config\opencode\plugins) -and -not (Get-ChildItem -LiteralPath "$env:USERPROFILE\.config\opencode\plugins" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ".gitkeep" })) {
   if ($PSCmdlet.ShouldProcess("$env:USERPROFILE\.config\opencode\plugins", "Remove-Item")) {
@@ -245,13 +227,27 @@ if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins") -and -not (Get-Chil
   }
 }
 
-# 3b. Remove MCP + plugin from opencode (always for coderun entries -- so plugin not showing after uninstall, file kept if has other config)
-Info "Removing opencode plugin (opencode-coderun)..."
+# 3c. Knocode agent skill (opencode) - global ~\.config\opencode\skills\knocode (installed artifact, always)
+$ocSkillGlobal = Join-Path $env:USERPROFILE ".config\opencode\skills\knocode"
+if (Test-Path $ocSkillGlobal) {
+  if ($PSCmdlet.ShouldProcess($ocSkillGlobal, "Remove-Item")) {
+    try { Remove-Item -LiteralPath $ocSkillGlobal -Recurse -Force -ErrorAction Stop; Ok "removed global knocode skill" } catch { Warn "failed to remove global knocode skill: $_" }
+  } else { Skip "would remove global knocode skill" }
+} else { Skip "not found global knocode skill" }
+# Remove empty global skills dir if only knocode was there
+$ocSkillsDir = Join-Path $env:USERPROFILE ".config\opencode\skills"
+if ((Test-Path $ocSkillsDir) -and -not (Get-ChildItem -LiteralPath $ocSkillsDir -Force -ErrorAction SilentlyContinue)) {
+  if ($PSCmdlet.ShouldProcess($ocSkillsDir, "Remove-Item")) {
+    try { Remove-Item -LiteralPath $ocSkillsDir -Force -ErrorAction SilentlyContinue; Ok "removed empty global skills dir" } catch {}
+  }
+}
+# 3b. Remove MCP + plugin from opencode (always for knocode entries -- so plugin not showing after uninstall, file kept if has other config)
+Info "Removing opencode plugin (opencode-knocode)..."
 function Remove-OpencodeMcp($configPath, $isRepo) {
   $displayPath = $configPath
   if ($isRepo) { $displayPath = $configPath -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""; if ($displayPath -eq $configPath) { $displayPath = Split-Path $configPath -Leaf } ; if ($configPath -match "\.opencode") { $displayPath = ".opencode/" + (Split-Path $configPath -Leaf) } else { $displayPath = $displayPath } }
   if (-not (Test-Path $configPath)) { Skip "MCP config not found at $displayPath"; return }
-  # v1: always clean coderun plugin/mcp from .opencode, even without -RemoveRepo -- otherwise plugin/MCP still shows after uninstall+restart
+  # v1: always clean knocode plugin/mcp from .opencode, even without -RemoveRepo -- otherwise plugin/MCP still shows after uninstall+restart
   try {
     $raw = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { Skip "MCP config empty at $displayPath"; return }
@@ -272,17 +268,17 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
     } catch {}
     if ($null -eq $json) { Skip "invalid JSON at $displayPath"; return }
     $removed = @(); $pluginRemoved = @()
-    # handle plugin opencode-coderun / coderun
+    # handle plugin opencode-knocode / knocode
     if ($json.ContainsKey('plugin')) {
       $plugins = $json['plugin']
       $origCount = 0; $newPlugins = @()
-      if ($plugins -is [System.Array]) { $origCount = $plugins.Count; $newPlugins = @($plugins | Where-Object { $_ -ne "opencode-coderun" -and $_ -ne "coderun" }) }
+      if ($plugins -is [System.Array]) { $origCount = $plugins.Count; $newPlugins = @($plugins | Where-Object { $_ -ne "opencode-knocode" -and $_ -ne "knocode" }) }
       elseif ($plugins -is [PSCustomObject]) { $origCount = 1; $newPlugins = @() }
       else { $origCount = 0; $newPlugins = @() }
       if ($origCount -ne $newPlugins.Count) {
-        $pluginRemoved += "opencode-coderun"
+        $pluginRemoved += "opencode-knocode"
         if ($newPlugins.Count -eq 0) { $json.Remove('plugin') } else { $json['plugin'] = $newPlugins }
-        $removed += "plugin:opencode-coderun"
+        $removed += "plugin:opencode-knocode"
       }
     }
     # handle mcp (historical)
@@ -296,12 +292,12 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
       # historical MCP entries (no action)
       if ($mcp.Count -eq 0) { $json.Remove('mcp') }
     }
-    if ($removed.Count -eq 0) { Skip "no coderun plugin/MCP entries at $displayPath"; return }
+    if ($removed.Count -eq 0) { Skip "no knocode plugin/MCP entries at $displayPath"; return }
     # if file now only has $schema, remove it unless -RemoveRepo? keep file if has other keys, else clean
     $remainingKeys = @($json.Keys | Where-Object { $_ -ne '$schema' })
     if ($remainingKeys.Count -eq 0) {
       if ($PSCmdlet.ShouldProcess($configPath, "Remove empty config")) {
-        try { Remove-Item -LiteralPath $configPath -Force -ErrorAction Stop; Ok "removed empty $displayPath (only coderun plugin/MCP)" } catch { Warn "failed to remove $displayPath : $_" }
+        try { Remove-Item -LiteralPath $configPath -Force -ErrorAction Stop; Ok "removed empty $displayPath (only knocode plugin/MCP)" } catch { Warn "failed to remove $displayPath : $_" }
       } else { Skip "would remove empty $displayPath" }
       return
     }
@@ -341,13 +337,14 @@ if (-not $doRemoveExternal) {
     } else { Skip "would cargo uninstall ast-grep" }
   } else { Skip "no legacy cargo ast-grep" }
 
-  # rtk: user-bin prebuilt copy (current) + legacy cargo install
-  $rtkUserBin = "$env:USERPROFILE\bin\rtk.exe"
-  if (Test-Path $rtkUserBin) {
-    if ($PSCmdlet.ShouldProcess($rtkUserBin, "Remove-Item")) {
-      try { Remove-Item -LiteralPath $rtkUserBin -Force -ErrorAction Stop; Ok "removed rtk binary $rtkUserBin" } catch { Warn "failed to remove $rtkUserBin : $_" }
-    } else { Skip "would remove rtk binary $rtkUserBin" }
-  } else { Skip "not found rtk binary at $rtkUserBin" }
+  # rtk: ~/.knocode/bin prebuilt (current) + legacy ~/bin + legacy cargo install
+  foreach ($rtkPath in @("$env:USERPROFILE\.knocode\bin\rtk.exe", "$env:USERPROFILE\bin\rtk.exe")) {
+    if (Test-Path $rtkPath) {
+      if ($PSCmdlet.ShouldProcess($rtkPath, "Remove-Item")) {
+        try { Remove-Item -LiteralPath $rtkPath -Force -ErrorAction Stop; Ok "removed rtk binary $rtkPath" } catch { Warn "failed to remove $rtkPath : $_" }
+      } else { Skip "would remove rtk binary $rtkPath" }
+    } else { Skip "not found rtk binary at $rtkPath" }
+  }
   if (Test-Cmd rtk) {
     if ($PSCmdlet.ShouldProcess("rtk (legacy cargo)", "cargo uninstall rtk")) {
       try { cargo uninstall rtk 2>&1 | Out-Null; Ok "uninstalled rtk (legacy cargo)" } catch { Warn "rtk cargo uninstall failed: $_" }
@@ -367,15 +364,15 @@ if (-not $doRemoveExternal) {
   }
 
   # 3c. Opencode npm plugin -- installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
-  Info "Removing opencode npm plugin (opencode-coderun)..."
+  Info "Removing opencode npm plugin (opencode-knocode)..."
   $opencodeNodeModules = @(
-    (Join-Path $ocGlobalDir "node_modules\opencode-coderun"),
+    (Join-Path $ocGlobalDir "node_modules\opencode-knocode"),
     (Join-Path $ocGlobalDir "node_modules\@opencode-ai"),
     (Join-Path $ocGlobalDir "package-lock.json"),
-    (Join-Path $Root ".opencode\node_modules\opencode-coderun"),
+    (Join-Path $Root ".opencode\node_modules\opencode-knocode"),
     (Join-Path $Root ".opencode\node_modules\@opencode-ai"),
     (Join-Path $Root ".opencode\package-lock.json"),
-    (Join-Path $env:USERPROFILE ".cache\opencode\node_modules\opencode-coderun")
+    (Join-Path $env:USERPROFILE ".cache\opencode\node_modules\opencode-knocode")
   )
   foreach ($p in $opencodeNodeModules) {
     $display = $p -replace [regex]::Escape($Root + "\"), "" -replace [regex]::Escape($Root + "/"), ""
@@ -389,21 +386,21 @@ if (-not $doRemoveExternal) {
   # Clean package.json deps: GLOBAL ~/.config/opencode/package.json + legacy .opencode/package.json
   foreach ($pkgJsonPath in @((Join-Path $ocGlobalDir "package.json"), (Join-Path $Root ".opencode\package.json"))) {
     if (-not (Test-Path $pkgJsonPath)) { Skip "not found $pkgJsonPath"; continue }
-    if ($PSCmdlet.ShouldProcess($pkgJsonPath, "clean opencode-coderun dep")) {
+    if ($PSCmdlet.ShouldProcess($pkgJsonPath, "clean opencode-knocode dep")) {
       try {
         $raw = Get-Content -LiteralPath $pkgJsonPath -Raw -ErrorAction Stop
         $obj = $raw | ConvertFrom-Json -ErrorAction Stop
         $changed = $false
-        if ($obj.PSObject.Properties["dependencies"] -and $obj.dependencies.PSObject.Properties["opencode-coderun"]) {
-          $obj.dependencies.PSObject.Properties.Remove("opencode-coderun"); $changed = $true
+        if ($obj.PSObject.Properties["dependencies"] -and $obj.dependencies.PSObject.Properties["opencode-knocode"]) {
+          $obj.dependencies.PSObject.Properties.Remove("opencode-knocode"); $changed = $true
         }
         # If dependencies empty, remove file; else write back
         $depCount = 0; if ($obj.PSObject.Properties["dependencies"]) { $depCount = @($obj.dependencies.PSObject.Properties).Count }
         if ($depCount -eq 0) {
           Remove-Item -LiteralPath $pkgJsonPath -Force -ErrorAction Stop; Ok "removed empty $pkgJsonPath"
         } elseif ($changed) {
-          $obj | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJsonPath -Encoding UTF8; Ok "cleaned opencode-coderun from $pkgJsonPath"
-        } else { Skip "no opencode-coderun in $pkgJsonPath" }
+          $obj | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJsonPath -Encoding UTF8; Ok "cleaned opencode-knocode from $pkgJsonPath"
+        } else { Skip "no opencode-knocode in $pkgJsonPath" }
       } catch { Warn "failed to clean ${pkgJsonPath} : $_" }
     } else { Skip "would clean $pkgJsonPath" }
   }
@@ -415,28 +412,13 @@ if (-not $doRemoveExternal) {
   } else { Skip "keeping .opencode/ (has opencode.jsonc or other config)" }
   # Global npm plugin (if ever published)
   if (Test-Cmd npm) {
-    $hasGlobal = $false; try { npm list -g opencode-coderun 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasGlobal = $true } } catch {}
+    $hasGlobal = $false; try { npm list -g opencode-knocode 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasGlobal = $true } } catch {}
     if ($hasGlobal) {
-      if ($PSCmdlet.ShouldProcess("opencode-coderun (npm -g)", "npm uninstall -g")) {
-        try { npm uninstall -g opencode-coderun 2>&1 | Out-Null; Ok "uninstalled opencode-coderun (npm -g)" } catch { Warn "npm uninstall opencode-coderun failed: $_" }
-      } else { Skip "would npm uninstall -g opencode-coderun" }
-    } else { Skip "opencode-coderun not installed globally (npm -g)" }
+      if ($PSCmdlet.ShouldProcess("opencode-knocode (npm -g)", "npm uninstall -g")) {
+        try { npm uninstall -g opencode-knocode 2>&1 | Out-Null; Ok "uninstalled opencode-knocode (npm -g)" } catch { Warn "npm uninstall opencode-knocode failed: $_" }
+      } else { Skip "would npm uninstall -g opencode-knocode" }
+    } else { Skip "opencode-knocode not installed globally (npm -g)" }
   }
-  # FlashRank removed from v1 runtime per benchmark evaluation (see rerank.rs)
-
-  if (Test-Cmd pip) {
-    # V1 minimal: litellm/mkdocs deferred — only remove if present (installed via -WithOptional)
-    foreach ($pipPkg in @("mkdocs","mkdocs-material","pymdown-extensions","markdown")) {
-      $shown = $false
-      try { pip show $pipPkg 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $shown = $true } } catch {}
-      if ($shown) {
-        if ($PSCmdlet.ShouldProcess("$pipPkg (pip)", "pip uninstall -y")) {
-          try { pip uninstall -y $pipPkg 2>&1 | Out-Null; Ok "uninstalled $pipPkg (pip)" } catch { Warn "pip uninstall $pipPkg failed: $_" }
-        } else { Skip "would pip uninstall -y $pipPkg" }
-      } else { Skip "$pipPkg not installed (pip)" }
-    }
-  } else { Skip "pip not found - skipping pip package removal" }
-
   # clippy (never uninstall rustup itself)
   if (Test-Cmd rustup) {
     if ($PSCmdlet.ShouldProcess("clippy (rustup component remove clippy)", "rustup component remove")) {
@@ -446,39 +428,39 @@ if (-not $doRemoveExternal) {
   } else { Skip "rustup not installed" }
 }
 
-# 5. Remove data - global data is removed, repository .coderun is NEVER deleted by default (use -RemoveRepo) - use .opencode/.coderun relative
+# 5. Remove data - global data is removed, repository .knocode is NEVER deleted by default (use -RemoveRepo) - use .opencode/.knocode relative
 if (-not $doRemoveData) {
   Info "Skipping data removal (--KeepData)"
-  Info "  Kept: $env:USERPROFILE\.coderun (global)"
-  Info "  Kept: .coderun/ (repository - use -RemoveRepo to delete)"
+  Info "  Kept: $env:USERPROFILE\.knocode (global)"
+  Info "  Kept: .knocode/ (repository - use -RemoveRepo to delete)"
 } else {
   Info "Removing data (global only, repository preserved)..."
-  $globalData = "$env:USERPROFILE\.coderun"
+  $globalData = "$env:USERPROFILE\.knocode"
   if (Test-Path $globalData) {
     if ($PSCmdlet.ShouldProcess($globalData, "Remove-Item -Recurse")) {
       try { Remove-Item -LiteralPath $globalData -Recurse -Force -ErrorAction Stop; Ok "removed $globalData (DB, index, cache, logs, models)" } catch { Warn "failed to remove $globalData : $_" }
     } else { Skip "would remove $globalData" }
   } else { Skip "not found $globalData" }
 
-  $projData = Join-Path $Root ".coderun"
+  $projData = Join-Path $Root ".knocode"
   if (Test-Path $projData) {
     if ($doRemoveRepo) {
       if ($PSCmdlet.ShouldProcess($projData, "Remove-Item -Recurse")) {
-        try { Remove-Item -LiteralPath $projData -Recurse -Force -ErrorAction Stop; Ok "removed .coderun/ (--RemoveRepo)" } catch { Warn "failed to remove .coderun/ : $_" }
-      } else { Skip "would remove .coderun/" }
-    } else { Skip "keeping repository .coderun/ (use -RemoveRepo to delete)" }
-  } else { Skip "not found .coderun/" }
+        try { Remove-Item -LiteralPath $projData -Recurse -Force -ErrorAction Stop; Ok "removed .knocode/ (--RemoveRepo)" } catch { Warn "failed to remove .knocode/ : $_" }
+      } else { Skip "would remove .knocode/" }
+    } else { Skip "keeping repository .knocode/ (use -RemoveRepo to delete)" }
+  } else { Skip "not found .knocode/" }
 }
 
 # 6. Final status
 Info "Uninstall complete."
 if (-not $doRemoveExternal) { Info "  External tools were kept (--KeepExternal)" } else { Info "  External tools removed" }
-if (-not $doRemoveData) { Info "  Data was kept (--KeepData)" } else { Info "  Global data removed (repository .coderun preserved)" }
+if (-not $doRemoveData) { Info "  Data was kept (--KeepData)" } else { Info "  Global data removed (repository .knocode preserved)" }
 if ($KeepBuild -or -not $doRemoveRepo) { Info "  Build artifacts kept (repository preserved - use -RemoveRepo to delete)" } else { Info "  Build artifacts removed (--RemoveRepo)" }
 Info "To reinstall: powershell -ExecutionPolicy Bypass -File scripts/install.ps1"
 # Only warn if global plugin still present after uninstall (repo plugin is intentionally kept)
-if (Test-Path "$env:USERPROFILE\.config\opencode\plugins\coderun.ts") { Warn "global plugin still present at $env:USERPROFILE\.config\opencode\plugins\coderun.ts - may need manual removal or restart opencode" }
-if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins\coderun.ts")) { Warn "repository plugin still present at .opencode/plugins/coderun.ts even after --RemoveRepo" }
+if (Test-Path "$env:USERPROFILE\.config\opencode\plugins\knocode.ts") { Warn "global plugin still present at $env:USERPROFILE\.config\opencode\plugins\knocode.ts - may need manual removal or restart opencode" }
+if ($doRemoveRepo -and (Test-Path "$Root\.opencode\plugins\knocode.ts")) { Warn "repository plugin still present at .opencode/plugins/knocode.ts even after --RemoveRepo" }
 if ($doRemoveExternal) {
-  if (Test-Path "$env:USERPROFILE\.config\opencode\package.json") { Warn "global ~\.config\opencode\package.json still references coderun deps - inspect before removing (may contain your own deps)" }
+  if (Test-Path "$env:USERPROFILE\.config\opencode\package.json") { Warn "global ~\.config\opencode\package.json still references knocode deps - inspect before removing (may contain your own deps)" }
 }

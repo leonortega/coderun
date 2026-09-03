@@ -1,6 +1,6 @@
 # Evaluation Framework
 
-This document describes the evaluation framework for Coderun AI Runtime.
+This document describes the evaluation framework for Knocode AI Runtime.
 
 ## Overview
 
@@ -89,7 +89,7 @@ Compares: BM25 only vs BM25 + FlashRank vs MCP fallback *(historical offline eva
 
 ## Baseline Benchmark
 
-`eval/baseline/run.py` measures with and without Coderun:
+`eval/baseline/run.py` measures with and without Knocode:
 
 - Task success rate
 - Input/output/tool tokens
@@ -158,7 +158,7 @@ Results are saved to `eval/results/`:
 
 ```bash
 # Start the daemon
-coderun serve
+knocode serve
 
 # Check health
 curl http://127.0.0.1:9527/health
@@ -167,6 +167,6 @@ curl http://127.0.0.1:9527/health
 ### Tests Failing
 
 1. Check the daemon is running and indexed the repo
-2. Run `coderun doctor` to verify all components
+2. Run `knocode doctor` to verify all components
 3. Check `eval/results/` for detailed error logs
 4. Run with `--nocapture` for detailed Rust test output

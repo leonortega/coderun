@@ -25,7 +25,7 @@ graph TB
             CA[Agent Process]
         end
 
-        subgraph Coderun Daemon
+        subgraph Knocode Daemon
             AD[Adapter Layer]
             CE[Context Engine]
             RI[Repository Intelligence]
@@ -104,7 +104,7 @@ The runtime runs as a single Rust daemon process. All modules execute within thi
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                  coderun daemon process                   │
+│                  knocode daemon process                   │
 │                                                          │
 │  ┌──────────────────┐  ┌──────────────────────────────┐  │
 │  │  Unix Socket     │  │     Module Pipeline           │  │
@@ -203,7 +203,7 @@ The runtime is model-agnostic — the agent / provider / user chooses the model
 
 ### IWorkflowEngine — [REMOVED]
 
-The workflow engine (DBOS) was removed — trait, `coderun-workflow` crate, and the
+The workflow engine (DBOS) was removed — trait, `knocode-workflow` crate, and the
 daemon's `workflow` cargo feature are gone (see `REMOVED_TOOLS.md`). The runtime is
 a single tokio daemon.
 
@@ -235,14 +235,14 @@ SQLite is the primary persistence layer for all structured metadata:
 - **Sessions:** session fingerprints for deduplication, token usage metrics
 - **Graph:** dependency edges between files (import/use/require relationships)
 
-Tantivy is the search index (full-text BM25). Tree-sitter is the parser. Graph is the relationship layer. All three are built from the same source code walk during `coderun init`.
+Tantivy is the search index (full-text BM25). Tree-sitter is the parser. Graph is the relationship layer. All three are built from the same source code walk during `knocode init`.
 
 ## Initialization Pipeline
 
-`coderun init` runs a 7-step pipeline:
+`knocode init` runs a 7-step pipeline:
 
 ```
-[1/7] Scaffold (.coderun/, config, database)
+[1/7] Scaffold (.knocode/, config, database)
 [2/7] Repository discovery + language detection
 [3/7] Parser validation (verify tree-sitter grammars load)
 [4/7] Indexing (full-text BM25 + symbol extraction + dependency graph)
@@ -278,29 +278,29 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 |-------|------------|------|
 | Language | Rust (>= 1.75) | Context Engine, daemon, all modules |
 | Agent IPC | UDS + MessagePack primary (`rmp-serde`+`tokio::net::UnixListener`) + HTTP/JSON fallback (`axum`) on `127.0.0.1:9527` | Daemon ↔ Agent; `POST /hook`, UDS `Probe` payload (readiness), `GET /health` (readiness `state: indexing\|ready`), `GET /metrics` |
-| MCP (Model Context Protocol) | JSON-RPC 2.0 over HTTP (`POST /mcp`) on the same axum listener (`127.0.0.1:9527`) | Daemon-hosted MCP - `initialize` / `ping` / `tools/list` / `tools/call`; tools `coderun_context` + `coderun_compress`; JSON-RPC `-32001 daemon_indexing` while indexing; client = opencode plugin (`no-conversion` tool path, `/hook` fallback) |
+| MCP (Model Context Protocol) | JSON-RPC 2.0 over HTTP (`POST /mcp`) on the same axum listener (`127.0.0.1:9527`) | Daemon-hosted MCP - `initialize` / `ping` / `tools/list` / `tools/call`; tools `knocode_context` + `knocode_compress`; JSON-RPC `-32001 daemon_indexing` while indexing; client = opencode plugin (`no-conversion` tool path, `/hook` fallback) |
 | AST Parsing | tree-sitter **111 languages** via arborium bundle (no feature flags) | `repo-intel/src/parser.rs` |
 | Structural Search | In-process `AstGrepBackend` (ast-grep-core + tree-sitter-language-pack) via `StructuralRetriever` | `retrieval/structural.rs` + `repo-intel/src/structural/` |
 | Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |
 | Full-text Index | tantivy `MmapDirectory` (in-process) | `storage/src/tantivy_index.rs` + `search_fulltext()` wiring |
 | Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (local AST+regex) | `repo-intel/src/graph.rs` |
 | Watcher | Two modes: `commit` (default — polls the resolved HEAD commit via git2, triggers on new commits) or `filesystem` (`notify` + git2 dirty-check; feature `fs-watcher`, enabled by the CLI and daemon) | `repo-intel/src/watcher.rs` |
-| LSP | Stub `LspClient` (`CODERUN_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
+| LSP | Stub `LspClient` (`KNOCODE_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
 | Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see `FLASHRANK_REMOVAL.md` | `knowledge/src/rerank.rs` |
-| Memory | SQLite+tantivy local (engram removed — see `ENGRAM_CBM_REMOVAL.md`) | `coderun-storage` local | |
+| Memory | SQLite+tantivy local (engram removed — see `ENGRAM_CBM_REMOVAL.md`) | `knocode-storage` local | |
 | Model Gateway | [REMOVED v0.8.6] LiteLLM + heuristic routing deleted — runtime is model-agnostic | see `LLM_ROUTING_REMOVAL.md` |
-| Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.coderun/logs/tool-failures/` | `optimizer/src/rtk.rs` |
+| Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.knocode/logs/tool-failures/` | `optimizer/src/rtk.rs` |
 | Token Counting | `tiktoken-rs` `cl100k_base` + `heuristic` fallback | `context/src/lib.rs:389`/`optimizer/src/lib.rs:303` |
 | Orchestration | Removed — single tokio daemon (see `REMOVED_TOOLS.md`) | — |
-| Metrics | Prometheus exposition (`GET /metrics` histogram `coderun_build_context_duration_seconds`) + Grafana `docs/dashboards/coderun.json` | `daemon/src/metrics.rs` + `deploy/prometheus/alerts.yml` |
-| Rate Limit | Token-bucket 10/s burst 20 per `session_id` + `HMAC-SHA256` `X-Coderun-Signature` via `hmac` crate `secrets::verify_hmac` (was `sha256(secret+body)` pre-v0.6.0) | `daemon/src/ratelimit.rs` + `core/src/secrets.rs` |
+| Metrics | Prometheus exposition (`GET /metrics` histogram `knocode_build_context_duration_seconds`) + Grafana `docs/dashboards/knocode.json` | `daemon/src/metrics.rs` + `deploy/prometheus/alerts.yml` |
+| Rate Limit | Token-bucket 10/s burst 20 per `session_id` + `HMAC-SHA256` `X-Knocode-Signature` via `hmac` crate `secrets::verify_hmac` (was `sha256(secret+body)` pre-v0.6.0) | `daemon/src/ratelimit.rs` + `core/src/secrets.rs` |
 | Concurrency | `RwLock<ContextEngine>` (was `Mutex`), `session_fingerprints` SHA-256 dedup, per-session memory namespace | `daemon/src/adapter.rs:44` + `context/src/lib.rs:142` |
 | Directory Walking | `ignore` crate | `.gitignore` |
 | Database | SQLite `rusqlite` bundled + WAL + `r2d2` pool, migrations `001, 002, 003, 006, 007` | `storage/src/lib.rs:21` |
 | Serialization | `serde`+`toml`+`serde_json`+`serde_yaml`+`rmp-serde` | Config + IPC (MessagePack canonical) |
-| CLI | `clap` | `coderun-cli` (init/index/serve/preview/doctor/config) |
+| CLI | `clap` | `knocode-cli` (init/index/serve/preview/doctor/config) |
 | Logging | `tracing`+`tracing-subscriber` (json `fmt`) | `daemon` |
 | Testing/Bench | `cargo test` (165 tests) + `promptfoo` + `criterion` `benches/context_bench.rs` (p95 <50ms) | `benches/` |
-| Distribution | `Dockerfile` (distroless), `Formula/coderun.rb` (brew tap+launchd), `cargo-wix` MSI | `deploy/` |
+| Distribution | `Dockerfile` (distroless), `Formula/knocode.rb` (brew tap+launchd), `cargo-wix` MSI | `deploy/` |
 | Async Runtime | `tokio` full | `daemon` |
 | HTTP Client | `reqwest` | `cli` |

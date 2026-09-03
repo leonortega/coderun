@@ -1,8 +1,8 @@
 pub mod dbos;
 pub mod types;
 
-use coderun_core::traits::IWorkflowEngine;
-use coderun_core::Config;
+use knocode_core::traits::IWorkflowEngine;
+use knocode_core::Config;
 
 pub use dbos::DBOSWorkflowEngine;
 pub use types::{WorkflowRequest, WorkflowStatus, WorkflowState};
@@ -12,7 +12,7 @@ pub fn create_engine(config: &Config) -> Box<dyn IWorkflowEngine> {
     if config.workflow.enabled && config.workflow.engine == "dbos" {
         Box::new(DBOSWorkflowEngine::new(config.workflow.dbos_endpoint.clone(), config.workflow.dbos_shared_secret.clone()))
     } else {
-        Box::new(coderun_core::traits::NoopWorkflowEngine)
+        Box::new(knocode_core::traits::NoopWorkflowEngine)
     }
 }
 

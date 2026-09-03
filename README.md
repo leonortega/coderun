@@ -1,13 +1,13 @@
-# Coderun — AI Runtime
+# Knocode — AI Runtime
 
-**Coderun is a local AI runtime that makes coding agents 20-27× faster at finding relevant code.** It runs as a local daemon, intercepting agent requests and enriching them with repository context — knowledge and code files — using a retrieval engine that understands *what you mean*, not just *what you typed*.
+**Knocode is a local AI runtime that makes coding agents 20-27× faster at finding relevant code.** It runs as a local daemon, intercepting agent requests and enriching them with repository context — knowledge and code files — using a retrieval engine that understands *what you mean*, not just *what you typed*.
 
 ### Why This Matters
 
-When you ask an AI coding agent "how to add error handling", it needs to find the right files in your codebase. Today, most agents use `grep` — a 1970s text-matching tool that finds literal string patterns. Coderun's retrieval engine replaces grep with **semantic search**: it understands intent, expands queries with synonyms, and finds files that grep completely misses.
+When you ask an AI coding agent "how to add error handling", it needs to find the right files in your codebase. Today, most agents use `grep` — a 1970s text-matching tool that finds literal string patterns. Knocode's retrieval engine replaces grep with **semantic search**: it understands intent, expands queries with synonyms, and finds files that grep completely misses.
 
 ```
-Traditional (grep):                        Coderun:
+Traditional (grep):                        Knocode:
   "how to add error handling"                "how to add error handling"
   → finds files with literal "error"         → finds error types, try/catch patterns,
   → misses documentation, test files,          documentation, test files, config,
@@ -28,19 +28,19 @@ Traditional (grep):                        Coderun:
 
 ---
 
-## Benchmark: Coderun vs Grep
+## Benchmark: Knocode vs Grep
 
-We benchmarked our retrieval engine against `grep -rE` across three real-world codebases. The results: **Coderun is 27-106× faster than grep while finding semantically relevant files that grep completely misses.**
+We benchmarked our retrieval engine against `grep -rE` across three real-world codebases. The results: **Knocode is 27-106× faster than grep while finding semantically relevant files that grep completely misses.**
 
 ### Speed
 
-| Codebase | Coderun (P50) | grep -rE (P50) | Speedup |
+| Codebase | Knocode (P50) | grep -rE (P50) | Speedup |
 |----------|--------------|----------------|---------|
 | Mattermost (9k files) | 27ms | 971ms | **27×** |
 | DefinitelyTyped (53k files) | 49ms | 4,836ms | **106×** |
-| Coderun repo (158 files) | ~10ms | ~20ms | 2× |
+| Knocode repo (158 files) | ~10ms | ~20ms | 2× |
 
-At 27-49ms, Coderun is fast enough to run on every keystroke in an AI coding assistant. Grep's 4.8 seconds makes it unusable for real-time interaction.
+At 27-49ms, Knocode is fast enough to run on every keystroke in an AI coding assistant. Grep's 4.8 seconds makes it unusable for real-time interaction.
 
 ### Quality
 
@@ -55,7 +55,7 @@ At 27-49ms, Coderun is fast enough to run on every keystroke in an AI coding ass
 
 ### What We Find That Grep Can't
 
-| Query | Grep Finds | Coderun Finds | Why |
+| Query | Grep Finds | Knocode Finds | Why |
 |-------|-----------|---------------|-----|
 | "how to add error handling" | Files with literal "error" | Error types, try/catch patterns, docs, tests | Semantic understanding of "error handling" |
 | "find all API endpoints" | Files with literal "API" + "endpoint" | Route definitions, handler registrations, API docs | Understands "endpoints" means route handlers |
@@ -77,21 +77,21 @@ At 27-49ms, Coderun is fast enough to run on every keystroke in an AI coding ass
 # 1. Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# 2. Build coderun
+# 2. Build knocode
 cargo build --release
 
 # 3. Install to user bin
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # or: bash scripts/install.sh
 
 # 4. Initialize your project
-~/.coderun/bin/coderun init            # Unix
-# or: %USERPROFILE%\.coderun\bin\coderun.exe init  # Windows
+~/.knocode/bin/knocode init            # Unix
+# or: %USERPROFILE%\.knocode\bin\knocode.exe init  # Windows
 
 # 5. Index your repository
-~/.coderun/bin/coderun index
+~/.knocode/bin/knocode index
 
 # 6. Start the daemon
-~/.coderun/bin/coderun serve
+~/.knocode/bin/knocode serve
 ```
 
 > **Agents**: always use the installed absolute path for `init`/`index`/`doctor`. Do **not** search `target/release` — the binary is already on PATH after install.
@@ -107,15 +107,15 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # or: bash scripts
 ```bash
 cargo build                # Debug
 cargo build --release      # Release (recommended)
-cargo build -p coderun-core # Specific crate
+cargo build -p knocode-core # Specific crate
 ```
 
 ## Test
 
 ```bash
 cargo test                              # All tests (~400)
-cargo test -p coderun-repo-intel       # Repo intelligence
-cargo test -p coderun-context          # Context engine + benchmarks
+cargo test -p knocode-repo-intel       # Repo intelligence
+cargo test -p knocode-context          # Context engine + benchmarks
 cargo test -- --nocapture               # With output
 ```
 
@@ -130,19 +130,19 @@ cargo fmt --check  # Check formatting
 ## Project Structure
 
 ```
-coderun/
+knocode/
 ├── Cargo.toml                    # Workspace root
 ├── crates/
-│   ├── coderun-core/             # Shared types, errors, config
-│   ├── coderun-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics
-│   ├── coderun-cli/              # CLI — init/index/serve/preview/doctor
-│   ├── coderun-repo-intel/       # Repository Intelligence — tree-sitter + tantivy + graph + watcher
-│   ├── coderun-context/          # Context Engine — retrieval engine + BuildContext
-│   ├── coderun-knowledge/        # Knowledge Hub — SQLite+tantivy local BM25
-│   ├── coderun-optimizer/        # Execution Optimizer — RTK adapter + compressors
-│   ├── coderun-events/           # Event Bus — in-memory broadcast + tracing
-│   ├── coderun-storage/          # Local Storage — SQLite WAL + tantivy
-├── .coderun/
+│   ├── knocode-core/             # Shared types, errors, config
+│   ├── knocode-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics
+│   ├── knocode-cli/              # CLI — init/index/serve/preview/doctor
+│   ├── knocode-repo-intel/       # Repository Intelligence — tree-sitter + tantivy + graph + watcher
+│   ├── knocode-context/          # Context Engine — retrieval engine + BuildContext
+│   ├── knocode-knowledge/        # Knowledge Hub — SQLite+tantivy local BM25
+│   ├── knocode-optimizer/        # Execution Optimizer — RTK adapter + compressors
+│   ├── knocode-events/           # Event Bus — in-memory broadcast + tracing
+│   ├── knocode-storage/          # Local Storage — SQLite WAL + tantivy
+├── .knocode/
 │   └── config.toml               # Default configuration
 ├── adapters/
 │   ├── cursor/extension.ts       # Cursor integration
@@ -156,26 +156,26 @@ coderun/
 
 ## CLI Commands
 
-### `coderun init`
+### `knocode init`
 
-Initialize coderun for the current repository.
+Initialize knocode for the current repository.
 
 ```bash
-~/.coderun/bin/coderun init              # Unix
-%USERPROFILE%\.coderun\bin\coderun.exe init  # Windows
+~/.knocode/bin/knocode init              # Unix
+%USERPROFILE%\.knocode\bin\knocode.exe init  # Windows
 ```
 
 Creates:
-- `.coderun/` directory
-- `.coderun/config.toml` with default configuration
-- SQLite database at `~/.coderun/data.db`
+- `.knocode/` directory
+- `.knocode/config.toml` with default configuration
+- SQLite database at `~/.knocode/data.db`
 
-### `coderun index`
+### `knocode index`
 
 Index the repository for search and context building.
 
 ```bash
-~/.coderun/bin/coderun index
+~/.knocode/bin/knocode index
 ```
 
 Output:
@@ -188,13 +188,13 @@ Output:
   Duration:         1234ms
 ```
 
-### `coderun serve`
+### `knocode serve`
 
-Start the daemon server (UDS primary on `/tmp/coderun.sock` + HTTP fallback on `127.0.0.1:9527`).
+Start the daemon server (UDS primary on `/tmp/knocode.sock` + HTTP fallback on `127.0.0.1:9527`).
 
 ```bash
-coderun serve
-coderun serve --socket /tmp/coderun.sock --port 9527
+knocode serve
+knocode serve --socket /tmp/knocode.sock --port 9527
 ```
 
 The daemon will:
@@ -210,28 +210,28 @@ The daemon will:
 Clients should wait until the daemon is ready before sending requests — during the initial index (and any auto-reindex) the engine lock is held, so `/hook` rejects fast instead of queueing:
 
 - `GET /health` → `{"status": "ok", "version": "...", "state": "indexing" | "ready", "index_files": N}` — poll until `state` is `ready`
-- `GET /metrics` → `coderun_daemon_ready 0|1` gauge (plus `coderun_index_files`)
+- `GET /metrics` → `knocode_daemon_ready 0|1` gauge (plus `knocode_index_files`)
 - `POST /hook` → HTTP `503` with `reason: "daemon_indexing"` while not ready — retry with backoff
 - UDS/MessagePack `Probe` payload (`{"type":"Probe"}`) → `{"type":"Probe","state":"ready","index_files":N,"version":"..."}` — same signal as `/health` over the primary transport; answered before rate-limiting with no engine lock
-- **Bundled adapters poll automatically** — the OpenCode plugin, Claude Code hooks (`.claude/hooks/coderun-ready.sh`), Gemini CLI hooks, and Cursor extension each wait for `state: "ready"` before their first request (bounded + fail-open: an unreachable daemon bails immediately, a successful check is cached for 30s). Budget via `CODERUN_READY_TIMEOUT_MS` (default 10000)
+- **Bundled adapters poll automatically** — the OpenCode plugin, Claude Code hooks (`.claude/hooks/knocode-ready.sh`), Gemini CLI hooks, and Cursor extension each wait for `state: "ready"` before their first request (bounded + fail-open: an unreachable daemon bails immediately, a successful check is cached for 30s). Budget via `KNOCODE_READY_TIMEOUT_MS` (default 10000)
 
 #### Daemon MCP (`POST /mcp`)
 
 The daemon hosts an MCP (Model Context Protocol) surface on the same HTTP listener: JSON-RPC 2.0 at `POST /mcp`, identical on Windows and Unix, no extra socket or process. It is the "no-conversion" path for client plugins: typed tools in, natural text + structured metadata out — prompts and answers never get reshaped into internal wire payloads.
 
 - **Methods**: `initialize`, `ping`, `tools/list`, `tools/call` (plus `notifications/initialized` → HTTP `202`). Stateless, tools-only subset — no sampling/prompts/resources, no batches.
-- **`coderun_context(prompt, repository_path?)`** → the enriched context answer for a prompt (text + `provenance` in `structuredContent`). Same engine as the `/hook` rewrite — no message-shape conversion.
-- **`coderun_compress(content, tool_name, output_type?, context?)`** → compressed tool output (token counts in `structuredContent`).
+- **`knocode_context(prompt, repository_path?)`** → the enriched context answer for a prompt (text + `provenance` in `structuredContent`). Same engine as the `/hook` rewrite — no message-shape conversion.
+- **`knocode_compress(content, tool_name, output_type?, context?)`** → compressed tool output (token counts in `structuredContent`).
 - **Readiness**: `tools/list`/`initialize`/`ping` always answer; `tools/call` while indexing returns JSON-RPC error `-32001 daemon_indexing` (HTTP stays `200`) — parity with the `/hook` 503 gate, so clients retry instead of queueing on the engine lock.
-- **Clients**: the OpenCode plugin drives both hooks through these tools (`chat.message` → `coderun_context`, `tool.execute.before` → `coderun_compress`). Daemons that predate `/mcp` are still served via the automatic `/hook` fallback.
+- **Clients**: the OpenCode plugin drives both hooks through these tools (`chat.message` → `knocode_context`, `tool.execute.before` → `knocode_compress`). Daemons that predate `/mcp` are still served via the automatic `/hook` fallback.
 
-### `coderun preview <prompt>`
+### `knocode preview <prompt>`
 
 Preview what BuildContext would produce for a prompt.
 
 ```bash
-coderun preview "implement a new API endpoint"
-coderun preview "fix auth" --session my-sess --no-cache
+knocode preview "implement a new API endpoint"
+knocode preview "fix auth" --session my-sess --no-cache
 ```
 
 Shows:
@@ -239,38 +239,38 @@ Shows:
 - Code files (ripgrep/tantivy/graph) that would be included
 - Token budget by source
 
-### `coderun status`
+### `knocode status`
 
 Show daemon status and metrics.
 
 ```bash
-coderun status
+knocode status
 ```
 
-### `coderun config show`
+### `knocode config show`
 
 Display the effective configuration.
 
-### `coderun config validate`
+### `knocode config validate`
 
 Validate the configuration file.
 
-### `coderun doctor`
+### `knocode doctor`
 
 Health check for all dependencies.
 
 ```bash
-coderun doctor
+knocode doctor
 ```
 
 Output:
 ```
-Coderun Doctor
+Knocode Doctor
 ═══════════════════════════════════════
 
 SQLite:          ✓ OK (WAL, migrations up to date)
 Config:          ✓ OK (4 default langs, 111 available via arborium)
-Socket path:     ✓ OK (/tmp/coderun.sock)
+Socket path:     ✓ OK (/tmp/knocode.sock)
 Tree-sitter:     ✓ OK (111 languages via arborium)
 Tantivy:         ✓ OK (MmapDirectory)
 Knowledge Hub:   ✓ OK (SQLite+tantivy local)
@@ -287,9 +287,9 @@ Metrics:         ○ GET /metrics on daemon
 
 Configuration is loaded in order of priority (highest wins):
 
-1. **Environment variables**: `CODERUN_*`
-2. **Project config**: `.coderun/config.toml`
-3. **User config**: `~/.config/coderun/config.toml`
+1. **Environment variables**: `KNOCODE_*`
+2. **Project config**: `.knocode/config.toml`
+3. **User config**: `~/.config/knocode/config.toml`
 4. **Defaults**: Built-in defaults
 
 ### Configuration Sections
@@ -309,39 +309,39 @@ Configuration is loaded in order of priority (highest wins):
 
 | Variable | Overrides | Default |
 |----------|-----------|---------|
-| `CODERUN_DAEMON_SOCKET` | daemon.socket_path | /tmp/coderun.sock |
-| `CODERUN_DATABASE_PATH` | database.path | ~/.coderun/data.db |
-| `CODERUN_LOG_LEVEL` | logging.level | info |
-| `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `CODERUN_CANDIDATE_K` | retrieval.candidate_k | 100 |
-| `CODERUN_WATCH_MODE` | index.watch_mode ("commit" or "filesystem") | commit |
-| `CODERUN_SYMBOLS_ENABLED` | Enable/disable tree-sitter symbol extraction | true |
-| `CODERUN_READY_TIMEOUT_MS` | Client-adapter readiness wait budget (poll `GET /health` before first request) | 10000 |
+| `KNOCODE_DAEMON_SOCKET` | daemon.socket_path | /tmp/knocode.sock |
+| `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
+| `KNOCODE_LOG_LEVEL` | logging.level | info |
+| `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
+| `KNOCODE_CANDIDATE_K` | retrieval.candidate_k | 100 |
+| `KNOCODE_WATCH_MODE` | index.watch_mode ("commit" or "filesystem") | commit |
+| `KNOCODE_SYMBOLS_ENABLED` | Enable/disable tree-sitter symbol extraction | true |
+| `KNOCODE_READY_TIMEOUT_MS` | Client-adapter readiness wait budget (poll `GET /health` before first request) | 10000 |
 
 ## Agent Integration
 
 ### OpenCode
 
-1. Start the daemon: `coderun serve`
-2. Copy the plugin: `cp .opencode/plugins/coderun.ts .opencode/plugins/`
+1. Start the daemon: `knocode serve`
+2. Copy the plugin: `cp .opencode/plugins/knocode.ts .opencode/plugins/`
 3. Restart OpenCode
 
 ### Claude Code
 
-1. Start the daemon: `coderun serve`
+1. Start the daemon: `knocode serve`
 2. Hooks are configured in `.claude/settings.json`
 3. Make hooks executable: `chmod +x .claude/hooks/*.sh`
 4. Restart Claude Code
 
 ### Cursor
 
-1. Start the daemon: `coderun serve`
+1. Start the daemon: `knocode serve`
 2. Install extension from `adapters/cursor/extension.ts`
 3. Extension calls `POST /hook` (UDS/MessagePack primary, HTTP fallback, 30s fail-open)
 
 ### Gemini CLI
 
-1. Start the daemon: `coderun serve`
+1. Start the daemon: `knocode serve`
 2. Hooks at `adapters/gemini/hooks.sh`
 3. `chmod +x adapters/gemini/hooks.sh`
 
@@ -462,7 +462,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 
 ### Adding a New Crate
 
-1. Create `crates/coderun-<name>/Cargo.toml`
+1. Create `crates/knocode-<name>/Cargo.toml`
 2. Add to workspace `Cargo.toml` members
 3. Add shared dependencies to `[workspace.dependencies]`
 4. Create `src/lib.rs` with module code
@@ -471,7 +471,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 ### Running Specific Tests
 
 ```bash
-cargo test -p coderun-core
+cargo test -p knocode-core
 cargo test test_config_load
 cargo test -- --nocapture
 ```

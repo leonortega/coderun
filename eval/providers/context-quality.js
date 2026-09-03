@@ -2,11 +2,11 @@
  * Context Quality Evaluation Provider for Promptfoo
  *
  * Exports a provider object with id() and callApi() methods.
- * Simulates the Coderun context engine behavior.
+ * Simulates the Knocode context engine behavior.
  */
 
 /**
- * Mock context engine (simulates Coderun context building)
+ * Mock context engine (simulates Knocode context building)
  */
 function mockContextEngine(vars) {
   const task = vars.task || "";
@@ -86,7 +86,7 @@ const fs = require("fs");
 const path = require("path");
 
 async function callBuildContextUDS(prompt, timeoutMs = 2000) {
-  const socketPath = process.env.CODERUN_SOCKET || "/tmp/coderun.sock";
+  const socketPath = process.env.KNOCODE_SOCKET || "/tmp/knocode.sock";
   if (!fs.existsSync(socketPath)) throw new Error("UDS not found");
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);

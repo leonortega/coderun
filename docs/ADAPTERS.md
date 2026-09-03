@@ -1,6 +1,6 @@
 # Agent Adapters
 
-This document describes how to integrate Coderun with coding agents.
+This document describes how to integrate Knocode with coding agents.
 
 ## Supported Agents
 
@@ -18,18 +18,18 @@ This document describes how to integrate Coderun with coding agents.
 
 ### Installation
 
-1. Start the Coderun daemon:
+1. Start the Knocode daemon:
    ```bash
-   coderun serve
+   knocode serve
    ```
 
 2. Copy the plugin to your OpenCode plugins directory:
    ```bash
    # Project-level (recommended)
-   cp .opencode/plugins/coderun.ts .opencode/plugins/
+   cp .opencode/plugins/knocode.ts .opencode/plugins/
    
    # Or global
-   cp .opencode/plugins/coderun.ts ~/.config/opencode/plugins/
+   cp .opencode/plugins/knocode.ts ~/.config/opencode/plugins/
    ```
 
 3. Restart OpenCode
@@ -40,7 +40,7 @@ The OpenCode plugin intercepts two events:
 
 | Event | Action |
 |-------|--------|
-| `message.updated` | Enriches user messages with context from Coderun |
+| `message.updated` | Enriches user messages with context from Knocode |
 | `tool.execute.before` | Compresses tool outputs to reduce token usage |
 
 ### Configuration
@@ -49,31 +49,31 @@ Set environment variables to configure the plugin:
 
 ```bash
 # Override daemon URL (default: http://127.0.0.1:9527)
-export CODERUN_DAEMON_URL="http://127.0.0.1:9527"
+export KNOCODE_DAEMON_URL="http://127.0.0.1:9527"
 
-# Override UDS socket path (default: /tmp/coderun.sock)
-export CODERUN_SOCKET_PATH="/tmp/coderun.sock"
+# Override UDS socket path (default: /tmp/knocode.sock)
+export KNOCODE_SOCKET_PATH="/tmp/knocode.sock"
 ```
 
 ### Plugin Code
 
-See `.opencode/plugins/coderun.ts` for the full implementation.
+See `.opencode/plugins/knocode.ts` for the full implementation.
 
 ## Claude Code Integration
 
 ### Installation
 
-1. Start the Coderun daemon:
+1. Start the Knocode daemon:
    ```bash
-   coderun serve
+   knocode serve
    ```
 
 2. The hooks are already configured in `.claude/settings.json`
 
 3. Make the hook scripts executable:
    ```bash
-   chmod +x .claude/hooks/coderun-pregeneration.sh
-   chmod +x .claude/hooks/coderun-pretool.sh
+   chmod +x .claude/hooks/knocode-pregeneration.sh
+   chmod +x .claude/hooks/knocode-pretool.sh
    ```
 
 4. Restart Claude Code
@@ -100,7 +100,7 @@ The hooks are configured in `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/coderun-pregeneration.sh",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/knocode-pregeneration.sh",
             "timeout": 30
           }
         ]
@@ -112,7 +112,7 @@ The hooks are configured in `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/coderun-pretool.sh",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/knocode-pretool.sh",
             "timeout": 10
           }
         ]
@@ -126,7 +126,7 @@ The hooks are configured in `.claude/settings.json`:
 
 ```bash
 # Override daemon URL (default: http://127.0.0.1:9527)
-export CODERUN_DAEMON_URL="http://127.0.0.1:9527"
+export KNOCODE_DAEMON_URL="http://127.0.0.1:9527"
 
 # Session ID for tracking (optional)
 export SESSION_ID="my-session"
@@ -138,7 +138,7 @@ See `.claude/hooks/` for the shell script implementations.
 
 ## IPC Protocol
 
-Adapters communicate with the Coderun daemon via **UDS + MessagePack** (primary) with HTTP/JSON fallback on `127.0.0.1:9527`.
+Adapters communicate with the Knocode daemon via **UDS + MessagePack** (primary) with HTTP/JSON fallback on `127.0.0.1:9527`.
 
 ### Request Format
 
@@ -181,7 +181,7 @@ Adapters communicate with the Coderun daemon via **UDS + MessagePack** (primary)
 
 ### Fail-Open Behavior
 
-If the Coderun daemon is unreachable or returns an error, the adapters fail open:
+If the Knocode daemon is unreachable or returns an error, the adapters fail open:
 - The original message/output is used unchanged
 - The agent continues without interruption
 - An error is logged for debugging
@@ -194,10 +194,10 @@ If you see errors about the daemon being unreachable:
 
 ```bash
 # Check if daemon is running
-coderun status
+knocode status
 
 # Start the daemon
-coderun serve
+knocode serve
 ```
 
 ### Hook Not Firing
@@ -225,6 +225,6 @@ To add support for a new agent:
 
 1. Research the agent's hook/extension API
 2. Create adapter files in `adapters/<agent-name>/`
-3. Implement the hook handlers that call Coderun daemon
+3. Implement the hook handlers that call Knocode daemon
 4. Document the installation steps in this file
 5. Add integration tests

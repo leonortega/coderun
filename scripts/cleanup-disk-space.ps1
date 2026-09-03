@@ -178,7 +178,7 @@ try {
 # Project misc
 Remove-IfExists -Path "eval\results"               -Label "Evaluation results"
 Remove-IfExists -Path ".opencode\cache"            -Label "OpenCode cache"
-Remove-IfExists -Path ".coderun\cache"             -Label "Coderun cache"
+Remove-IfExists -Path ".knocode\cache"             -Label "Knocode cache"
 Write-Host ""
 
 # ═════════════════════════════════════════════════════════════════════════════

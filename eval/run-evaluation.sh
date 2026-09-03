@@ -1,5 +1,5 @@
 #!/bin/bash
-# Coderun Evaluation Runner
+# Knocode Evaluation Runner
 # Usage: ./run-evaluation.sh [model|context|all] [--view]
 
 set -e
@@ -22,7 +22,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${YELLOW}=== Coderun AI Runtime Evaluation ===${NC}"
+echo -e "${YELLOW}=== Knocode AI Runtime Evaluation ===${NC}"
 echo ""
 
 TOTAL_PASS=0

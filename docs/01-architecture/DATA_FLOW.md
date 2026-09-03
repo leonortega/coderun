@@ -14,7 +14,7 @@ Describe all important data flows through the AI Runtime. Each flow shows the se
 ### Trigger
 
 - Git change detected (file system watcher or manual trigger)
-- `coderun index` command
+- `knocode index` command
 - SIGHUP or SIGUSR1 signal
 
 ### Sequence

@@ -1,13 +1,13 @@
 [package]
-name = "coderun-workflow"
+name = "knocode-workflow"
 version = "0.6.0"
 edition = "2021"
-description = "Coderun workflow (future, DBOS) — preserved out of v1 hot path, opt-in via future/workflow"
+description = "Knocode workflow (future, DBOS) — preserved out of v1 hot path, opt-in via future/workflow"
 license = "MIT"
 
 [dependencies]
-coderun-core = { path = "../../crates/coderun-core" }
-coderun-storage = { path = "../../crates/coderun-storage" }
+knocode-core = { path = "../../crates/knocode-core" }
+knocode-storage = { path = "../../crates/knocode-storage" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
