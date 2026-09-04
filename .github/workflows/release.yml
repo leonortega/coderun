@@ -95,7 +95,6 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii
           Get-Item $asset, "$asset.sha256" | Select-Object Name, Length
-          "asset=$asset" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Extract changelog release notes
         shell: bash
@@ -118,8 +117,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Knocode ${{ github.ref_name }}
           files: |
-            ${{ env.asset }}
-            ${{ env.asset }}.sha256
+            knocode-${{ env.version }}-x86_64-pc-windows-msvc.zip
+            knocode-${{ env.version }}-x86_64-pc-windows-msvc.zip.sha256
             installers/knocode-install.ps1
           body_path: release-body.md
           draft: false

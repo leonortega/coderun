@@ -22,7 +22,7 @@
   npm registry needed. Use -SkipPrereqs to disable auto-installs.
 
   Latest release (one-liner):
-    powershell -ExecutionPolicy Bypass -c "irm https://github.com/leonortega/knocode/releases/latest/download/knocode-install.ps1 | iex"
+    powershell -ExecutionPolicy Bypass -c "irm https://leonortega.github.io/knocode/install.ps1 | iex"
 
   Pinned version (download the script and pass -Version):
     powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Version 0.9.6

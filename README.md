@@ -75,36 +75,48 @@ At 27-49ms, Knocode is fast enough to run on every keystroke in an AI coding ass
 
 Prebuilt Windows x64 binaries are published to every [GitHub Release](https://github.com/leonortega/knocode/releases).
 
-**Scoop** (recommended — per-user, no admin; installs Git as a dependency automatically):
+**One-liner install** (GitHub Pages — auto-downloads the latest release):
 
-```bash
-scoop bucket add knocode https://github.com/leonortega/knocode
-scoop install knocode
-scoop update knocode    # after new releases
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -c "irm https://leonortega.github.io/knocode/install.ps1 | iex"
 ```
 
-**Winget** (once the manifest is merged in [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) — see `winget/README.md`):
+```bash
+# Linux / macOS
+curl -fsSL https://leonortega.github.io/knocode/install.sh | bash
+```
+
+**Scoop** (Windows — per-user, no admin; installs Git as a dependency):
+
+```powershell
+scoop bucket add knocode https://github.com/leonortega/knocode
+scoop install knocode
+scoop update knocode
+```
+
+**Winget** (once merged in [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs)):
 
 ```powershell
 winget install Knocode.knocode
 winget upgrade Knocode.knocode
 ```
 
-**Direct download** — grab `knocode-<ver>-x86_64-pc-windows-msvc.zip` (with `.sha256` checksum) from the Release and unzip it anywhere; add the folder to your PATH. The `knocode-install.ps1` asset in each Release is the one-liner installer that automates this into `%USERPROFILE%\.knocode\bin`.
-
-> Need agent integrations (opencode plugin, MCP server), RTK, or the full developer environment? Run `scripts/install.ps1` / `scripts/install.sh` from a source checkout.
+**Direct download** — grab `knocode-<ver>-x86_64-pc-windows-msvc.zip` from the Release and unzip it; add the folder to your PATH.
 
 ### Agent integrations
 
 The installers ask which agents to wire up — pick one or more of **OpenCode**, **Codex**, **Copilot (VS Code)**, and **Cursor** (default: all in the developer installers; none in the release one-liner).
 
+```powershell
+# Windows one-liner with agent selection
+powershell -ExecutionPolicy Bypass -c "irm https://leonortega.github.io/knocode/install.ps1 | iex" -Agents opencode,codex
+```
+
 ```bash
-# developer installers (source checkout)
+# Developer installers (source checkout)
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode,codex
 bash scripts/install.sh --agents opencode,cursor
-
-# release one-liner (end users)
-powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Agents opencode,cursor
 ```
 
 - **OpenCode** — plugin `opencode-knocode` + agent skill in `~/.config/opencode`
