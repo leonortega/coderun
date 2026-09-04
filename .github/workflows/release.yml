@@ -172,7 +172,12 @@ jobs:
         run: |
           ver="${{ needs.verify.outputs.version }}"
           asset="knocode-${ver}-x86_64-unknown-linux-gnu.zip"
-          zip -j "$asset" target/release/knocode target/release/knocode-daemon integrations/ -r LICENSE
+          mkdir -p staging
+          cp target/release/knocode staging/
+          cp target/release/knocode-daemon staging/
+          cp -r integrations staging/
+          cp LICENSE staging/
+          (cd staging && zip -r "../$asset" .)
           sha256sum "$asset" | awk '{print $1}' > "$asset.sha256"
           ls -l "$asset" "$asset.sha256"
 
@@ -238,7 +243,12 @@ jobs:
         run: |
           ver="${{ needs.verify.outputs.version }}"
           asset="knocode-${ver}-aarch64-apple-darwin.zip"
-          zip -j "$asset" target/release/knocode target/release/knocode-daemon integrations/ -r LICENSE
+          mkdir -p staging
+          cp target/release/knocode staging/
+          cp target/release/knocode-daemon staging/
+          cp -r integrations staging/
+          cp LICENSE staging/
+          (cd staging && zip -r "../$asset" .)
           shasum -a 256 "$asset" | awk '{print $1}' > "$asset.sha256"
           ls -l "$asset" "$asset.sha256"
 
