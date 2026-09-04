@@ -1,5 +1,5 @@
 {
-    "version": "0.9.6",
+    "version": "0.9.7",
     "description": "Knocode — AI Runtime for coding agents. Local daemon that enriches agent requests with repository context.",
     "homepage": "https://github.com/leonortega/knocode",
     "license": "MIT",

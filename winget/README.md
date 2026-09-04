@@ -22,7 +22,7 @@ pull request there — it cannot be automated from this repo alone. Per new vers
 winget install wingetcreate   # or: dotnet tool install --global wingetcreate
 
 # 2. Point it at the release zip (it validates URL + hash against the GitHub release)
-wingetcreate update Knocode.knocode --version 0.9.6 --urls "https://github.com/leonortega/knocode/releases/download/v0.9.6/knocode-0.9.6-x86_64-pc-windows-msvc.zip"
+wingetcreate update Knocode.knocode --version <VERSION> --urls "https://github.com/leonortega/knocode/releases/download/v<VERSION>/knocode-<VERSION>-x86_64-pc-windows-msvc.zip"
 
 # 3. Follow its prompts to open the PR in microsoft/winget-pkgs
 ```

@@ -5,7 +5,7 @@ name: Release
 # installer script (installers/knocode-install.ps1). The Release is created
 # automatically if it does not exist yet; re-pushing the same tag updates it.
 #
-#   git tag v0.9.6 && git push origin v0.9.6
+#   git tag v0.9.7 && git push origin v0.9.7
 #   (or: cargo install cargo-release && cargo release patch)
 #
 # Releases for other platforms can be added later by extending the matrix -

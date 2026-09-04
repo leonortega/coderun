@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
-# Knocode installer v0.9.6 minimal (Unix: Linux/macOS, bash)
+# Knocode installer v0.9.7 minimal (Unix: Linux/macOS, bash)
 # Minimal v1: Git + SQLite(bundled)/tree-sitter/tantivy/tiktoken embedded + RTK optional (no Rust - prebuilt binaries; compile via scripts/compile.sh)
 # Agent integrations (OpenCode/Codex/Copilot/Cursor) are selectable: --agents opencode,codex | --all-agents | --no-agents
-# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--skip-external] [--with-optional] [--agents a,b,c|--all-agents|--no-agents] [--skip-prereqs]
+# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--agents a,b,c|--all-agents|--no-agents] [--skip-prereqs]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SKIP_BUILD=false; SKIP_EXTERNAL=false; WITH_OPTIONAL=false; AGENTS=""; ALL_AGENTS=false; NO_AGENTS=false; SKIP_PREREQS=false
+SKIP_BUILD=false; AGENTS=""; ALL_AGENTS=false; NO_AGENTS=false; SKIP_PREREQS=false
 for arg in "$@"; do case "$arg" in
   --skip-build) SKIP_BUILD=true;;
-  --skip-external) SKIP_EXTERNAL=true;;
-  --with-optional) WITH_OPTIONAL=true;;
   --agents) AGENTS="$2"; shift;;
   --agents=*) AGENTS="${arg#--agents=}";;
   --all-agents) ALL_AGENTS=true;;
   --no-agents) NO_AGENTS=true;;
   --skip-prereqs) SKIP_PREREQS=true;;
-  -h|--help) echo "Usage: $0 [--skip-build] [--skip-external] [--with-optional] [--agents opencode,codex,copilot,cursor | --all-agents | --no-agents] [--skip-prereqs]"; exit 0;;
+  -h|--help) echo "Usage: $0 [--skip-build] [--agents opencode,codex,copilot,cursor | --all-agents | --no-agents] [--skip-prereqs]"; exit 0;;
 esac; done
 info(){ echo -e "\033[36m[knocode]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; } ; skip(){ echo -e "  \033[90m[SKIP]\033[0m $*"; }
 
@@ -75,7 +73,7 @@ if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; 
   if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y python3 python3-pip 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 apt install failed - install manually: https://www.python.org/downloads/"
   elif command -v brew >/dev/null 2>&1; then brew install python@3.13 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 brew install failed"
   elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y python3 python3-pip 2>/dev/null && ok "python3 $(python3 --version)" || warn "python3 dnf install failed"
-  else warn "python3 not found - install Python 3.11+ https://www.python.org/downloads/ (required for promptfoo)"; fi
+  else warn "python3 not found - install Python 3.11+ https://www.python.org/downloads/"; fi
 else command -v python3 >/dev/null 2>&1 && ok "python3 $(python3 --version)" || ok "python $(python --version)"; fi
 if ! command -v git >/dev/null 2>&1; then
   if [ "$SKIP_PREREQS" = true ]; then echo "git not found"; exit 1; fi
@@ -86,8 +84,7 @@ if ! command -v git >/dev/null 2>&1; then
   else echo "git not found - install manually: https://git-scm.com"; exit 1; fi
 else ok "$(git --version)"; fi
 
-if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-external)"; else
-  info "Installing first-class external tools..."
+info "Installing external tools..."
    # RTK - download prebuilt release for this platform -> ~/.knocode/bin/rtk (NO COMPILE). Unified bin.
    RTK_BIN="$HOME/.knocode/bin/rtk"
    if [ -f "$HOME/bin/rtk" ] && [ ! -f "$RTK_BIN" ]; then mkdir -p "$(dirname "$RTK_BIN")"; cp -f "$HOME/bin/rtk" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "migrated legacy ~/bin/rtk -> $RTK_BIN" || true; fi
@@ -120,9 +117,7 @@ if [ "$SKIP_EXTERNAL" = true ]; then info "Skipping external tools (--skip-exter
        rm -rf "$RTK_TMP" 2>/dev/null
      fi
    fi
-   command -v promptfoo >/dev/null || npm i -g promptfoo 2>/dev/null; if command -v promptfoo >/dev/null; then ok "promptfoo $(promptfoo --version 2>/dev/null | head -1)"; else warn "promptfoo install failed - try: npm i -g promptfoo"; fi; ok "promptfoo check"
 
-fi
 
 # 1. Use prebuilt knocode (no compile/test - use repository binary)
 if [ "$SKIP_BUILD" = true ]; then info "Skipping build check (--skip-build)"; fi
@@ -297,4 +292,4 @@ else
 fi
 
 info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | knocode doctor"
-info "Docs: docs/*.md plain | promptfoo eval --config eval/promptfooconfig.yaml (optional: --with-optional) | knocode doctor"
+info "Docs: docs/*.md | knocode doctor"

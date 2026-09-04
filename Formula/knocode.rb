@@ -3,8 +3,8 @@ class Knocode < Formula
   homepage "https://github.com/leonortega/knocode"
   # TODO: switch to a prebuilt-binary bottle once Linux/macOS release artifacts exist
   # (the GitHub release workflow currently publishes Windows x64 only).
-  version "0.9.6"
-  url "https://github.com/leonortega/knocode/archive/v0.9.6.tar.gz"
+  version "0.9.7"
+  url "https://github.com/leonortega/knocode/archive/v0.9.7.tar.gz"
   sha256 "REPLACE_WITH_SHA_AFTER_RELEASE"
   license "MIT"
   depends_on "rust" => :build
@@ -23,7 +23,7 @@ class Knocode < Formula
   end
 
   test do
-    assert_match "0.9.6", shell_output("#{bin}/knocode --version")
+    assert_match "0.9.7", shell_output("#{bin}/knocode --version")
     assert_match "All critical checks", shell_output("#{bin}/knocode doctor")
   end
 end

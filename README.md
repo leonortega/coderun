@@ -486,7 +486,7 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | Context build error | OriginalPassthrough | "error" |
 | Any internal error | OriginalPassthrough | "fail-open" |
 
-## Implementation Status (v0.9.6)
+## Implementation Status (v0.9.7)
 
 | Component | Status | Notes |
 |-----------|--------|-------|

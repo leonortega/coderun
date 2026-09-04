@@ -1,21 +1,17 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Knocode installer v0.9.6 minimal (Windows PowerShell 5.1)
+  Knocode installer v0.9.7 minimal (Windows PowerShell 5.1)
   Installs minimal v1 stack + uses prebuilt knocode (no compile/test). Idempotent - re-run to update.
 
 .DESCRIPTION
   Minimal v1: Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
          RTK (optional) - no Rust needed (prebuilt binaries; compile via scripts/compile.*)
-  Deferred/optional: promptfoo - install only with -WithOptional
   Agent integrations: OpenCode, Codex, Copilot (VS Code), Cursor - select one or more at install
   (default: all). Prebuilt: target/release/knocode.exe + knocode-daemon.exe are used directly.
 
 .PARAMETER SkipBuild
   Deprecated - build is always skipped (prebuilt binary at target/release/knocode.exe is used). Kept for compat.
-
-.PARAMETER SkipExternal
-  Skip external tool installs (only config + doctor)
 
 .PARAMETER Agents
   Comma-separated agent list to wire, e.g. "-Agents opencode,codex". Valid: opencode, codex, copilot, cursor.
@@ -33,9 +29,9 @@
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode,cursor
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -AllAgents
-  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -NoAgents -SkipExternal
+  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -NoAgents
 #>
-param([switch]$SkipBuild, [switch]$SkipExternal, [switch]$WithOptional, [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$SkipPrereqs)
+param([switch]$SkipBuild, [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$SkipPrereqs)
 
 $ErrorActionPreference = "Stop"
 # Always English in scripts (avoid localized ShouldProcess/WhatIf)
@@ -178,16 +174,12 @@ if (-not (Test-Cmd git)) {
   if ($SkipPrereqs) { Fail "git not found" } else { Install-GitIfMissing; if (-not (Test-Cmd git)) { Fail "git not found after auto-install" } }
 } else { Ok "git $(git --version)" }
 
-if ($SkipExternal) { Info "Skipping external tools (--SkipExternal)" }
+# RTK - download prebuilt release -> ~\.knocode\bin\rtk.exe (NO COMPILE). Unified bin.
+Info "Installing external tools..."
+$rtkBinPath = Join-Path $env:USERPROFILE ".knocode\bin\rtk.exe"
+if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
+elseif (Test-Path $rtkBinPath) { $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; Ok "rtk binary at $rtkBinPath" }
 else {
-  Info "Installing first-class external tools..."
-
-
-  # RTK - download prebuilt release -> ~\.knocode\bin\rtk.exe (NO COMPILE). Unified bin.
-  $rtkBinPath = Join-Path $env:USERPROFILE ".knocode\bin\rtk.exe"
-  if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
-  elseif (Test-Path $rtkBinPath) { $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; Ok "rtk binary at $rtkBinPath" }
-  # Migrate legacy ~/bin/rtk.exe -> ~/.knocode/bin/rtk.exe
   $legacyRtk = "$env:USERPROFILE\bin\rtk.exe"
   if ((Test-Path $legacyRtk) -and -not (Test-Path $rtkBinPath)) {
     try { Copy-Item -LiteralPath $legacyRtk -Destination $rtkBinPath -Force; Ok "migrated legacy $legacyRtk -> $rtkBinPath" } catch {}
@@ -214,31 +206,6 @@ else {
     } catch { Warn "rtk download failed: $_ - install manually from https://github.com/rtk-ai/rtk/releases" }
     finally { if (Test-Path $rtkTmp) { Remove-Item -LiteralPath $rtkTmp -Recurse -Force -ErrorAction SilentlyContinue } }
   }
-
-
-  # promptfoo (eval) - suppress Node ExperimentalWarning
-  $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-  $env:NODE_NO_WARNINGS = "1"
-  $promptOk = $false
-  if (Test-Cmd promptfoo) {
-    try {
-      $raw = & promptfoo --version 2>&1 | Out-String
-      $v = ($raw -split "`n" | Where-Object { $_ -match "^\s*\d+\.\d+" } | ForEach-Object { $_.Trim() } | Select-Object -First 1)
-      if ($v) { Ok "promptfoo $v"; $promptOk = $true } else { Ok "promptfoo installed"; $promptOk = $true }
-    } catch { Ok "promptfoo installed"; $promptOk = $true }
-  }
-  if (-not $promptOk) {
-    try {
-      Info "  Installing promptfoo..."
-      npm i -g promptfoo *>&1 | Out-Null
-      if (Test-Cmd promptfoo) {
-        $raw = & promptfoo --version 2>&1 | Out-String
-        $v = ($raw -split "`n" | Where-Object { $_ -match "^\s*\d+\.\d+" } | ForEach-Object { $_.Trim() } | Select-Object -First 1)
-        if ($v) { Ok "promptfoo $v" } else { Ok "promptfoo installed" }
-      } else { Info "  promptfoo not installed (optional - for eval: npm i -g promptfoo)" }
-    } catch { Info "  promptfoo not installed (optional - for eval: npm i -g promptfoo) - $_" }
-  }
-  $ErrorActionPreference = $prevEA2
 }
 
 
@@ -508,4 +475,4 @@ if ($daemonUp) {
 }
 
 Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | knocode doctor"
-Info "Docs: docs/*.md plain | promptfoo eval --config eval/promptfooconfig.yaml (optional: -WithOptional) | knocode doctor"
+Info "Docs: docs/*.md | knocode doctor"
