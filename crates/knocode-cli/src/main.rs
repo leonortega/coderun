@@ -136,14 +136,102 @@ fn main() {
 
 // ── Command Implementations ─────────────────────────────────────────────
 
-fn cmd_serve(_port: u16, _socket: Option<String>) -> Result<(), String> {
+fn cmd_serve(port: u16, _socket: Option<String>) -> Result<(), String> {
+    let health_url = format!("http://127.0.0.1:{}/health", port);
+
+    // Check if daemon is already running
+    if is_daemon_running(&health_url) {
+        println!("knocode daemon already running at {}", health_url);
+        return Ok(());
+    }
+
     println!("Starting knocode daemon...");
-    println!("  UDS/MessagePack primary (spec §2) on {}", _socket.as_deref().unwrap_or("/tmp/knocode.sock"));
-    println!("  HTTP fallback on 127.0.0.1:{} (JSON)", _port);
-    println!("  Delegating to knocode-daemon binary — run `knocode-daemon` for full serve.");
-    // In v0.3.0, `knocode serve` still delegates to the daemon binary; lifecycle now wires UDS+HTTP.
-    println!("  Tip: daemon now starts both UDS (primary) and HTTP (fallback) — no extra flag needed.");
+
+    // Find the daemon binary
+    let daemon_exe = find_daemon_exe()?;
+    println!("  Binary: {}", daemon_exe.display());
+    println!("  HTTP:   {}", health_url);
+
+    // Start daemon as background process
+    let daemon_work_dir = dirs_home().unwrap_or_else(|| PathBuf::from(".")).join(".knocode");
+    std::fs::create_dir_all(&daemon_work_dir).ok();
+
+    let mut cmd = std::process::Command::new(&daemon_exe);
+    cmd.current_dir(&daemon_work_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let child = cmd.spawn().map_err(|e| format!("Failed to start daemon: {}", e))?;
+    println!("  PID:    {}", child.id());
+
+    // Wait for health check
+    print!("  Waiting for daemon to be ready");
+    for _i in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if is_daemon_running(&health_url) {
+            println!(" ✓");
+            println!("knocode daemon RUNNING at {} (PID {})", health_url, child.id());
+            return Ok(());
+        }
+        print!(".");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+    println!(" ✗");
+    println!("Warning: daemon started but /health not responding within 20s");
+    println!("  Verify: curl {}", health_url);
     Ok(())
+}
+
+fn is_daemon_running(health_url: &str) -> bool {
+    // Extract host:port from URL (strip scheme and path)
+    let addr = health_url
+        .strip_prefix("http://")
+        .unwrap_or(health_url)
+        .split('/')
+        .next()
+        .unwrap_or(health_url);
+    std::net::TcpStream::connect(addr).is_ok()
+}
+
+fn find_daemon_exe() -> Result<PathBuf, String> {
+    // 1. Check ~/.knocode/bin/knocode-daemon (installed copy)
+    if let Some(home) = dirs_home() {
+        let installed = home.join(".knocode").join("bin").join("knocode-daemon");
+        #[cfg(windows)]
+        let installed = installed.with_extension("exe");
+        if installed.exists() {
+            return Ok(installed);
+        }
+    }
+    // 2. Check PATH
+    let which = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(out) = std::process::Command::new(which).arg("knocode-daemon").output() {
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    // 3. Check current directory target/release
+    let local = PathBuf::from("target/release/knocode-daemon");
+    #[cfg(windows)]
+    let local = local.with_extension("exe");
+    if local.exists() {
+        return Ok(local);
+    }
+    Err("knocode-daemon not found. Build with: cargo build --release -p knocode-daemon".to_string())
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    { std::env::var("USERPROFILE").ok().map(PathBuf::from) }
+    #[cfg(not(target_os = "windows"))]
+    { std::env::var("HOME").ok().map(PathBuf::from) }
 }
 
 fn cmd_init(wizard: bool) -> Result<(), String> {

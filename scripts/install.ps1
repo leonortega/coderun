@@ -367,14 +367,14 @@ if ($agentSel.Count -gt 0) {
       }
     } else { Warn "packages/opencode-knocode not found - skipping npm plugin install" }
     # Knocode agent skill (opencode - agent-native discovery)
-    $ocSkillSrc = Join-Path $Root ".opencode\skills\knocode"
+    $ocSkillSrc = Join-Path $Root ".knocode\skills\knocode"
     if (Test-Path (Join-Path $ocSkillSrc "SKILL.md")) {
       try {
         New-Item -ItemType Directory -Force -Path (Join-Path $ocGlobalDir "skills") | Out-Null
         Copy-Item -LiteralPath $ocSkillSrc -Destination (Join-Path $ocGlobalDir "skills\knocode") -Recurse -Force
         Ok "knocode skill installed to $env:USERPROFILE\.config\opencode\skills\knocode (opencode agent-native)"
       } catch { Warn "knocode skill copy failed: $_" }
-    } else { Warn ".opencode\skills\knocode not found - skipping agent skill install" }
+    } else { Warn ".knocode\skills\knocode not found - skipping agent skill install" }
     Info "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
   }
 

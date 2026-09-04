@@ -1,15 +1,11 @@
 name: Release
 
-# Builds knocode + knocode-daemon (Windows x64) whenever a v* tag is pushed and
-# publishes them to the GitHub Release for that tag, together with the end-user
-# installer script (installers/knocode-install.ps1). The Release is created
-# automatically if it does not exist yet; re-pushing the same tag updates it.
+# Builds knocode + knocode-daemon for Windows x64, Linux x64, and macOS arm64
+# whenever a v* tag is pushed and publishes them to the GitHub Release for that
+# tag, together with the end-user installer scripts.
 #
 #   git tag v0.9.7 && git push origin v0.9.7
 #   (or: cargo install cargo-release && cargo release patch)
-#
-# Releases for other platforms can be added later by extending the matrix -
-# see installers/knocode-install.ps1 for the x64-only assumption.
 #
 # After publishing, the scoop bucket manifest (repo-root knocode.json) and the
 # winget manifests (winget/Knocode/knocode/<ver>/) are refreshed with the real
@@ -25,15 +21,18 @@ permissions:
   contents: write
 
 jobs:
-  release-windows-x64:
-    name: Build & publish (Windows x64)
-    runs-on: windows-latest
+  # ── Shared: verify tag matches Cargo.toml version ──────────────────────
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Check out source
         uses: actions/checkout@v5
 
       - name: Verify tag matches Cargo.toml version
-        shell: bash
+        id: ver
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
@@ -46,7 +45,16 @@ jobs:
             echo "::error::tag '${tag}' does not match Cargo.toml version 'v${ver}' — bump the version and re-tag"
             exit 1
           fi
-          echo "version=${ver}" >> "${GITHUB_ENV}"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+
+  # ── Build: Windows x64 ─────────────────────────────────────────────────
+  build-windows-x64:
+    name: Build (Windows x64)
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -54,7 +62,7 @@ jobs:
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-build
+          shared-key: release-build-windows
           cache-directories: |
             ~/.cargo/bin
             ~/.cargo/registry/index
@@ -68,8 +76,6 @@ jobs:
       - name: Build agent integration packages (bundled dist)
         shell: pwsh
         run: |
-          # Both packages have zero runtime deps - build their dist/ and bundle them
-          # into the release zip so agent wiring never needs the npm registry.
           foreach ($pkg in @("opencode-knocode", "knocode-mcp")) {
             Push-Location "packages/$pkg"
             try {
@@ -84,7 +90,6 @@ jobs:
             Copy-Item "packages/$pkg/package.json" -Destination $dst -Force
             Copy-Item "packages/$pkg/dist" -Destination $dst -Recurse -Force
           }
-          Get-ChildItem -Recurse integrations | Select-Object -First 8 FullName
 
       - name: Test workspace (release)
         run: cargo test --release --workspace --quiet
@@ -98,24 +103,182 @@ jobs:
       - name: Package release archive
         shell: pwsh
         run: |
-          $asset = "knocode-$env:version-x86_64-pc-windows-msvc.zip"
+          $ver = "${{ needs.verify.outputs.version }}"
+          $asset = "knocode-${ver}-x86_64-pc-windows-msvc.zip"
           Compress-Archive -Path "target/release/knocode.exe", "target/release/knocode-daemon.exe", "integrations", "LICENSE" -DestinationPath $asset -CompressionLevel Optimal
           $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii
           Get-Item $asset, "$asset.sha256" | Select-Object Name, Length
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            knocode-*-x86_64-pc-windows-msvc.zip
+            knocode-*-x86_64-pc-windows-msvc.zip.sha256
+          retention-days: 1
+
+  # ── Build: Linux x64 ───────────────────────────────────────────────────
+  build-linux-x64:
+    name: Build (Linux x64)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build-linux
+          cache-directories: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
+
+      - name: Build release binaries
+        run: cargo build --release -p knocode-cli -p knocode-daemon
+
+      - name: Build agent integration packages (bundled dist)
+        run: |
+          for pkg in opencode-knocode knocode-mcp; do
+            cd "packages/$pkg"
+            if [ -f package-lock.json ]; then npm ci --silent; else npm install --silent; fi
+            npm run build --silent
+            cd "$GITHUB_WORKSPACE"
+          done
+          mkdir -p integrations
+          for pkg in opencode-knocode knocode-mcp; do
+            mkdir -p "integrations/$pkg"
+            cp "packages/$pkg/package.json" "integrations/$pkg/"
+            cp -r "packages/$pkg/dist" "integrations/$pkg/"
+          done
+
+      - name: Test workspace (release)
+        run: cargo test --release --workspace --quiet
+
+      - name: Smoke test binaries
+        run: |
+          ./target/release/knocode --version
+          ls -l target/release/knocode target/release/knocode-daemon
+
+      - name: Package release archive
+        run: |
+          ver="${{ needs.verify.outputs.version }}"
+          asset="knocode-${ver}-x86_64-unknown-linux-gnu.zip"
+          zip -j "$asset" target/release/knocode target/release/knocode-daemon integrations/ -r LICENSE
+          sha256sum "$asset" | awk '{print $1}' > "$asset.sha256"
+          ls -l "$asset" "$asset.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            knocode-*-x86_64-unknown-linux-gnu.zip
+            knocode-*-x86_64-unknown-linux-gnu.zip.sha256
+          retention-days: 1
+
+  # ── Build: macOS arm64 ─────────────────────────────────────────────────
+  build-macos-arm64:
+    name: Build (macOS arm64)
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build-macos
+          cache-directories: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
+
+      - name: Build release binaries
+        run: cargo build --release -p knocode-cli -p knocode-daemon
+
+      - name: Build agent integration packages (bundled dist)
+        run: |
+          for pkg in opencode-knocode knocode-mcp; do
+            cd "packages/$pkg"
+            if [ -f package-lock.json ]; then npm ci --silent; else npm install --silent; fi
+            npm run build --silent
+            cd "$GITHUB_WORKSPACE"
+          done
+          mkdir -p integrations
+          for pkg in opencode-knocode knocode-mcp; do
+            mkdir -p "integrations/$pkg"
+            cp "packages/$pkg/package.json" "integrations/$pkg/"
+            cp -r "packages/$pkg/dist" "integrations/$pkg/"
+          done
+
+      - name: Test workspace (release)
+        run: cargo test --release --workspace --quiet
+
+      - name: Smoke test binaries
+        run: |
+          ./target/release/knocode --version
+          ls -l target/release/knocode target/release/knocode-daemon
+
+      - name: Package release archive
+        run: |
+          ver="${{ needs.verify.outputs.version }}"
+          asset="knocode-${ver}-aarch64-apple-darwin.zip"
+          zip -j "$asset" target/release/knocode target/release/knocode-daemon integrations/ -r LICENSE
+          shasum -a 256 "$asset" | awk '{print $1}' > "$asset.sha256"
+          ls -l "$asset" "$asset.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            knocode-*-aarch64-apple-darwin.zip
+            knocode-*-aarch64-apple-darwin.zip.sha256
+          retention-days: 1
+
+  # ── Publish: collect all artifacts and create the GitHub Release ────────
+  publish:
+    name: Publish release
+    needs: [verify, build-windows-x64, build-linux-x64, build-macos-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded artifacts
+        run: find artifacts -type f | sort
+
       - name: Extract changelog release notes
-        shell: bash
         run: |
           set -euo pipefail
-          # Capture the "## [<version>]" section from CHANGELOG.md up to the next "## ["
-          body="$(awk -v v="${version}" '
+          ver="${{ needs.verify.outputs.version }}"
+          body="$(awk -v v="${ver}" '
             index($0, "## [" v "]") == 1 { on = 1; next }
             on && /^## \[/ { exit }
             on { print }
           ' CHANGELOG.md)"
           if [ -z "${body}" ]; then
-            body="Knocode ${GITHUB_REF_NAME} release."
+            body="Knocode ${{ github.ref_name }} release."
           fi
           printf '%s\n' "${body}" > release-body.md
 
@@ -125,21 +288,39 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Knocode ${{ github.ref_name }}
           files: |
-            knocode-${{ env.version }}-x86_64-pc-windows-msvc.zip
-            knocode-${{ env.version }}-x86_64-pc-windows-msvc.zip.sha256
+            artifacts/**/*
             installers/knocode-install.ps1
+            installers/knocode-install.sh
           body_path: release-body.md
           draft: false
           prerelease: false
 
-      - name: Refresh package manifests (scoop + winget)
+  # ── Manifest refresh: scoop + winget (Windows only) ────────────────────
+  refresh-manifests:
+    name: Refresh package manifests
+    needs: publish
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: dev
+
+      - name: Refresh scoop + winget manifests
         shell: pwsh
         run: |
-          git fetch origin dev --quiet
-          git checkout dev --quiet
-          $ver = $env:version
+          $ver = "${{ needs.verify.outputs.version }}"
           $asset = "knocode-$ver-x86_64-pc-windows-msvc.zip"
-          $hash = ((Get-Content -LiteralPath "$asset.sha256") -split "\s+")[0].Trim().ToLower()
+
+          # Download the sha256 from the release to get the hash
+          $url = "https://github.com/leonortega/knocode/releases/download/v$ver/$asset.sha256"
+          try {
+            $shaContent = (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30).Content
+            $hash = (($shaContent -split "\s+")[0]).Trim().ToLower()
+          } catch {
+            Write-Warning "could not download sha256 sidecar: $_"
+            return
+          }
 
           # --- scoop: repo-root knocode.json ---
           $mf = Get-Content -LiteralPath "knocode.json" -Raw | ConvertFrom-Json
@@ -222,7 +403,5 @@ jobs:
             echo "no manifest changes to commit"
             exit 0
           fi
-          git commit -m "chore(release): refresh scoop/winget manifests for ${GITHUB_REF_NAME}"
+          git commit -m "chore(release): refresh scoop/winget manifests for ${{ github.ref_name }}"
           git push origin dev || echo "::warning::manifest refresh push failed — commit is local to the runner, refresh manually"
-
-

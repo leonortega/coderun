@@ -76,7 +76,7 @@ the runtime should not own the concept:
   load/match, the daemon's skill loading, the CLI `skills` subcommand + `--community-skills` install,
   `[skills]` config, and the bundled skill library (`.knocode/skills`, `~/.knocode/skills`) are all
   gone. Context packs now carry docs + code context only.
-- **Retained — the agent-facing `knocode` skill** (`.opencode/skills/knocode/SKILL.md`). Skills live in
+- **Retained — the agent-facing `knocode` skill** (`.knocode/skills/knocode/SKILL.md`). Skills live in
   the agent's own ecosystem, and knocode ships one skill that teaches the agent how to use the
   runtime (binary location, init/doctor, MCP tools). The installers copy it to the agent's global
   skills directory (`~/.config/opencode/skills/knocode/`) per-agent — opencode today, others as

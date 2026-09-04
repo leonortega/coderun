@@ -406,6 +406,41 @@ export const KnocodePlugin: Plugin = async ({ project, client, $, directory, wor
   // shared daemon serves multiple opencode windows on different repos simultaneously.
   const repositoryPath: string = worktree || directory || project?.worktree || process.cwd();
 
+  // --- MCP Initialize ----------------------------------------------------
+  // Formal MCP handshake: initialize + notifications/initialized. This verifies
+  // the daemon speaks MCP, retrieves protocol version and capabilities, and
+  // signals the plugin is ready. Fail-open: if daemon is unreachable or legacy,
+  // we proceed without initialization (hooks will use /hook fallback).
+  let mcpInitialized = false;
+  let daemonVersion: string | undefined;
+
+  async function initializeMcp(): Promise<void> {
+    const out = await mcpCall(
+      "initialize",
+      {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "opencode-knocode", version: "0.9.7" },
+      },
+    );
+
+    if (out.kind === "ok") {
+      mcpInitialized = true;
+      daemonVersion = out.result?.serverInfo?.version;
+      console.log(`[knocode] MCP initialized (daemon v${daemonVersion || "unknown"})`);
+
+      // Send initialized notification
+      await mcpCall("notifications/initialized", {});
+    } else if (out.kind === "unsupported") {
+      console.log("[knocode] Daemon does not support MCP — using /hook fallback");
+    } else {
+      console.log(`[knocode] MCP init failed: ${out.kind === "error" ? out.message : out.reason}`);
+    }
+  }
+
+  // Try to initialize MCP on startup (non-blocking, fail-open)
+  initializeMcp().catch(() => {});
+
   // Optional structured log when client is available
   try {
     await client?.app?.log?.({
@@ -481,6 +516,8 @@ export const KnocodePlugin: Plugin = async ({ project, client, $, directory, wor
   }
 
   return {
+    // ── Hooks — automatic enrichment/compression ─────────────────────────
+    // The agent never explicitly calls knocode — everything happens transparently.
     // Primary hook since v0.6.0
     "chat.message": async (input: any, _output: any) => {
       await enrichMessage(input);

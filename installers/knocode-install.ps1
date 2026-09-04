@@ -13,8 +13,10 @@
   Prerequisites are installed automatically - nothing depends on the user:
     - Git for Windows (per-user, silent) when missing - required by the runtime
       (commit-mode repo watching).
+    - Python 3.11+ (per-user) when missing - required by the runtime.
     - Node.js LTS (per-user zip, no admin) when missing - required only when
       agent integrations are selected.
+    - RTK (prebuilt from GitHub releases) - optional external tool.
 
   Agent integrations (OpenCode / Codex / Copilot / Cursor) are optional and
   selected interactively. They use the integration bundles shipped inside the
@@ -42,7 +44,7 @@
   Skip agent integration wiring entirely (default for non-interactive runs).
 
 .PARAMETER SkipPrereqs
-  Do not auto-install Git/Node.js - only warn when missing.
+  Do not auto-install Git/Python/Node.js - only warn when missing.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File knocode-install.ps1
@@ -111,6 +113,34 @@ function Install-GitIfMissing {
     if (Test-Path (Join-Path $gitCmd "git.exe")) { Add-ToUserPath $gitCmd }
     Write-Ok "Git installed (per-user, $($rel.tag_name))"
   } catch { Write-Warn "Git auto-install failed: $($_.Exception.Message)" }
+}
+
+function Install-PythonIfMissing {
+  Write-Step "Installing Python 3.13 (per-user)..."
+  try {
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+      winget install --id Python.Python.3.13 -e --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+      $pyPaths = @("$env:LOCALAPPDATA\Programs\Python\Python313\python.exe", "$env:LOCALAPPDATA\Programs\Python\Python313\Scripts\python.exe", "C:\Python313\python.exe")
+      foreach ($p in $pyPaths) { if (Test-Path $p) { $env:Path = "$(Split-Path $p -Parent);$(Split-Path $p -Parent)\Scripts;$env:Path"; break } }
+    } else {
+      $pyUrl = "https://www.python.org/ftp/python/3.13.2/python-3.13.2-amd64.exe"
+      $pyInst = "$env:TEMP\python-3.13.2-amd64.exe"
+      Invoke-WebRequest -Uri $pyUrl -OutFile $pyInst -UseBasicParsing
+      & $pyInst /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 2>&1 | Out-Null
+      Start-Sleep -Seconds 5
+      $env:Path = "$env:LOCALAPPDATA\Programs\Python\Python313\Scripts;$env:LOCALAPPDATA\Programs\Python\Python313;$env:Path"
+    }
+    if (Get-Command python -ErrorAction SilentlyContinue) { Write-Ok "python $((python --version 2>&1) -join ' ')" }
+    else { Write-Warn "python install attempted but python not on PATH - install manually: https://www.python.org/downloads/ (check 'Add to PATH')" }
+  } catch { Write-Warn "python auto-install failed: $($_.Exception.Message)" }
+}
+
+function Test-CommandVersion($cmd, $minMajor) {
+  try {
+    $v = & $cmd --version 2>&1 | Select-Object -First 1
+    if ($v -match '(\d+)\.(\d+)') { return ([int]$Matches[1] -ge $minMajor) }
+  } catch {}
+  return $false
 }
 
 function Select-Agents {
@@ -251,8 +281,50 @@ if ($SkipPrereqs) {
   Write-Step "Skipping prerequisite installs (-SkipPrereqs)"
 }
 else {
+  # Git - required by the runtime
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Install-GitIfMissing }
   else { Write-Ok "git $(git --version)" }
+
+  # Python 3.11+ - required by the runtime
+  if (-not (Get-Command python -ErrorAction SilentlyContinue) -and -not (Get-Command python3 -ErrorAction SilentlyContinue)) {
+    Install-PythonIfMissing
+  } elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
+    if (Test-CommandVersion python3 3) { Write-Ok "python3 $((python3 --version 2>&1) -join ' ')" }
+    else { Write-Warn "python3 found but version < 3.11 - installing newer version..."; Install-PythonIfMissing }
+  } else {
+    if (Test-CommandVersion python 3) { Write-Ok "python $((python --version 2>&1) -join ' ')" }
+    else { Write-Warn "python found but version < 3.11 - installing newer version..."; Install-PythonIfMissing }
+  }
+}
+
+# 8b. RTK (optional external tool) - download prebuilt release -> ~/.knocode\bin\rtk.exe
+$rtkBinPath = Join-Path $env:USERPROFILE ".knocode\bin\rtk.exe"
+if (Get-Command rtk -ErrorAction SilentlyContinue) {
+  Write-Ok "rtk $((rtk --version 2>&1 | Select-Object -First 1) -join ' ')"
+} elseif (Test-Path $rtkBinPath) {
+  $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"
+  Write-Ok "rtk binary at $rtkBinPath"
+} else {
+  $rtkAsset = "rtk-x86_64-pc-windows-msvc.zip"
+  $rtkUrl = "https://github.com/rtk-ai/rtk/releases/latest/download/$rtkAsset"
+  $rtkTmp = Join-Path $env:TEMP "rtk_dl"
+  try {
+    New-Item -ItemType Directory -Force -Path (Split-Path $rtkBinPath -Parent) | Out-Null
+    if (Test-Path $rtkTmp) { Remove-Item -LiteralPath $rtkTmp -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Force -Path $rtkTmp | Out-Null
+    $rtkZip = Join-Path $rtkTmp $rtkAsset
+    Write-Step "  downloading rtk release ($rtkAsset)..."
+    Invoke-WebRequest -Uri $rtkUrl -OutFile $rtkZip -UseBasicParsing
+    $rtkExtract = Join-Path $rtkTmp "x"
+    Expand-Archive -LiteralPath $rtkZip -DestinationPath $rtkExtract -Force
+    $srcExe = Get-ChildItem -LiteralPath $rtkExtract -Recurse -Filter "rtk.exe" | Select-Object -First 1
+    if ($srcExe) {
+      Copy-Item -LiteralPath $srcExe.FullName -Destination $rtkBinPath -Force
+      $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"
+      Write-Ok "rtk installed to $rtkBinPath (from GitHub release)"
+    } else { Write-Warn "rtk release archive did not contain rtk.exe" }
+  } catch { Write-Warn "rtk download failed: $($_.Exception.Message) - install manually from https://github.com/rtk-ai/rtk/releases" }
+  finally { if (Test-Path $rtkTmp) { Remove-Item -LiteralPath $rtkTmp -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
 # =============================================================================
@@ -260,111 +332,150 @@ else {
 # =============================================================================
 $agentSel = @(Select-Agents)
 if ($agentSel.Count -eq 0) {
-  Write-Step "Next steps: open a new terminal, then run 'knocode init' inside a project and 'knocode serve'."
+  Write-Step "No agent integrations selected."
   Write-Step "Re-run with -Agents opencode,codex,copilot,cursor (or -AllAgents) to wire agent integrations later."
-  Write-Step "Docs: https://github.com/$Repo#readme"
-  exit 0
 }
-
-Write-Step "Wiring agent integrations: $($agentSel -join ', ')"
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  if ($SkipPrereqs) {
-    Write-Warn "Node.js is required for agent integrations and -SkipPrereqs was set - agents skipped (install Node from https://nodejs.org)"
-    exit 0
+else {
+  Write-Step "Wiring agent integrations: $($agentSel -join ', ')"
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    if ($SkipPrereqs) {
+      Write-Warn "Node.js is required for agent integrations and -SkipPrereqs was set - agents skipped (install Node from https://nodejs.org)"
+      $agentSel = @()
+    } else {
+      Install-NodeIfMissing
+    }
   }
-  Install-NodeIfMissing
-}
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  Write-Warn "Node.js still not available after auto-install - agent integrations skipped"
-  exit 0
-}
-Write-Ok "node $(node --version)"
+  if ($agentSel.Count -gt 0 -and -not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Warn "Node.js still not available after auto-install - agent integrations skipped"
+    $agentSel = @()
+  }
+  if ($agentSel.Count -gt 0) { Write-Ok "node $(node --version)" }
 
-if ($intsDst -eq "" -or -not (Test-Path $intsDst)) {
-  Write-Warn "integration bundles not installed - agent wiring skipped"
-  exit 0
-}
+  if ($agentSel.Count -gt 0 -and ($intsDst -eq "" -or -not (Test-Path $intsDst))) {
+    Write-Warn "integration bundles not installed - agent wiring skipped"
+    $agentSel = @()
+  }
 
-# --- OpenCode: copy bundled plugin into the opencode config node_modules ---
-if ($agentSel -contains "opencode") {
-  try {
-    $pluginSrc = Join-Path $intsDst "opencode-knocode"
-    if (Test-Path (Join-Path $pluginSrc "dist\index.js")) {
-      $ocDir = Join-Path $env:USERPROFILE ".config\opencode"
-      New-Item -ItemType Directory -Force -Path (Join-Path $ocDir "node_modules") | Out-Null
-      Copy-Item -Path $pluginSrc -Destination (Join-Path $ocDir "node_modules\opencode-knocode") -Recurse -Force
-      $ocCfg = Join-Path $ocDir "opencode.jsonc"
-      if (-not (Test-Path $ocCfg) -or -not ((Get-Content -LiteralPath $ocCfg -Raw -ErrorAction SilentlyContinue) -match "opencode-knocode")) {
-        Set-Content -LiteralPath $ocCfg -Value "{`n  `"`$schema`": `"https://opencode.ai/config.json`",`n  `"plugin`": [`"opencode-knocode`"]`n}`n" -Encoding UTF8
+  # --- OpenCode: copy bundled plugin into the opencode config node_modules ---
+  if ($agentSel -contains "opencode") {
+    try {
+      $pluginSrc = Join-Path $intsDst "opencode-knocode"
+      if (Test-Path (Join-Path $pluginSrc "dist\index.js")) {
+        $ocDir = Join-Path $env:USERPROFILE ".config\opencode"
+        New-Item -ItemType Directory -Force -Path (Join-Path $ocDir "node_modules") | Out-Null
+        Copy-Item -Path $pluginSrc -Destination (Join-Path $ocDir "node_modules\opencode-knocode") -Recurse -Force
+        $ocCfg = Join-Path $ocDir "opencode.jsonc"
+        if (-not (Test-Path $ocCfg) -or -not ((Get-Content -LiteralPath $ocCfg -Raw -ErrorAction SilentlyContinue) -match "opencode-knocode")) {
+          Set-Content -LiteralPath $ocCfg -Value "{`n  `"`$schema`": `"https://opencode.ai/config.json`",`n  `"plugin`": [`"opencode-knocode`"]`n}`n" -Encoding UTF8
+        }
+        Write-Ok "opencode plugin installed (bundled opencode-knocode)"
+        Write-Step "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
       }
-      Write-Ok "opencode plugin installed (bundled opencode-knocode)"
-      Write-Step "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
+      else { Write-Warn "bundled opencode-knocode has no dist/index.js" }
     }
-    else { Write-Warn "bundled opencode-knocode has no dist/index.js" }
+    catch { Write-Warn "opencode wiring failed: $($_.Exception.Message)" }
   }
-  catch { Write-Warn "opencode wiring failed: $($_.Exception.Message)" }
+
+  # --- Shared MCP server descriptor for Codex / Copilot / Cursor (bundled knocode-mcp) ---
+  $mcpDist = Join-Path $intsDst "knocode-mcp\dist\index.js"
+  if ($agentSel.Count -gt 0 -and -not (Test-Path $mcpDist)) { Write-Warn "bundled knocode-mcp has no dist/index.js - MCP agents skipped" }
+  $mcpServer = @{ command = "node"; args = @($mcpDist); env = @{ KNOCODE_DAEMON_URL = "http://127.0.0.1:9527" } }
+
+  # --- Codex: ~/.codex/config.toml mcp_servers.knocode ---
+  if ($agentSel -contains "codex" -and (Test-Path $mcpDist)) {
+    try {
+      $codexDir = Join-Path $env:USERPROFILE ".codex"
+      New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+      $codexCfg = Join-Path $codexDir "config.toml"
+      if (-not (Test-Path $codexCfg) -or -not ((Get-Content -LiteralPath $codexCfg -Raw -ErrorAction SilentlyContinue) -match "mcp_servers.knocode")) {
+        Add-Content -LiteralPath $codexCfg -Value "`n[mcp_servers.knocode]`ncommand = `"node`"`nargs = [`"$mcpDist`"]`n" -Encoding UTF8
+        Write-Ok "Codex MCP config at $codexCfg"
+      }
+      else { Write-Ok "Codex MCP already configured at $codexCfg" }
+    }
+    catch { Write-Warn "Codex wiring failed: $($_.Exception.Message)" }
+  }
+
+  # --- Copilot (VS Code): user-level %APPDATA%\Code\User\mcp.json ---
+  if ($agentSel -contains "copilot" -and (Test-Path $mcpDist)) {
+    try {
+      $codeUserDir = Join-Path $env:APPDATA "Code\User"
+      New-Item -ItemType Directory -Force -Path $codeUserDir | Out-Null
+      $vscodeMcp = Join-Path $codeUserDir "mcp.json"
+      if (-not (Test-Path $vscodeMcp)) {
+        Set-Content -LiteralPath $vscodeMcp -Value (@{ servers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10) -Encoding UTF8
+      }
+      else {
+        $j = Get-Content -LiteralPath $vscodeMcp -Raw | ConvertFrom-Json
+        if (-not $j.servers) { $j | Add-Member -NotePropertyName servers -NotePropertyValue @{} }
+        $j.servers.knocode = $mcpServer
+        $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $vscodeMcp -Encoding UTF8
+      }
+      Write-Ok "VS Code Copilot MCP at $vscodeMcp"
+    }
+    catch { Write-Warn "Copilot wiring failed: $($_.Exception.Message)" }
+  }
+
+  # --- Cursor: user-level ~/.cursor/mcp.json ---
+  if ($agentSel -contains "cursor" -and (Test-Path $mcpDist)) {
+    try {
+      $cursorDir = Join-Path $env:USERPROFILE ".cursor"
+      New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null
+      $cursorMcp = Join-Path $cursorDir "mcp.json"
+      if (-not (Test-Path $cursorMcp)) {
+        Set-Content -LiteralPath $cursorMcp -Value (@{ mcpServers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10) -Encoding UTF8
+      }
+      else {
+        $j = Get-Content -LiteralPath $cursorMcp -Raw | ConvertFrom-Json
+        if (-not $j.mcpServers) { $j | Add-Member -NotePropertyName mcpServers -NotePropertyValue @{} }
+        $j.mcpServers.knocode = $mcpServer
+        $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cursorMcp -Encoding UTF8
+      }
+      Write-Ok "Cursor MCP at $cursorMcp"
+    }
+    catch { Write-Warn "Cursor wiring failed: $($_.Exception.Message)" }
+  }
+
+  if ($agentSel.Count -gt 0) { Write-Step "Agent integrations wired: $($agentSel -join ', ')" }
 }
 
-# --- Shared MCP server descriptor for Codex / Copilot / Cursor (bundled knocode-mcp) ---
-$mcpDist = Join-Path $intsDst "knocode-mcp\dist\index.js"
-if (-not (Test-Path $mcpDist)) { Write-Warn "bundled knocode-mcp has no dist/index.js - MCP agents skipped" }
-$mcpServer = @{ command = "node"; args = @($mcpDist); env = @{ KNOCODE_DAEMON_URL = "http://127.0.0.1:9527" } }
-
-# --- Codex: ~/.codex/config.toml mcp_servers.knocode ---
-if ($agentSel -contains "codex" -and (Test-Path $mcpDist)) {
+# =============================================================================
+# 10. Start daemon - knocode must be in RUNNING state after installation
+# =============================================================================
+$binDir = Join-Path $env:USERPROFILE ".knocode\bin"
+$installedDaemon = Join-Path $binDir "knocode-daemon.exe"
+function Test-DaemonHealth {
+  try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9527/health" -UseBasicParsing -TimeoutSec 2; return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) } catch { return $false }
+}
+$daemonUp = Test-DaemonHealth
+if ($daemonUp) {
+  Write-Ok "knocode daemon already running at http://127.0.0.1:9527"
+} elseif (-not (Test-Path $installedDaemon)) {
+  Write-Warn "knocode-daemon.exe not found at $installedDaemon - start manually"
+} else {
+  # Stop stale processes first
+  foreach ($procName in @("knocode-daemon", "knocode")) {
+    Get-Process -Name $procName -ErrorAction SilentlyContinue | ForEach-Object {
+      try { Stop-Process -Id $_.Id -Force -ErrorAction Stop; Write-Step "  stopped stale $procName PID $($_.Id)" } catch { }
+    }
+  }
+  $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
   try {
-    $codexDir = Join-Path $env:USERPROFILE ".codex"
-    New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-    $codexCfg = Join-Path $codexDir "config.toml"
-    if (-not (Test-Path $codexCfg) -or -not ((Get-Content -LiteralPath $codexCfg -Raw -ErrorAction SilentlyContinue) -match "mcp_servers.knocode")) {
-      Add-Content -LiteralPath $codexCfg -Value "`n[mcp_servers.knocode]`ncommand = `"node`"`nargs = [`"$mcpDist`"]`n" -Encoding UTF8
-      Write-Ok "Codex MCP config at $codexCfg"
+    $daemonWorkDir = Join-Path $env:USERPROFILE ".knocode"
+    New-Item -ItemType Directory -Force -Path $daemonWorkDir | Out-Null
+    $daemonProc = Start-Process -FilePath $installedDaemon -WorkingDirectory $daemonWorkDir -WindowStyle Hidden -PassThru -ErrorAction Stop
+    for ($i = 0; $i -lt 40; $i++) {
+      Start-Sleep -Milliseconds 500
+      if ($daemonProc.HasExited) { break }
+      if (Test-DaemonHealth) { $daemonUp = $true; break }
     }
-    else { Write-Ok "Codex MCP already configured at $codexCfg" }
-  }
-  catch { Write-Warn "Codex wiring failed: $($_.Exception.Message)" }
+    if ($daemonUp) { Write-Ok "knocode daemon RUNNING (PID $($daemonProc.Id), http://127.0.0.1:9527)" }
+    elseif ($daemonProc.HasExited) { Write-Warn "daemon exited immediately (exit code $($daemonProc.ExitCode)) - start manually: $installedDaemon" }
+    else { Write-Warn "daemon started but /health not responding within 20s - verify: curl http://127.0.0.1:9527/metrics" }
+  } catch { Write-Warn "failed to start daemon: $($_.Exception.Message) - start manually: $installedDaemon" }
+  $ErrorActionPreference = $prevEA
 }
 
-# --- Copilot (VS Code): user-level %APPDATA%\Code\User\mcp.json ---
-if ($agentSel -contains "copilot" -and (Test-Path $mcpDist)) {
-  try {
-    $codeUserDir = Join-Path $env:APPDATA "Code\User"
-    New-Item -ItemType Directory -Force -Path $codeUserDir | Out-Null
-    $vscodeMcp = Join-Path $codeUserDir "mcp.json"
-    if (-not (Test-Path $vscodeMcp)) {
-      Set-Content -LiteralPath $vscodeMcp -Value (@{ servers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10) -Encoding UTF8
-    }
-    else {
-      $j = Get-Content -LiteralPath $vscodeMcp -Raw | ConvertFrom-Json
-      if (-not $j.servers) { $j | Add-Member -NotePropertyName servers -NotePropertyValue @{} }
-      $j.servers.knocode = $mcpServer
-      $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $vscodeMcp -Encoding UTF8
-    }
-    Write-Ok "VS Code Copilot MCP at $vscodeMcp"
-  }
-  catch { Write-Warn "Copilot wiring failed: $($_.Exception.Message)" }
-}
-
-# --- Cursor: user-level ~/.cursor/mcp.json ---
-if ($agentSel -contains "cursor" -and (Test-Path $mcpDist)) {
-  try {
-    $cursorDir = Join-Path $env:USERPROFILE ".cursor"
-    New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null
-    $cursorMcp = Join-Path $cursorDir "mcp.json"
-    if (-not (Test-Path $cursorMcp)) {
-      Set-Content -LiteralPath $cursorMcp -Value (@{ mcpServers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10) -Encoding UTF8
-    }
-    else {
-      $j = Get-Content -LiteralPath $cursorMcp -Raw | ConvertFrom-Json
-      if (-not $j.mcpServers) { $j | Add-Member -NotePropertyName mcpServers -NotePropertyValue @{} }
-      $j.mcpServers.knocode = $mcpServer
-      $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cursorMcp -Encoding UTF8
-    }
-    Write-Ok "Cursor MCP at $cursorMcp"
-  }
-  catch { Write-Warn "Cursor wiring failed: $($_.Exception.Message)" }
-}
-
-Write-Step "Agent integrations wired: $($agentSel -join ', ')"
-Write-Step "Next steps: open a new terminal, run 'knocode serve' (starts the daemon for the MCP/plugin agents), then 'knocode init' inside a project."
+Write-Step "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' })"
+Write-Step "Next steps: open a new terminal, run 'knocode init' inside a project."
 Write-Step "Docs: https://github.com/$Repo#readme"

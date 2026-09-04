@@ -24,12 +24,12 @@ fi
 
 echo "[knocode] Latest release: $TAG"
 
-# Check for a platform-specific installer in the release assets
-INSTALLER_URL="https://github.com/$REPO/releases/download/$TAG/install.sh"
+# Check for the installer script in the release assets
+INSTALLER_URL="https://github.com/$REPO/releases/download/$TAG/installers/knocode-install.sh"
 HTTP_CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" "$INSTALLER_URL" 2>/dev/null || echo "404")
 
 if [ "$HTTP_CODE" = "200" ]; then
-  echo "[knocode] Downloading install.sh from $TAG..."
+  echo "[knocode] Downloading installer from $TAG..."
   curl -fsSL "$INSTALLER_URL" | bash
 else
   echo "[knocode] No Linux/macOS installer found in release $TAG."

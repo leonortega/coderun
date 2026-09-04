@@ -216,10 +216,10 @@ EOF
       else warn "npm not found - skipping global opencode plugin install (install Node.js 18+)"; fi
     else warn "packages/opencode-knocode not found - skipping npm plugin install"; fi
     # Knocode agent skill (opencode - agent-native discovery; per-agent: opencode is the only supported agent for now)
-    OC_SKILL_SRC="$ROOT/.opencode/skills/knocode"
+    OC_SKILL_SRC="$ROOT/.knocode/skills/knocode"
     if [ -f "$OC_SKILL_SRC/SKILL.md" ]; then
       mkdir -p "$OC_GLOBAL/skills" && cp -rf "$OC_SKILL_SRC" "$OC_GLOBAL/skills/" 2>/dev/null && ok "knocode skill installed to $OC_GLOBAL/skills/knocode (opencode agent-native)" || warn "knocode skill copy failed (source: $OC_SKILL_SRC)"
-    else warn ".opencode/skills/knocode not found - skipping agent skill install"; fi
+    else warn ".knocode/skills/knocode not found - skipping agent skill install"; fi
     info "Restart opencode to load global plugin 'opencode-knocode' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode)."
   fi
 
