@@ -1,32 +1,32 @@
 {
-    "version": "0.9.7",
-    "description": "Knocode — AI Runtime for coding agents. Local daemon that enriches agent requests with repository context.",
-    "homepage": "https://github.com/leonortega/knocode",
-    "license": "MIT",
-    "depends": "git",
-    "notes": "Run 'knocode init' in a project and 'knocode serve' to start the daemon.",
-    "architecture": {
-        "64bit": {
-            "url": "https://github.com/leonortega/knocode/releases/download/v0.9.6/knocode-0.9.6-x86_64-pc-windows-msvc.zip",
-            "hash": "91e5aa309856f233a21bdbb4b17e22b680e7ea41c459e21b79999c1783494cd0"
-        }
-    },
-    "bin": [
-        "knocode.exe",
-        "knocode-daemon.exe"
-    ],
-    "checkver": {
-        "github": "https://github.com/leonortega/knocode"
-    },
-    "autoupdate": {
-        "architecture": {
-            "64bit": {
-                "url": "https://github.com/leonortega/knocode/releases/download/v$version/knocode-$version-x86_64-pc-windows-msvc.zip",
-                "hash": {
-                    "url": "https://github.com/leonortega/knocode/releases/download/v$version/knocode-$version-x86_64-pc-windows-msvc.zip.sha256",
-                    "regex": "([a-f0-9]{64})"
-                }
-            }
-        }
+  "version": "0.9.9",
+  "description": "Knocode — AI Runtime for coding agents. Local daemon that enriches agent requests with repository context.",
+  "homepage": "https://github.com/leonortega/knocode",
+  "license": "MIT",
+  "depends": "git",
+  "notes": "Run 'knocode init' in a project and 'knocode serve' to start the daemon.",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/leonortega/knocode/releases/download/v0.9.9/knocode-0.9.9-x86_64-pc-windows-msvc.zip",
+      "hash": "4ce7350256755082ef10f5617b0a88009654dc85cd7e5dc5c76809cbd0a0a597"
     }
+  },
+  "bin": [
+    "knocode.exe",
+    "knocode-daemon.exe"
+  ],
+  "checkver": {
+    "github": "https://github.com/leonortega/knocode"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/leonortega/knocode/releases/download/v$version/knocode-$version-x86_64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "https://github.com/leonortega/knocode/releases/download/v$version/knocode-$version-x86_64-pc-windows-msvc.zip.sha256",
+          "regex": "([a-f0-9]{64})"
+        }
+      }
+    }
+  }
 }
