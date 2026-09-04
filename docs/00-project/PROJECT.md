@@ -70,7 +70,7 @@ The runtime orders context as docs → code (most to least cache-stable). An exp
 
 ### Use Case 3: Agent-Chosen Model
 
-The runtime is model-agnostic: the agent / provider / user selects the model for each task. Model routing and LiteLLM were removed (v0.8.6 — see `docs/01-architecture/LLM_ROUTING_REMOVAL.md`) because the runtime could not prove it picks better than the agent, provider, or user.
+The runtime is model-agnostic: the agent / provider / user selects the model for each task. Model routing and LiteLLM were removed (v0.8.6 — see REMOVED_TOOLS.md) because the runtime could not prove it picks better than the agent, provider, or user.
 
 ### Use Case 4: Tool-Output Compression
 
@@ -78,7 +78,7 @@ The coding agent reads a large log file or search result. The runtime intercepts
 
 ### Use Case 5: Knowledge Accumulation
 
-Over multiple interactions, the runtime builds persistent knowledge about the repository via local SQLite+tantivy: coding conventions, architectural patterns, frequently modified files, and domain terminology (engram removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md`). This knowledge improves future context packages.
+Over multiple interactions, the runtime builds persistent knowledge about the repository via local SQLite+tantivy: coding conventions, architectural patterns, frequently modified files, and domain terminology (engram removed — see REMOVED_TOOLS.md). This knowledge improves future context packages.
 
 ## Primary Value Proposition
 
@@ -111,8 +111,8 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 |------------|-------------|
 | Agent interception | Pre-generation and pre-tool-call hooks for Tier 1 agents |
 | Repository indexing | Incremental AST parsing with tree-sitter, structural search with ast-grep, text search with ripgrep |
-| Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md`, reranker is passthrough) |
-| Memory | Persistent memory via SQLite+tantivy local (engram removed — see ENGRAM_CBM_REMOVAL.md) |
+| Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed — see REMOVED_TOOLS.md, reranker is passthrough) |
+| Memory | Persistent memory via SQLite+tantivy local (engram removed — see REMOVED_TOOLS.md) |
 | Context construction | Token-budgeted YAML context pack with cache-aware ordering |
 | Tool-output optimization | RTK-based compression for tool outputs |
 | Event bus | Async observability events (ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved) |
@@ -123,7 +123,7 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 | Limitation | Description | Future Resolution |
 |------------|-------------|-------------------|
 | Single repository | Runtime handles one repository per daemon process | Multi-repo in v2 |
-| No conversation memory | Runtime does not persist conversation history across sessions | Session memory deferred (engram removed — see ENGRAM_CBM_REMOVAL.md) |
+| No conversation memory | Runtime does not persist conversation history across sessions | Session memory deferred (engram removed — see REMOVED_TOOLS.md) |
 | No multi-agent coordination | Runtime serves one agent instance at a time | Concurrent agent support in v2 |
 | No web UI | CLI-only interface | Dashboard in v2 |
 | No distributed deployment | Single local daemon process | Distributed runtime in v2 |

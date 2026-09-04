@@ -158,7 +158,19 @@ fn run_bench(repo_root: &std::path::Path) -> BenchResults {
     let db_path = home_dir().join(".knocode").join("data.db");
     let db = Database::open(&db_path).expect("Failed to open database");
     let event_bus = EventBus::new();
-    let repo_intel = RepositoryIntelligence::new(repo_root.to_path_buf(), db, event_bus.clone());
+    let mut repo_intel = RepositoryIntelligence::new(repo_root.to_path_buf(), db, event_bus.clone());
+
+    // Build index — without this, every query returns empty results.
+    match repo_intel.index_repository() {
+        Ok(stats) => {
+            eprintln!("Index built: {} files indexed, {} symbols extracted, {}ms",
+                stats.files_indexed, stats.symbols_extracted, stats.duration_ms);
+        }
+        Err(e) => {
+            eprintln!("WARNING: index build failed: {} — queries may return empty results", e);
+        }
+    }
+
     let policy = RetrievalPolicy { candidate_k: 200, max_files: 50, ..Default::default() };
     let retriever = CombinedRetriever::default();
     let total_start = Instant::now();

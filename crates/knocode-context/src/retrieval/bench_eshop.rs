@@ -1,6 +1,6 @@
-//! DefinitelyTyped Benchmark — 50 hard queries on 53k-file TypeScript type definitions repo.
+//! eShopOnWeb Benchmark — 50 hard queries on 225-file ASP.NET/C# e-commerce app.
 //!
-//! Run with: `cargo test -p knocode-context -- --ignored bench_dt_50 --nocapture`
+//! Run with: `cargo test --release -p knocode-context -- --ignored bench_eshop_50 --nocapture`
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -28,74 +28,76 @@ struct BenchQuery {
     category: &'static str,
 }
 
-/// 50 hard queries designed for DefinitelyTyped — a 53k-file TypeScript type definitions repo.
-/// Queries test: exact type lookup, cross-package relationships, API surface understanding,
-/// generic type patterns, and ambiguous/intent-heavy queries.
+/// 50 hard queries designed for eShopOnWeb — a 225-file ASP.NET/C# e-commerce app.
+/// Tests: cross-layer understanding (Domain ↔ Infrastructure ↔ Web), C# idioms,
+/// DDD patterns, authentication, basket/checkout flow, catalog browsing, Blazor admin.
 fn bench_queries() -> Vec<BenchQuery> {
     vec![
-        // ── Procedural (10) — "how to" type patterns ──
-        BenchQuery { text: "how to type a React functional component with children", grep_pattern: "PropsWithChildren|ReactNode.*children|FC.*children", category: "procedural" },
-        BenchQuery { text: "how to type an Express middleware that modifies the request", grep_pattern: "Request.*Props|augment.*Request|declare.*namespace.*Express", category: "procedural" },
-        BenchQuery { text: "how to create a type-safe event emitter", grep_pattern: "EventEmitter|TypedEvent|EventMap|on\\(.*string", category: "procedural" },
-        BenchQuery { text: "how to type a reducer with discriminated union actions", grep_pattern: "Reducer|Action.*type|discriminated|Action.*payload", category: "procedural" },
-        BenchQuery { text: "how to type a database query builder", grep_pattern: "QueryBuilder|Chainable|\\.where\\(|\\.select\\(", category: "procedural" },
-        BenchQuery { text: "how to type a configuration object with optional nested fields", grep_pattern: "DeepPartial|RecursivePartial|Options.*\\{|Config.*\\{", category: "procedural" },
-        BenchQuery { text: "how to type a plugin system with registration", grep_pattern: "Plugin|register|use\\(|middleware.*use", category: "procedural" },
-        BenchQuery { text: "how to type a Redux store with middleware", grep_pattern: "Store|Middleware|Dispatch|Enhancer", category: "procedural" },
-        BenchQuery { text: "how to type a GraphQL resolver with context", grep_pattern: "Resolver|Context.*type|IResolver|ResolveFn", category: "procedural" },
-        BenchQuery { text: "how to type a WebSocket message protocol", grep_pattern: "WebSocket.*Message|WS.*Data|Socket.*Send|Message.*type", category: "procedural" },
-        // ── Debugging (10) — "why" and "what went wrong" ──
-        BenchQuery { text: "why does the React hooks type inference fail with generic components", grep_pattern: "useHooks|Hook.*Generic|Generic.*Component.*hook", category: "debugging" },
-        BenchQuery { text: "what is the correct type for a Node.js ReadableStream in browser vs server", grep_pattern: "ReadableStream|Readable.*Web|NodeJS.*Readable|stream\\.Readable", category: "debugging" },
-        BenchQuery { text: "why is the Mongoose document type not matching the schema", grep_pattern: "Document.*Schema|Model.*Document|InferSchemaType|SchemaType", category: "debugging" },
-        BenchQuery { text: "what type should I use for a function that returns Promise or value", grep_pattern: "PromiseOrValue|Awaitable|MaybePromise|T \\| Promise", category: "debugging" },
-        BenchQuery { text: "why does TypeScript complain about this conditional type", grep_pattern: "Conditional.*Type|infer |extends.*\\?|分布式条件", category: "debugging" },
-        BenchQuery { text: "what is the correct type for a React ref callback", grep_pattern: "RefCallback|RefObject|React\\.ref|forwardRef", category: "debugging" },
-        BenchQuery { text: "why is the Express response type missing json method", grep_pattern: "Response.*json|res\\.json|Json.*method|send.*json", category: "debugging" },
-        BenchQuery { text: "what type should I use for a JWT that may be expired", grep_pattern: "JWT|jwt.*expir|token.*verify|JwtPayload", category: "debugging" },
-        BenchQuery { text: "why does the generic constraint prevent this assignment", grep_pattern: "extends.*Error|constraint.*fail|generic.*assign|not assignable", category: "debugging" },
-        BenchQuery { text: "what is the correct type for a callback that receives an error or result", grep_pattern: "Callback.*Error|ErrorFirst|node.*callback|Err.*Result", category: "debugging" },
-        // ── Structural/Find (10) — locate specific type patterns ──
-        BenchQuery { text: "find all type definitions that extend Error", grep_pattern: "extends Error|class.*Error.*{|Error.*class", category: "structural" },
-        BenchQuery { text: "find all interface definitions with index signatures", grep_pattern: "\\[key.*string\\]|\\[key.*number\\]|\\[index.*\\]|Record<", category: "structural" },
-        BenchQuery { text: "find all type definitions using template literal types", grep_pattern: "Template.*Literal|`\\$\\{|\\`.*\\$\\{", category: "structural" },
-        BenchQuery { text: "find all generic type definitions with multiple type parameters", grep_pattern: "<[A-Z],\\s*[A-Z]>|<T,\\s*U>|<K,\\s*V>", category: "structural" },
-        BenchQuery { text: "find all React component type definitions with defaultProps", grep_pattern: "defaultProps|DefaultProps|static.*default", category: "structural" },
-        BenchQuery { text: "find all Express route handler type definitions", grep_pattern: "RouteHandler|RequestHandler|Handler.*Request|router\\.", category: "structural" },
-        BenchQuery { text: "find all database model type definitions", grep_pattern: "interface.*Model|type.*Model|Model<|Schema.*type", category: "structural" },
-        BenchQuery { text: "find all configuration type definitions with nested objects", grep_pattern: "interface.*Config|Config.*\\{|Options.*\\{|Settings.*\\{", category: "structural" },
-        BenchQuery { text: "find all enum definitions with string values", grep_pattern: "enum.*=.*\"|enum.*string|const enum", category: "structural" },
-        BenchQuery { text: "find all utility type definitions (Partial, Pick, Omit)", grep_pattern: "type.*Partial|type.*Pick|type.*Omit|type.*Record", category: "structural" },
-        // ── Informational (10) — "what is" and "how does" ──
-        BenchQuery { text: "what is the type definition for the React useState hook", grep_pattern: "useState|UseState|StateHook|SetState", category: "informational" },
-        BenchQuery { text: "how is the Express application type structured", grep_pattern: "Express.*Application|Application.*type|express\\.Application", category: "informational" },
-        BenchQuery { text: "what types does the Node.js fs module expose", grep_pattern: "fs\\.|Filesystem|ReadFile|WriteFile|StatResult", category: "informational" },
-        BenchQuery { text: "how is the Axios response type structured", grep_pattern: "AxiosResponse|Response.*data|AxiosError|AxiosInstance", category: "informational" },
-        BenchQuery { text: "what types does Socket.IO expose for events", grep_pattern: "Socket.*Event|Server.*Event|io\\(|Socket\\.IO", category: "informational" },
-        BenchQuery { text: "how is the Next.js page component typed", grep_pattern: "NextPage|GetServerSideProps|PageProps|NextComponent", category: "informational" },
-        BenchQuery { text: "what types does the Jest test framework provide", grep_pattern: "jest|Describe|It.*fn|Expect.* matcher|Mock.*fn", category: "informational" },
-        BenchQuery { text: "how is the MongoDB collection type structured", grep_pattern: "Collection.*type|MongoDB.*Collection|Db.*collection|Aggregate", category: "informational" },
-        BenchQuery { text: "what types does the webpack configuration use", grep_pattern: "webpack.*Config|Module.*Rule|Plugin.*type|Loader", category: "informational" },
-        BenchQuery { text: "how is the Electron IPC type system structured", grep_pattern: "ipcRenderer|ipcMain|Electron.*Event|IpcRenderer", category: "informational" },
-        // ── Mixed/Ambiguous (10) — hard queries requiring semantic understanding ──
-        BenchQuery { text: "where is the type definition for a cancelable promise", grep_pattern: "Cancelable|Abort.*Promise|Cancel.*token|AbortController", category: "mixed" },
-        BenchQuery { text: "what type should I use for a deeply nested object path", grep_pattern: "DeepPath|PathValue|Get\\.|NestedKey|PropertyPath", category: "mixed" },
-        BenchQuery { text: "find the type definition for a retry mechanism with backoff", grep_pattern: "retry|backoff|exponential|RetryOptions", category: "mixed" },
-        BenchQuery { text: "what is the type for a React context provider with default value", grep_pattern: "createContext|Provider.*value|Context.*default|useContext", category: "mixed" },
-        BenchQuery { text: "how to type a function that accepts either a string or object", grep_pattern: "string \\| object|StringOr|string.*\\|.*\\{|Overload", category: "mixed" },
-        BenchQuery { text: "find the type for a rate limiter configuration", grep_pattern: "rate.*limit|throttle|RateLimit|tokens.*bucket", category: "mixed" },
-        BenchQuery { text: "what type should I use for a lazy-loaded component", grep_pattern: "Lazy|Suspense|lazy\\(|React\\.lazy", category: "mixed" },
-        BenchQuery { text: "find the type definition for a dependency injection container", grep_pattern: "Container|inject|Inject|IoC|Dependency.*inject", category: "mixed" },
-        BenchQuery { text: "what is the type for a serialized/deserialized object", grep_pattern: "Serializable|Serialize|Deserialize|JSON.*type|FromJSON", category: "mixed" },
-        BenchQuery { text: "find the type for a connection pool with health checks", grep_pattern: "Pool|health.*check|Connection.*pool|Pool.*options", category: "mixed" },
+        // ── Procedural (10) — "how to" patterns for C#/.NET ──
+        BenchQuery { text: "how to add a new catalog item", grep_pattern: "CatalogItem|AddCatalogItem|CreateCatalogItem", category: "procedural" },
+        BenchQuery { text: "how to add a new API endpoint", grep_pattern: "MapGet|MapPost|MapPut|MapDelete|EndpointRouteBuilder", category: "procedural" },
+        BenchQuery { text: "how to add a new database migration", grep_pattern: "Migration|Up\\(|Down\\(|MigrationBuilder", category: "procedural" },
+        BenchQuery { text: "how to add a new Blazor admin page", grep_pattern: "@page|@inject|ComponentBase|Blazor", category: "procedural" },
+        BenchQuery { text: "how to configure dependency injection", grep_pattern: "AddScoped|AddSingleton|AddTransient|services\\.Add", category: "procedural" },
+        BenchQuery { text: "how to add a new specification", grep_pattern: "Specification|ISpecification|And\\(|Or\\(|Take\\(", category: "procedural" },
+        BenchQuery { text: "how to add a new exception type", grep_pattern: "Exception|: Exception|throw new", category: "procedural" },
+        BenchQuery { text: "how to add health check endpoint", grep_pattern: "HealthCheck|MapHealthChecks|IHealthCheck|AddHealthChecks", category: "procedural" },
+        BenchQuery { text: "how to add a new order status", grep_pattern: "OrderStatus|status.*Order|enum.*Status", category: "procedural" },
+        BenchQuery { text: "how to add a new payment method", grep_pattern: "PaymentMethod|Payment|Checkout|Buyer", category: "procedural" },
+
+        // ── Debugging (10) — "why" patterns ──
+        BenchQuery { text: "why does the basket merge fail on login", grep_pattern: "MergeBasket|BasketMerge|anonymous.*basket|logged.*in", category: "debugging" },
+        BenchQuery { text: "why is the catalog item price not updating", grep_pattern: "Price|CatalogItem.*price|UpdatePrice|SetPrice", category: "debugging" },
+        BenchQuery { text: "why does the order fail to save", grep_pattern: "SaveChanges|Order.*save|CreateOrder|IOrderService", category: "debugging" },
+        BenchQuery { text: "why is the identity token not being issued", grep_pattern: "Token|JWT|SignInManager|IdentityToken|TokenClaimsService", category: "debugging" },
+        BenchQuery { text: "why does the Blazor admin page not load", grep_pattern: "OnInitialized|OnParametersSet|ComponentBase|blazor.*error", category: "debugging" },
+        BenchQuery { text: "why is the catalog search returning wrong results", grep_pattern: "SearchCatalog|FilterItems|CatalogFilter|specification", category: "debugging" },
+        BenchQuery { text: "why does the checkout process timeout", grep_pattern: "Checkout|OrderService|CreateOrderAsync|timeout", category: "debugging" },
+        BenchQuery { text: "why is the image URL not resolving", grep_pattern: "UriComposer|ImageUrl|ImagePlaceholder|catalog.*image", category: "debugging" },
+        BenchQuery { text: "why does the admin authentication redirect loop", grep_pattern: "Authorize|AllowAnonymous|SignIn|Redirect|Identity.*auth", category: "debugging" },
+        BenchQuery { text: "why is the EF Core query generating N+1", grep_pattern: "Include|ThenInclude|AsNoTracking|Eager|Lazy.*load", category: "debugging" },
+
+        // ── Structural (10) — find patterns ──
+        BenchQuery { text: "find all domain entities", grep_pattern: "class.*: BaseEntity|IAggregateRoot|Entity|Aggregate", category: "structural" },
+        BenchQuery { text: "find all repository interfaces", grep_pattern: "interface.*Repository|IRepository|IReadRepository", category: "structural" },
+        BenchQuery { text: "find all service implementations", grep_pattern: "class.*Service|: I.*Service|ServiceBase", category: "structural" },
+        BenchQuery { text: "find all controller actions", grep_pattern: "HttpGet|HttpPost|HttpPut|HttpDelete|ApiController", category: "structural" },
+        BenchQuery { text: "find all Blazor components", grep_pattern: "@page|@component|ComponentBase|inherits.*Component", category: "structural" },
+        BenchQuery { text: "find all specifications", grep_pattern: "class.*Specification|: Specification|ISpecification", category: "structural" },
+        BenchQuery { text: "find all exception types", grep_pattern: "class.*Exception|: Exception|ExceptionBase", category: "structural" },
+        BenchQuery { text: "find all database configurations", grep_pattern: "EntityTypeConfiguration|OnModelCreating|modelBuilder|HasData", category: "structural" },
+        BenchQuery { text: "find all authorization policies", grep_pattern: "Authorize|Policy|AuthorizationConstants|Claims|Roles", category: "structural" },
+        BenchQuery { text: "find all dependency injection registrations", grep_pattern: "AddScoped|AddSingleton|AddTransient|services\\.Add|builder\\.Services", category: "structural" },
+
+        // ── Informational (10) — "what is" patterns ──
+        BenchQuery { text: "what is the overall architecture", grep_pattern: "Clean Architecture|Onion|DDD|Aggregate|Entity|ValueObject", category: "informational" },
+        BenchQuery { text: "what is the basket checkout flow", grep_pattern: "Basket|Checkout|Order|Transfer.*basket|MergeBasket", category: "informational" },
+        BenchQuery { text: "what is the catalog browsing system", grep_pattern: "CatalogItem|CatalogBrand|CatalogType|ListItems|Filter", category: "informational" },
+        BenchQuery { text: "what is the authentication mechanism", grep_pattern: "Identity|SignIn|Token|Cookie|Authorize|AllowAnonymous", category: "informational" },
+        BenchQuery { text: "what is the order management system", grep_pattern: "Order|OrderItem|OrderService|IOrderService|OrderStatus", category: "informational" },
+        BenchQuery { text: "what is the admin panel structure", grep_pattern: "BlazorAdmin|Pages.*Admin|CatalogItemPage|Admin.*Service", category: "informational" },
+        BenchQuery { text: "what is the API endpoint structure", grep_pattern: "PublicApi|Endpoint|MapGet|MapPost|MinimalApi", category: "informational" },
+        BenchQuery { text: "what is the caching strategy", grep_pattern: "Cache|IMemoryCache|DistributedCache|OutputCache|ResponseCache", category: "informational" },
+        BenchQuery { text: "what is the logging approach", grep_pattern: "ILogger|LogInformation|LogWarning|LogError|Serilog", category: "informational" },
+        BenchQuery { text: "what is the deployment configuration", grep_pattern: "docker|Dockerfile|docker-compose|appsettings|launchSettings", category: "informational" },
+
+        // ── Mixed (10) — complex intent ──
+        BenchQuery { text: "how does the basket-to-order conversion work end to end", grep_pattern: "Basket.*Order|TransferToOrder|CreateOrder|OrderService", category: "mixed" },
+        BenchQuery { text: "find where the price is calculated and displayed", grep_pattern: "Price|CalculatePrice|GetPrice|UnitPrice|atalogItem.*Price", category: "mixed" },
+        BenchQuery { text: "how is the catalog filtered by brand and type", grep_pattern: "CatalogFilter|FilterByBrand|FilterByType|BrandId|TypeId", category: "mixed" },
+        BenchQuery { text: "what happens when a user logs in with items in anonymous basket", grep_pattern: "MergeBasket|anonymous|LoggedIn|TransferBasket|Cookie", category: "mixed" },
+        BenchQuery { text: "how does the admin edit a catalog item", grep_pattern: "EditItem|UpdateItem|CatalogItem.*Edit|SaveChanges|AdminService", category: "mixed" },
+        BenchQuery { text: "find the complete checkout pipeline from basket to order", grep_pattern: "Checkout|PlaceOrder|CreateOrder|OrderService|BasketService", category: "mixed" },
+        BenchQuery { text: "how is the catalog image URL composed", grep_pattern: "UriComposer|ImageUrl|ComposeUri|catalog.*image|ImagePlaceholder", category: "mixed" },
+        BenchQuery { text: "what authorization is required for admin operations", grep_pattern: "Authorize|Policy|Admin|Roles|Claims|AuthorizeAttribute", category: "mixed" },
+        BenchQuery { text: "how does the specification pattern filter catalog items", grep_pattern: "Specification|And\\(|Or\\(|Take\\(|FilterSpecification", category: "mixed" },
+        BenchQuery { text: "trace the data flow from HTTP request to database query", grep_pattern: "DbContext|OnModelCreating|DbSet|SaveChanges|Repository", category: "mixed" },
     ]
 }
 
-// ── Grep Runner ──────────────────────────────────────────────────────────────
-
 fn run_grep(pattern: &str, repo_root: &std::path::Path) -> Vec<String> {
     let output = Command::new("grep")
-        .args(["-rEn", "--include=*.d.ts", "--include=*.ts", "--include=*.tsx", pattern])
+        .args(["-rEn", "--include=*.cs", "--include=*.razor", "--include=*.json", "--include=*.cshtml", pattern])
         .current_dir(repo_root)
         .output()
         .expect("Failed to run grep");
@@ -111,8 +113,6 @@ fn run_grep(pattern: &str, repo_root: &std::path::Path) -> Vec<String> {
     sorted.sort();
     sorted
 }
-
-// ── Metrics ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
 struct QueryResult {
@@ -147,8 +147,6 @@ impl BenchResults {
         o.sort_by(|a, b| a.0.cmp(&b.0)); o
     }
 }
-
-// ── Runner ───────────────────────────────────────────────────────────────────
 
 fn run_bench(repo_root: &std::path::Path) -> BenchResults {
     let queries = bench_queries();
@@ -211,19 +209,19 @@ fn run_bench(repo_root: &std::path::Path) -> BenchResults {
 
 #[test]
 #[ignore]
-fn bench_dt_50() {
-    let dt_root = PathBuf::from("C:/tmp/DefinitelyTyped-master");
-    if !dt_root.exists() {
-        eprintln!("DefinitelyTyped not found at {:?} — skipping", dt_root);
+fn bench_eshop_50() {
+    let eshop_root = PathBuf::from("C:/tmp/eShopOnWeb");
+    if !eshop_root.exists() {
+        eprintln!("eShopOnWeb not found at {:?} — skipping", eshop_root);
         return;
     }
 
-    eprintln!("Running benchmark on DefinitelyTyped (53k files)...");
-    let r = run_bench(&dt_root);
+    eprintln!("Running benchmark on eShopOnWeb (225 C# files)...");
+    let r = run_bench(&eshop_root);
 
     println!();
     println!("═══════════════════════════════════════════════════════════════════════════════");
-    println!("  DefinitelyTyped Benchmark — 50 Hard Queries (53k .d.ts files)");
+    println!("  eShopOnWeb Benchmark — 50 Hard Queries (225 C# files)");
     println!("═══════════════════════════════════════════════════════════════════════════════");
     println!();
 
@@ -242,8 +240,7 @@ fn bench_dt_50() {
             }
             m
         };
-        // Flag slow queries
-        let slow = if q.retrieval_ms > 1000 { " ⚠" } else { "" };
+        let slow = if q.retrieval_ms > 100 { " ⚠" } else { "" };
         println!("│ {:2} │ {} │ {:6} │ {:4} │ {:4} │ {:4} │ {:4} │ {:4} │ {:.3} {}│",
             i + 1, qtext, q.category, q.retrieval_ms, q.grep_ms, q.overlap, q.retrieval_only, q.grep_only, mrr, slow);
     }
@@ -256,7 +253,7 @@ fn bench_dt_50() {
     let tot_grp: usize = r.results.iter().map(|q| q.grep_only).sum();
 
     println!("┌──────────────────────────────────────────────────────────────────────────┐");
-    println!("│  Aggregate Metrics — DefinitelyTyped (53k files)                         │");
+    println!("│  Aggregate Metrics — eShopOnWeb (225 C# files)                           │");
     println!("├─────────────────────────────┬────────────────────────────────────────────┤");
     println!("│  Total queries              │  {:<40}│", r.results.len());
     println!("│  Total wall time            │  {:<36} ms│", r.total_duration_ms);
@@ -315,7 +312,7 @@ fn bench_dt_50() {
     }
 
     // High-novelty (retrieval finds what grep misses)
-    let mut by_novel: Vec<&QueryResult> = r.results.iter().filter(|q| q.retrieval_only > 10).collect();
+    let mut by_novel: Vec<&QueryResult> = r.results.iter().filter(|q| q.retrieval_only > 3).collect();
     by_novel.sort_by(|a, b| b.retrieval_only.cmp(&a.retrieval_only));
     if !by_novel.is_empty() {
         println!("🧠 Retrieval finds what grep misses (top 5 by novelty):");
@@ -325,6 +322,17 @@ fn bench_dt_50() {
                 .filter(|bn| !q.grep_files.iter().any(|gf| gf.ends_with(bn)))
                 .take(3).collect();
             println!("   novelty={}  grep=0  \"{}\"  → {:?}", q.retrieval_only, q.query, sample);
+        }
+        println!();
+    }
+
+    // High-grep-only (retrieval misses what grep finds)
+    let mut by_grep_only: Vec<&QueryResult> = r.results.iter().filter(|q| q.grep_only > 3 && q.overlap == 0).collect();
+    by_grep_only.sort_by(|a, b| b.grep_only.cmp(&a.grep_only));
+    if !by_grep_only.is_empty() {
+        println!("🔍 Grep finds what retrieval misses (zero-overlap queries):");
+        for q in by_grep_only.iter().take(5) {
+            println!("   grep_only={}  \"{}\"", q.grep_only, q.query);
         }
         println!();
     }

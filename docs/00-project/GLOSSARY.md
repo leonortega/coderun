@@ -98,7 +98,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Knowledge Hub
 
-**Definition:** One organizational surface for project docs, ADRs, templates, and long-term memory. BM25/tantivy lexical search over stored knowledge (FlashRank and engram removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md` and `ENGRAM_CBM_REMOVAL.md`).
+**Definition:** One organizational surface for project docs, ADRs, templates, and long-term memory. BM25/tantivy lexical search over stored knowledge (FlashRank and engram removed — see REMOVED_TOOLS.md and REMOVED_TOOLS.md).
 
 **Scope:** Owns: storage and retrieval of all knowledge types.
 
@@ -120,7 +120,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Model Router / Tier / Gateway
 
-**Definition:** [REMOVED v0.8.6] Heuristic tier routing and the LiteLLM gateway were deleted — the runtime is model-agnostic and the agent / provider / user chooses the model (see `docs/01-architecture/LLM_ROUTING_REMOVAL.md`).
+**Definition:** [REMOVED v0.8.6] Heuristic tier routing and the LiteLLM gateway were deleted — the runtime is model-agnostic and the agent / provider / user chooses the model (see REMOVED_TOOLS.md).
 
 ### Execution Optimizer
 
@@ -148,13 +148,13 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Memory
 
-**Definition:** Long-term storage of information across sessions. Historically via engram (single Go binary, SQLite+FTS5, MCP-native); removed — now SQLite+tantivy local (see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md`). No LLM/embedding dependency for its core save/search path.
+**Definition:** Long-term storage of information across sessions. Historically via engram (single Go binary, SQLite+FTS5, MCP-native); removed — now SQLite+tantivy local (see REMOVED_TOOLS.md). No LLM/embedding dependency for its core save/search path.
 
 **Scope:** Used by the Knowledge Hub for cross-session knowledge persistence.
 
 ### engram
 
-**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies. **Removed** from Knocode v1 — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (replaced by SQLite+tantivy local).
+**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies. **Removed** from Knocode v1 — see REMOVED_TOOLS.md (replaced by SQLite+tantivy local).
 
 **Scope:** Used for persistent memory in the Knowledge Hub.
 
@@ -208,7 +208,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### IModelGateway
 
-**Definition:** [REMOVED v0.8.6] The model gateway interface and its LiteLLM implementation were deleted with the Model Router — the runtime is model-agnostic (see `docs/01-architecture/LLM_ROUTING_REMOVAL.md`).
+**Definition:** [REMOVED v0.8.6] The model gateway interface and its LiteLLM implementation were deleted with the Model Router — the runtime is model-agnostic (see REMOVED_TOOLS.md).
 
 ### IWorkflowEngine
 

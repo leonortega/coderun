@@ -1,7 +1,7 @@
 # Data Flow
 
 > **V1 framing:** see [V1_RUNTIME_SPEC.md](V1_RUNTIME_SPEC.md). Model Router /
-> LiteLLM were deleted in v0.8.6 (see `LLM_ROUTING_REMOVAL.md`) — Flow 7 (Model Routing) is removed.
+> LiteLLM were deleted in v0.8.6 (see REMOVED_TOOLS.md) — Flow 7 (Model Routing) is removed.
 > Flow 5 (Skill Selection) is removed with the Skill Engine (see `REMOVED_TOOLS.md`).
 > Where this file conflicts with the V1 spec or the code, the V1 spec / code win.
 
@@ -296,13 +296,13 @@ Context Pack Structure (YAML):
 
 ## Flow 7: Model Routing — [REMOVED v0.8.6]
 
-Model routing / LiteLLM were deleted from the v1 runtime (see `LLM_ROUTING_REMOVAL.md`).
+Model routing / LiteLLM were deleted from the v1 runtime (see REMOVED_TOOLS.md).
 The runtime is model-agnostic — the agent / provider / user chooses the model
 (V1_RUNTIME_SPEC.md §2.3). Flow 2 (BuildContext) ends at `ContextPack`.
 
 ---
 
-## Flow 8: Memory Operations (SQLite+tantivy local — engram removed, see ENGRAM_CBM_REMOVAL.md)
+## Flow 8: Memory Operations (SQLite+tantivy local — engram removed, see REMOVED_TOOLS.md)
 
 ### Read (In Hot Path)
 

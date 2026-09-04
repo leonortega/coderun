@@ -198,7 +198,7 @@ impl BenchResults {
 fn run_bench() -> BenchResults {
     let queries = bench_queries();
     let mut results = Vec::with_capacity(queries.len());
-    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_root = PathBuf::from("C:/LeonRepository/knocode");
 
     let db_path = home_dir().join(".knocode").join("data.db");
     let db = Database::open(&db_path).expect("Failed to open database");

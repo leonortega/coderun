@@ -6,15 +6,14 @@
 
 .DESCRIPTION
   Default (no flags): stops daemon, removes project build artifacts (target/release/knocode*.exe),
-  opencode plugins (project-local + global), ALL first-class external tools
-  (ast-grep, rtk, promptfoo, eslint),
-  and ALL user/project data (%USERPROFILE%\.knocode, .knocode/, sockets). Idempotent - safe to re-run.
+  opencode plugins (project-local + global), RTK, and ALL user/project data
+  (%USERPROFILE%\.knocode, .knocode/, sockets). Idempotent - safe to re-run.
 
   This is strict mode: no fallbacks. Default uninstalls everything. Use -KeepExternal / -KeepData
   to preserve tools or data. -KeepBuild preserves target/.
 
 .PARAMETER KeepExternal
-  Keep first-class external tools (do not uninstall ast-grep, rtk, npm/pip packages).
+  Keep first-class external tools (do not uninstall rtk).
 
 .PARAMETER KeepData
   Keep user and project data (do not delete %USERPROFILE%\.knocode or .knocode/).
@@ -321,22 +320,6 @@ if (-not $doRemoveExternal) {
 } else {
   Info "Removing external tools (strict default)..."
 
-  # ast-grep: npm @ast-grep/cli (current) or legacy cargo install
-  if (Test-Cmd npm) {
-    $hasAgCli = $false
-    try { npm list -g "@ast-grep/cli" 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasAgCli = $true } } catch {}
-    if ($hasAgCli) {
-      if ($PSCmdlet.ShouldProcess("@ast-grep/cli (npm -g)", "npm uninstall -g")) {
-        try { npm uninstall -g "@ast-grep/cli" 2>&1 | Out-Null; Ok "uninstalled @ast-grep/cli (npm -g)" } catch { Warn "npm uninstall @ast-grep/cli failed: $_" }
-      } else { Skip "would npm uninstall -g @ast-grep/cli" }
-    } else { Skip "@ast-grep/cli not installed (npm -g)" }
-  }
-  if (Test-Cmd sg -or (Test-Cmd ast-grep)) {
-    if ($PSCmdlet.ShouldProcess("ast-grep (legacy cargo)", "cargo uninstall ast-grep")) {
-      try { cargo uninstall ast-grep 2>&1 | Out-Null; Ok "uninstalled ast-grep (legacy cargo)" } catch { Warn "ast-grep cargo uninstall failed: $_" }
-    } else { Skip "would cargo uninstall ast-grep" }
-  } else { Skip "no legacy cargo ast-grep" }
-
   # rtk: ~/.knocode/bin prebuilt (current) + legacy ~/bin + legacy cargo install
   foreach ($rtkPath in @("$env:USERPROFILE\.knocode\bin\rtk.exe", "$env:USERPROFILE\bin\rtk.exe")) {
     if (Test-Path $rtkPath) {
@@ -351,17 +334,7 @@ if (-not $doRemoveExternal) {
     } else { Skip "would cargo uninstall rtk" }
   } else { Skip "no legacy cargo rtk on PATH" }
 
-  if (Test-Cmd npm) {
-    foreach ($pkg in @("promptfoo","eslint")) {
-      $hasPkg = $false
-      try { npm list -g $pkg 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $hasPkg = $true } } catch {}
-      if ($hasPkg) {
-        if ($PSCmdlet.ShouldProcess("$pkg (npm -g)", "npm uninstall -g")) {
-          try { npm uninstall -g $pkg 2>&1 | Out-Null; Ok "uninstalled $pkg (npm -g)" } catch { Warn "npm uninstall $pkg failed: $_" }
-        } else { Skip "would npm uninstall -g $pkg" }
-      } else { Skip "$pkg not installed (npm -g)" }
-    }
-  }
+
 
   # 3c. Opencode npm plugin -- installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
   Info "Removing opencode npm plugin (opencode-knocode)..."

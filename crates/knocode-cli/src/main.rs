@@ -851,7 +851,6 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         let kh = knocode_knowledge::KnowledgeHub::new(
             knocode_storage::Database::open(&db_path).map_err(|e| e.to_string())?,
             event_bus.clone(),
-            knocode_knowledge::KnowledgeConfig::default(),
         );
         if std::env::var("KNOCODE_PROFILE").is_ok() { eprintln!("[profile] cli.kh_new: {}ms", _t1.elapsed().as_millis()); }
         let core_config = knocode_core::Config::load(&project_root)
@@ -1048,7 +1047,7 @@ fn cmd_doctor() -> Result<(), String> {
     match Config::load(&project_root) {
         Ok(config) => {
             match config.validate() {
-                Ok(()) => println!("✓ OK (daemon.socket_path writable, token budget valid)"),
+                Ok(()) => println!("✓ OK (token budget valid)"),
                 Err(e) => {
                     println!("✗ INVALID: {}", e);
                     all_ok = false;
@@ -1110,20 +1109,6 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
-    // Check socket path writable (new v0.3.0)
-    print!("Socket path:     ");
-    let cfg = Config::load(&project_root).unwrap_or_default();
-    let sock = PathBuf::from(&cfg.daemon.socket_path);
-    if let Some(parent) = sock.parent() {
-        if parent.exists() || parent == PathBuf::from("/tmp") || parent.as_os_str() == std::ffi::OsStr::new(".") {
-            println!("✓ OK ({})", sock.display());
-        } else {
-            println!("⚠ Parent dir missing: {}", parent.display());
-        }
-    } else {
-        println!("⚠ No parent dir for {}", sock.display());
-    }
-    
     // Check tree-sitter — split global vs repo detected (V1: docs don't need parser)
     print!("Tree-sitter:     ");
     {

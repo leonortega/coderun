@@ -1,6 +1,6 @@
 # Indexing Performance Plan — [5/8] Full-text BM25 + Symbol Extraction + Dependency Graph
 
-> Scope: `knocode init` Step [5/8] for 63k-file repos. `codebase-memory-mcp` and `engram` removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md` (historically excluded). Focus is `RepositoryIntelligence::index_repository()` + `build_dependency_graph()` hot path in `crates/knocode-repo-intel/src/lib.rs:164`.
+> Scope: `knocode init` Step [5/8] for 63k-file repos. `codebase-memory-mcp` and `engram` removed — see REMOVED_TOOLS.md (historically excluded). Focus is `RepositoryIntelligence::index_repository()` + `build_dependency_graph()` hot path in `crates/knocode-repo-intel/src/lib.rs:164`.
 
 ## 1. Background
 
@@ -26,7 +26,7 @@ At ~300 files/sec, 63k files = ~210s. User reports timeout on this step. Daemon 
 | Second full walk for graph | `cli/main.rs:310` -> `lib.rs:768` `walk_directory` + `graph.rs:22` `extract_imports` | doubles I/O |
 | Progress log every 100 `info!` | `lib.rs:301` | log pressure |
 
-`codebase-memory-mcp` probe and `engram` init removed (see `ENGRAM_CBM_REMOVAL.md`) — historically excluded, now retired.
+`codebase-memory-mcp` probe and `engram` init removed (see REMOVED_TOOLS.md) — historically excluded, now retired.
 
 ## 3. Goals / Non-Goals
 
@@ -36,8 +36,8 @@ At ~300 files/sec, 63k files = ~210s. User reports timeout on this step. Daemon 
 - No schema change; WAL `storage/src/lib.rs:36` preserved.
 
 **Non-Goals:**
-- `codebase-memory-mcp` / `MCP graph` — removed (see `ENGRAM_CBM_REMOVAL.md`).
-- `engram` memory / `EngramClient` — removed (see `ENGRAM_CBM_REMOVAL.md`).
+- `codebase-memory-mcp` / `MCP graph` — removed (see REMOVED_TOOLS.md).
+- `engram` memory / `EngramClient` — removed (see REMOVED_TOOLS.md).
 - Changing retrieval ranking; only indexing write path.
 
 ## 4. Plan — Phases (fail-open, small diffs)
@@ -73,7 +73,7 @@ At ~300 files/sec, 63k files = ~210s. User reports timeout on this step. Daemon 
 - `crates/knocode-cli/src/main.rs:300,1059` (defer graph, progress)
 - `crates/knocode-core/src/config.rs:340` (optional `KNOCODE_INDEX_THREADS` env, not required)
 
-No MCP/engram changes — both removed (see `ENGRAM_CBM_REMOVAL.md`).
+No MCP/engram changes — both removed (see REMOVED_TOOLS.md).
 
 ## 6. Risks & Mitigations
 
@@ -93,4 +93,4 @@ No MCP/engram changes — both removed (see `ENGRAM_CBM_REMOVAL.md`).
 1 PR per phase, behind no feature flag (behavior identical). Phase 1 can ship immediately; Phase 3 behind `KNOCODE_INDEX_THREADS=4` default, `1` to revert.
 
 ---
-*Created for 63k-file stress timeout. codebase-memory-mcp and engram removed — see `ENGRAM_CBM_REMOVAL.md`.*
+*Created for 63k-file stress timeout. codebase-memory-mcp and engram removed — see REMOVED_TOOLS.md.*

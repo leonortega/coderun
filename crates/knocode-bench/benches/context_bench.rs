@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use knocode_context::{ContextEngine, ContextConfig};
-use knocode_knowledge::{KnowledgeHub, KnowledgeConfig};
+use knocode_knowledge::KnowledgeHub;
 use knocode_repo_intel::RepositoryIntelligence;
 use knocode_events::EventBus;
 use knocode_storage::Database;
@@ -12,7 +12,7 @@ fn bench_build_context(c: &mut Criterion) {
     let db = Database::open(&PathBuf::from(":memory:")).unwrap();
     let event_bus = EventBus::new();
     let repo_intel = RepositoryIntelligence::new(PathBuf::from("."), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-    let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+    let kh = KnowledgeHub::new(db, event_bus.clone());
     let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
     let task = knocode_core::TaskRequest { message: "implement auth middleware with rate limiting".to_string(), session_id: "bench".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
     let rt = tokio::runtime::Runtime::new().unwrap();

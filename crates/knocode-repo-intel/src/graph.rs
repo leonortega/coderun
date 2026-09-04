@@ -35,10 +35,12 @@ impl DependencyGraph {
     /// Build graph from file list — local AST+regex
     pub fn build_from_files(repo_root: &Path, files: &[PathBuf]) -> Self {
         let mut graph = Self::new();
+        let file_index = FileIndex::new(repo_root, files);
         for file in files {
-            let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().to_string();
+            let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().replace('\\', "/");
             if let Ok(content) = std::fs::read_to_string(file) {
-                let deps = extract_imports(&content);
+                let language = tree_sitter_language_pack::detect_language_from_path(&rel);
+                let deps = extract_imports(&content, language, &file_index);
                 for dep in deps {
                     graph.add_edge(rel.clone(), dep);
                 }
@@ -280,18 +282,57 @@ fn find_function_definition(definitions: &HashMap<String, Vec<(String, usize, us
     None
 }
 
-/// Extract imports via simple regex (local AST+regex primary)
-/// FIX #4: Removed unused _current_file and _repo_root params.
-fn extract_imports(content: &str) -> Vec<String> {
+/// Extract imports from source code using tree-sitter-language-pack.
+/// Returns resolved file paths relative to the repo root.
+/// Falls back to regex extraction when tree-sitter is unavailable.
+fn extract_imports(content: &str, language: Option<&str>, file_index: &FileIndex) -> Vec<String> {
+    let lang = language.unwrap_or("");
+
+    // Try tree-sitter extraction (grammar may not be downloaded — handle gracefully)
+    if !lang.is_empty() {
+        let mut config = tree_sitter_language_pack::ProcessConfig::new(lang).minimal();
+        config.imports = true;
+        if let Ok(result) = tree_sitter_language_pack::process(content, &config) {
+            let mut deps = Vec::new();
+            for import in &result.imports {
+                if let Some(resolved) = file_index.resolve_import(&import.source, lang) {
+                    deps.push(resolved);
+                }
+            }
+            // Also extract `mod` declarations (Rust-specific, not always in imports)
+            if lang == "rust" {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("mod ") {
+                        let name = rest.split(|c: char| c == ';' || c == '{' || c.is_whitespace()).next().unwrap_or("").trim();
+                        if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                            if let Some(path) = file_index.resolve_rust_mod(name) {
+                                deps.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+            // Only use tree-sitter result if it found imports; otherwise grammar may be incomplete
+            if !deps.is_empty() {
+                deps.sort();
+                deps.dedup();
+                return deps;
+            }
+        }
+        // Tree-sitter failed or returned empty — fall through to regex
+    }
+
+    // Fallback: regex-based extraction (no tree-sitter available)
+    extract_imports_regex(content)
+}
+
+/// Regex-based fallback for when tree-sitter is unavailable.
+fn extract_imports_regex(content: &str) -> Vec<String> {
     let mut deps = Vec::new();
-    // Rust: use crate::foo::bar, mod foo  (TASK-011: handle mod b; → b.rs)
-    // JS/TS: import ... from "path", require("path")
-    // Python: import foo, from foo import bar
-    // Simpler line scan (regex retained for future ast-grep upgrade)
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("use ") || trimmed.starts_with("mod ") {
-            // handle `mod b;` → b.rs (currently only `use` was handled)
             if let Some(rest) = trimmed.strip_prefix("mod ") {
                 let name = rest.split(|c: char| c == ';' || c == '{' || c.is_whitespace()).next().unwrap_or("").trim();
                 if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -302,7 +343,6 @@ fn extract_imports(content: &str) -> Vec<String> {
             if let Some(rest) = trimmed.strip_prefix("use ") {
                 let clean = rest.split(';').next().unwrap_or("").trim().split(" as ").next().unwrap_or("").trim().to_string();
                 let parts: Vec<&str> = clean.split("::").collect();
-                // Pick first meaningful segment not crate/self/super/std/core
                 let mut dep_part = "";
                 for p in &parts {
                     if !["crate", "self", "super", "std", "core"].contains(p) && !p.is_empty() {
@@ -313,16 +353,13 @@ fn extract_imports(content: &str) -> Vec<String> {
                 if dep_part.is_empty() { dep_part = parts.first().copied().unwrap_or(""); }
                 if !dep_part.is_empty() && !["std","core"].contains(&dep_part) {
                     deps.push(format!("{}.rs", dep_part));
-                    // Also push full path as fallback for test matching graph
                     let full = parts.join("/");
                     if full.contains('/') && !deps.contains(&format!("{}.rs", full)) {
-                        // add alternative
                         deps.push(full);
                     }
                 }
             }
         } else if trimmed.starts_with("import ") || trimmed.contains(" from ") {
-            // extract quoted path
             if let Some(start) = trimmed.find('"').or_else(|| trimmed.find('\'')) {
                 let quote = trimmed.chars().nth(trimmed.find('"').unwrap_or(trimmed.find('\'').unwrap_or(0))).unwrap_or('"');
                 let rest = &trimmed[start+1..];
@@ -335,10 +372,134 @@ fn extract_imports(content: &str) -> Vec<String> {
             }
         }
     }
-    // Deduplicate
     deps.sort();
     deps.dedup();
     deps
+}
+
+/// Index of all files in the repository, used for import path resolution.
+struct FileIndex {
+    /// Set of relative file paths (normalized with `/` separators)
+    paths: HashSet<String>,
+}
+
+impl FileIndex {
+    fn new(repo_root: &Path, files: &[PathBuf]) -> Self {
+        let mut paths = HashSet::new();
+        for file in files {
+            let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().replace('\\', "/");
+            paths.insert(rel);
+        }
+        Self { paths }
+    }
+
+    /// Resolve a Rust `mod name` declaration to a file path.
+    /// Checks `name.rs` and `name/mod.rs` (Rust module conventions).
+    fn resolve_rust_mod(&self, name: &str) -> Option<String> {
+        let direct = format!("{}.rs", name);
+        if self.paths.contains(&direct) {
+            return Some(direct);
+        }
+        let nested = format!("{}/mod.rs", name);
+        if self.paths.contains(&nested) {
+            return Some(nested);
+        }
+        None
+    }
+
+    /// Resolve an import source path to a repository file path.
+    /// Handles Rust `use`, JS/TS `import from`, Python `from ... import`.
+    fn resolve_import(&self, source: &str, language: &str) -> Option<String> {
+        match language {
+            "rust" => self.resolve_rust_import(source),
+            "javascript" | "typescript" | "tsx" | "jsx" => self.resolve_js_import(source),
+            "python" => self.resolve_python_import(source),
+            _ => None,
+        }
+    }
+
+    /// Resolve Rust `use crate::foo::bar` or `use foo::bar`.
+    /// Strategy: try `foo/bar.rs`, `foo/bar/mod.rs`, then just `foo.rs`.
+    fn resolve_rust_import(&self, source: &str) -> Option<String> {
+        // Skip std, core, external crate prefixes
+        let first = source.split("::").next().unwrap_or("");
+        if ["std", "core", "alloc"].contains(&first) {
+            return None;
+        }
+        // Strip crate/self/super prefix
+        let path_part = source
+            .trim_start_matches("crate::")
+            .trim_start_matches("self::")
+            .trim_start_matches("super::");
+        if path_part.is_empty() { return None; }
+
+        let segments: Vec<&str> = path_part.split("::").collect();
+
+        // Try progressively shorter paths: a::b::c → a/b/c.rs, a/b.rs, a.rs
+        for i in (1..=segments.len()).rev() {
+            let candidate = segments[..i].join("/");
+            // Try as file
+            let as_file = format!("{}.rs", candidate);
+            if self.paths.contains(&as_file) {
+                return Some(as_file);
+            }
+            // Try as mod
+            let as_mod = format!("{}/mod.rs", candidate);
+            if self.paths.contains(&as_mod) {
+                return Some(as_mod);
+            }
+        }
+        None
+    }
+
+    /// Resolve JS/TS `import ... from './foo'` or `require('./foo')`.
+    fn resolve_js_import(&self, source: &str) -> Option<String> {
+        // Skip bare specifiers (npm packages — no `.` or `/` prefix)
+        if !source.starts_with('.') && !source.starts_with('/') {
+            return None;
+        }
+        // Strip leading `./` or `../` for matching against repo paths
+        let base = source.trim_start_matches("./").trim_start_matches("../");
+        // Try exact match
+        if self.paths.contains(base) {
+            return Some(base.to_string());
+        }
+        // Try with extensions
+        for ext in &[".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"] {
+            let candidate = format!("{}{}", base, ext);
+            if self.paths.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
+        // Try as index file
+        for name in &["index.ts", "index.tsx", "index.js", "index.jsx"] {
+            let candidate = format!("{}/{}", base, name);
+            if self.paths.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Resolve Python `from foo import bar` or `import foo`.
+    fn resolve_python_import(&self, source: &str) -> Option<String> {
+        let parts: Vec<&str> = source.split('.').collect();
+        // Try progressively: foo/bar/__init__.py, foo/bar.py, foo/__init__.py, foo.py
+        for i in (1..=parts.len()).rev() {
+            let candidate = parts[..i].join("/");
+            // Try as package __init__.py
+            let as_init = format!("{}/__init__.py", candidate);
+            if self.paths.contains(&as_init) {
+                return Some(as_init);
+            }
+            // Try as module
+            let as_module = format!("{}.py", candidate);
+            if self.paths.contains(&as_module) {
+                return Some(as_module);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -346,10 +507,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_imports_rust() {
+    fn test_extract_imports_rust_regex_fallback() {
         let content = "use crate::graph::DependencyGraph;\nuse std::collections::HashMap;\nmod foo;";
-        let deps = extract_imports(content);
+        let index = FileIndex::new(Path::new("."), &[]);
+        let deps = extract_imports(content, None, &index);
+        // Regex fallback: extracts "graph.rs" from `use crate::graph::DependencyGraph`
         assert!(deps.iter().any(|d| d.contains("graph")));
+    }
+
+    #[test]
+    fn test_extract_imports_rust_tree_sitter() {
+        let dir = std::env::temp_dir().join(format!("knocode_graph_ts_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("graph.rs"), "pub struct DependencyGraph;").unwrap();
+        std::fs::write(dir.join("main.rs"), "use crate::graph::DependencyGraph;\nfn main() {}").unwrap();
+        let files = vec![dir.join("graph.rs"), dir.join("main.rs")];
+        let index = FileIndex::new(&dir, &files);
+        let content = std::fs::read_to_string(dir.join("main.rs")).unwrap();
+        let deps = extract_imports(&content, Some("rust"), &index);
+        assert!(deps.contains(&"graph.rs".to_string()), "expected graph.rs in deps, got {:?}", deps);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_rust_mod() {
+        let files: Vec<PathBuf> = vec!["a.rs".into(), "b/mod.rs".into()];
+        let index = FileIndex::new(Path::new("."), &files);
+        assert_eq!(index.resolve_rust_mod("a"), Some("a.rs".to_string()));
+        assert_eq!(index.resolve_rust_mod("b"), Some("b/mod.rs".to_string()));
+        assert_eq!(index.resolve_rust_mod("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_resolve_rust_import() {
+        let files: Vec<PathBuf> = vec!["graph.rs".into(), "foo/bar.rs".into(), "foo/bar/mod.rs".into()];
+        let index = FileIndex::new(Path::new("."), &files);
+        assert_eq!(index.resolve_rust_import("crate::graph"), Some("graph.rs".to_string()));
+        assert_eq!(index.resolve_rust_import("crate::foo::bar"), Some("foo/bar.rs".to_string()));
+        assert_eq!(index.resolve_rust_import("std::collections::HashMap"), None);
+    }
+
+    #[test]
+    fn test_resolve_js_import() {
+        let files: Vec<PathBuf> = vec!["utils.ts".into(), "components/Button.tsx".into(), "lib/index.ts".into()];
+        let index = FileIndex::new(Path::new("."), &files);
+        assert_eq!(index.resolve_js_import("./utils"), Some("utils.ts".to_string()));
+        assert_eq!(index.resolve_js_import("./components/Button"), Some("components/Button.tsx".to_string()));
+        assert_eq!(index.resolve_js_import("./lib"), Some("lib/index.ts".to_string()));
+        assert_eq!(index.resolve_js_import("react"), None); // bare specifier
+    }
+
+    #[test]
+    fn test_resolve_python_import() {
+        let files: Vec<PathBuf> = vec!["utils.py".into(), "pkg/__init__.py".into(), "pkg/module.py".into()];
+        let index = FileIndex::new(Path::new("."), &files);
+        assert_eq!(index.resolve_python_import("utils"), Some("utils.py".to_string()));
+        assert_eq!(index.resolve_python_import("pkg"), Some("pkg/__init__.py".to_string()));
+        assert_eq!(index.resolve_python_import("pkg.module"), Some("pkg/module.py".to_string()));
     }
 
     #[test]
@@ -360,7 +574,6 @@ mod tests {
         assert_eq!(g.edge_count(), 2);
         assert_eq!(g.dependencies_of("a.rs"), vec!["b.rs"]);
         let impact = g.impact_analysis("c.rs");
-        // c's dependents are b -> a
         assert!(impact.contains(&"b.rs".to_string()));
         assert!(impact.contains(&"a.rs".to_string()));
     }
@@ -381,7 +594,8 @@ mod tests {
     #[test]
     fn test_extract_imports_js_from_quoted() {
         let content = r#"import foo from "bar/baz"; const x = require('qux');"#;
-        let deps = extract_imports(content);
+        let index = FileIndex::new(Path::new("."), &[]);
+        let deps = extract_imports(content, None, &index);
         assert!(deps.iter().any(|d| d.contains("bar/baz")));
     }
 }

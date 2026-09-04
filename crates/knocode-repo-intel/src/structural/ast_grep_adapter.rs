@@ -323,9 +323,18 @@ impl AstGrepBackend for TsLangAdapter {
         let root = self.ast_grep(source);
         let sg_root = root.root();
 
-        // Execute pattern — catch panics from ambiguous patterns (MultipleNode)
+        // Compile pattern with try_new() to avoid panic on MultipleNode.
+        // Pattern::new() calls unwrap() which panics; try_new() returns Result.
+        let compiled = match Pattern::try_new(pattern, self.clone()) {
+            Ok(p) => p,
+            Err(_) => {
+                return Err(AstSearchError::AmbiguousPattern(pattern.to_string()));
+            }
+        };
+
+        // Execute pattern — catch panics from any remaining edge cases
         let matches_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sg_root.find_all(pattern).collect::<Vec<_>>()
+            sg_root.find_all(compiled).collect::<Vec<_>>()
         }));
 
         let matches = match matches_result {

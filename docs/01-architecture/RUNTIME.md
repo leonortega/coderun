@@ -23,7 +23,7 @@ Start (knocode serve)
   │
   ├── Load configuration
   ├── Initialize logging + metrics
-  ├── Open/create SQLite database (metadata only — see V1_MINIMAL_STACK_PLAN.md:3)
+  ├── Open/create SQLite database (metadata only — see REMOVED_TOOLS.md)
   ├── Open/create Tantivy index (sole retrieval; no MkDocs ingestion)
   ├── Build ContextEngine (single index path: reindex_repository)
   │
@@ -180,7 +180,7 @@ path = "~/.knocode/index/"           # Tantivy index directory
 languages = ["rust", "typescript", "javascript", "python"]  # 111 languages supported via arborium; add any from arborium's language list
 
 [knowledge]
-max_knowledge_entries = 10000         # Max knowledge entries (engram removed — see ENGRAM_CBM_REMOVAL.md)         # Max knowledge entries
+max_knowledge_entries = 10000         # Max knowledge entries (engram removed — see REMOVED_TOOLS.md)         # Max knowledge entries
 
 [context]
 max_tokens = 12000                    # Max tokens per Context Pack
@@ -218,7 +218,7 @@ retention_days = 7                    # Log retention
 | `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
 | `KNOCODE_LOG_LEVEL` | logging.level | info |
 | `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `KNOCODE_ENGRAM_ENDPOINT` | *removed* — engram retired (see ENGRAM_CBM_REMOVAL.md) | — |
+| `KNOCODE_ENGRAM_ENDPOINT` | *removed* — engram retired (see REMOVED_TOOLS.md) | — |
 | `KNOCODE_MODEL_DEFAULT` | *removed v0.8.6* — model router deleted | — |
 | `KNOCODE_LITELLM_URL` | *removed v0.8.6* — LiteLLM deleted | — |
 
@@ -485,7 +485,7 @@ CREATE INDEX idx_symbols_name ON symbols(name);
 CREATE INDEX idx_token_usage_correlation ON token_usage(correlation_id);
 ```
 
-### Memory Schema (SQLite+tantivy local — engram removed, see ENGRAM_CBM_REMOVAL.md)
+### Memory Schema (SQLite+tantivy local — engram removed, see REMOVED_TOOLS.md)
 
 SQLite manages memory. The runtime stores:
 

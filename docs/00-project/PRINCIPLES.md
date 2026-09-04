@@ -55,7 +55,7 @@ Define the engineering principles that govern every implementation decision. Whe
 
 **Implications:**
 - SQLite is the primary database, not a remote database
-- SQLite+tantivy runs in-process (engram removed — see `docs/01-architecture/ENGRAM_CBM_REMOVAL.md`)
+- SQLite+tantivy runs in-process (engram removed — see REMOVED_TOOLS.md)
 - BM25/tantivy runs in-process
 - FlashRank runs in-process via `ort` (Rust ONNX Runtime bindings) — removed, offline only
 - tree-sitter, ast-grep, ripgrep are embedded as native Rust crates, not shelled out
@@ -71,8 +71,8 @@ Define the engineering principles that govern every implementation decision. Whe
 - ast-grep for structural code search — embedded as native Rust crate
 - ripgrep for text search — embedded as native Rust crate
 - BM25/tantivy for full-text indexing and search
-- FlashRank for reranking — via `ort` (ONNX Runtime) — removed (see `ENGRAM_CBM_REMOVAL.md` / `FLASHRANK_REMOVAL.md`)
-- engram for memory — SQLite+FTS5, MCP-native — removed (see `ENGRAM_CBM_REMOVAL.md`; SQLite+tantivy local)
+- FlashRank for reranking — via `ort` (ONNX Runtime) — removed (see REMOVED_TOOLS.md / REMOVED_TOOLS.md)
+- engram for memory — SQLite+FTS5, MCP-native — removed (see REMOVED_TOOLS.md; SQLite+tantivy local)
 - RTK for tool-output compression — adopted directly
 - tiktoken-rs for local token counting — never via model API round-trip
 
@@ -153,8 +153,8 @@ Define the engineering principles that govern every implementation decision. Whe
 
 **Implications:**
 - Knowledge Hub has one API surface for storage and retrieval
-- Doc/code retrieval uses BM25 lexical search (FlashRank removed — see `docs/01-architecture/FLASHRANK_REMOVAL.md`, reranker is passthrough)
-- Memory uses SQLite+tantivy local (engram removed — see `ENGRAM_CBM_REMOVAL.md`)
+- Doc/code retrieval uses BM25 lexical search (FlashRank removed — see REMOVED_TOOLS.md, reranker is passthrough)
+- Memory uses SQLite+tantivy local (engram removed — see REMOVED_TOOLS.md)
 - Knowledge subsystems are composed, not unified into one algorithm
 
 ### 14. Report Savings Honestly

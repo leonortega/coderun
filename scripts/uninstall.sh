@@ -190,18 +190,10 @@ fi
 if ! $DO_REMOVE_EXTERNAL; then info "Skipping external tools (--keep-external)";
 else
   info "Removing external tools (strict default)..."
-  # ast-grep: npm @ast-grep/cli (current) or legacy cargo install
-  if command -v npm >/dev/null 2>&1 && npm list -g @ast-grep/cli >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g @ast-grep/cli"; else npm uninstall -g @ast-grep/cli 2>/dev/null && ok "uninstalled @ast-grep/cli (npm -g)" || warn "@ast-grep/cli uninstall failed"; fi; else skip "@ast-grep/cli not installed (npm -g)"; fi
-  if command -v sg >/dev/null 2>&1 || command -v ast-grep >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall ast-grep (legacy)"; else cargo uninstall ast-grep 2>/dev/null && ok "uninstalled ast-grep (legacy cargo)" || warn "ast-grep cargo uninstall failed"; fi; else skip "legacy cargo ast-grep not installed"; fi
   # rtk: unified ~/.knocode/bin + legacy ~/bin + cargo install
   for _pp in "$HOME/.knocode/bin/rtk" "$HOME/bin/rtk"; do if [ -f "$_pp" ]; then if $DRY_RUN; then skip "would rm $_pp"; else rm -f "$_pp" && ok "removed $_pp"; fi; fi; done
   if [ ! -f "$HOME/.knocode/bin/rtk" ] && [ ! -f "$HOME/bin/rtk" ]; then skip "~/bin/rtk and ~/.knocode/bin/rtk not found"; fi
   if command -v rtk >/dev/null 2>&1; then if $DRY_RUN; then skip "would cargo uninstall rtk (legacy)"; else cargo uninstall rtk 2>/dev/null && ok "uninstalled rtk (legacy cargo)" || warn "rtk cargo uninstall failed"; fi; else skip "legacy cargo rtk not installed"; fi
-  if command -v npm >/dev/null 2>&1; then
-    for pkg in promptfoo eslint; do
-      if npm list -g "$pkg" >/dev/null 2>&1; then if $DRY_RUN; then skip "would npm uninstall -g $pkg"; else npm uninstall -g "$pkg" 2>/dev/null && ok "uninstalled $pkg (npm -g)"; fi; else skip "$pkg not installed"; fi
-    done
-  fi
   if command -v rustup >/dev/null 2>&1; then
     if $DRY_RUN; then skip "would rustup component remove clippy"; else rustup component remove clippy 2>/dev/null && ok "removed rustup component clippy" || warn "clippy remove failed"; fi
     skip "keeping rustup toolchain (never uninstall rustup)"

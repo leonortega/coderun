@@ -405,7 +405,7 @@ mod tests {
     use std::sync::Arc;
     use knocode_context::{ContextConfig, ContextEngine};
     use knocode_events::EventBus;
-    use knocode_knowledge::{KnowledgeConfig, KnowledgeHub};
+    use knocode_knowledge::KnowledgeHub;
     use knocode_optimizer::ExecutionOptimizer;
     use knocode_repo_intel::RepositoryIntelligence;
     use knocode_storage::Database;
@@ -424,7 +424,6 @@ mod tests {
             KnowledgeHub::new(
                 Database::open(&PathBuf::from(":memory:")).unwrap(),
                 EventBus::new(),
-                KnowledgeConfig::default(),
             ),
             EventBus::new(),
             ContextConfig::default(),

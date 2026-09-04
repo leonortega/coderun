@@ -10,9 +10,7 @@ use crate::retrieval::policy::RetrievalPolicy;
 use crate::retrieval::query::RetrievalQuery;
 use crate::retrieval::{CombinedRetriever, Retriever};
 use knocode_repo_intel::RepositoryIntelligence;
-#[allow(unused_imports)]
 use knocode_events::EventBus;
-#[allow(unused_imports)]
 use knocode_storage::Database;
 
 fn home_dir() -> PathBuf {

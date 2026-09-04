@@ -21,11 +21,7 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct DaemonConfig {
-    pub socket_path: String,
-    pub max_concurrent: usize,
-    pub request_timeout_ms: u64,
-}
+pub struct DaemonConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -125,13 +121,7 @@ pub struct LoggingConfig {
 // Default is derived since all fields implement Default
 
 impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            socket_path: "/tmp/knocode.sock".to_string(),
-            max_concurrent: 10,
-            request_timeout_ms: 30000,
-        }
-    }
+    fn default() -> Self { Self {} }
 }
 
 impl Default for DatabaseConfig {
@@ -272,9 +262,6 @@ impl Config {
 
     /// Apply environment variable overrides (KNOCODE_*)
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(val) = std::env::var("KNOCODE_DAEMON_SOCKET") {
-            self.daemon.socket_path = val;
-        }
         if let Ok(val) = std::env::var("KNOCODE_DATABASE_PATH") {
             self.database.path = val;
         }
@@ -307,21 +294,7 @@ impl Config {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
-        // Daemon
-        if self.daemon.max_concurrent == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "daemon.max_concurrent".to_string(),
-                message: "must be greater than 0".to_string(),
-            }
-            .into());
-        }
-        if self.daemon.request_timeout_ms == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "daemon.request_timeout_ms".to_string(),
-                message: "must be greater than 0".to_string(),
-            }
-            .into());
-        }
+
 
         // Database
         if self.database.max_connections == 0 {
@@ -426,11 +399,6 @@ mod tests {
     #[test]
     fn test_config_from_str() {
         let toml = r#"
-[daemon]
-socket_path = "/custom/sock"
-max_concurrent = 5
-request_timeout_ms = 10000
-
 [database]
 path = "/tmp/test.db"
 max_connections = 2
@@ -460,8 +428,6 @@ max_size_mb = 50
 retention_days = 3
 "#;
         let config = Config::from_toml(toml).unwrap();
-        assert_eq!(config.daemon.socket_path, "/custom/sock");
-        assert_eq!(config.daemon.max_concurrent, 5);
         assert_eq!(config.database.path, "/tmp/test.db");
         assert_eq!(config.context.max_tokens, 8000);
         assert!(config.validate().is_ok());
@@ -471,20 +437,10 @@ retention_days = 3
     fn test_config_merge() {
         let mut base = Config::default();
         let mut override_config = Config::default();
-        override_config.daemon.socket_path = "/new/sock".to_string();
         override_config.context.max_tokens = 5000;
 
         base.merge(override_config);
-        assert_eq!(base.daemon.socket_path, "/new/sock");
         assert_eq!(base.context.max_tokens, 5000);
-    }
-
-    #[test]
-    fn test_validation_fails_zero_concurrent() {
-        let mut config = Config::default();
-        config.daemon.max_concurrent = 0;
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("daemon.max_concurrent"));
     }
 
     #[test]
@@ -508,7 +464,6 @@ retention_days = 3
         let config = Config::default();
         let toml = config.to_toml().unwrap();
         let loaded = Config::from_toml(&toml).unwrap();
-        assert_eq!(config.daemon.socket_path, loaded.daemon.socket_path);
         assert_eq!(config.context.max_tokens, loaded.context.max_tokens);
     }
 
@@ -545,32 +500,26 @@ retention_days = 3
     #[test]
     fn test_partial_toml_uses_defaults() {
         let toml = r#"
-[daemon]
-socket_path = "/test/sock"
+[database]
+path = "/tmp/test.db"
 "#;
         let config = Config::from_toml(toml).unwrap();
-        assert_eq!(config.daemon.socket_path, "/test/sock");
-        // Other fields use defaults
-        assert_eq!(config.daemon.max_concurrent, 10);
-        assert_eq!(config.database.path, "~/.knocode/data.db");
+        assert_eq!(config.database.path, "/tmp/test.db");
         assert_eq!(config.context.max_tokens, 12000);
     }
 
     #[test]
     fn test_env_overrides() {
         // Save and restore env
-        let original = std::env::var("KNOCODE_DAEMON_SOCKET").ok();
         let original_log = std::env::var("KNOCODE_LOG_LEVEL").ok();
         let original_watch = std::env::var("KNOCODE_WATCH_MODE").ok();
 
-        std::env::set_var("KNOCODE_DAEMON_SOCKET", "/env/sock");
         std::env::set_var("KNOCODE_LOG_LEVEL", "trace");
         std::env::set_var("KNOCODE_WATCH_MODE", "filesystem");
 
         let mut config = Config::default();
         config.apply_env_overrides();
 
-        assert_eq!(config.daemon.socket_path, "/env/sock");
         assert_eq!(config.logging.level, "trace");
         assert_eq!(config.index.watch_mode, WatchMode::Filesystem);
 
@@ -580,10 +529,6 @@ socket_path = "/test/sock"
         assert_eq!(config.index.watch_mode, WatchMode::Filesystem);
 
         // Restore
-        match original {
-            Some(v) => std::env::set_var("KNOCODE_DAEMON_SOCKET", v),
-            None => std::env::remove_var("KNOCODE_DAEMON_SOCKET"),
-        }
         match original_log {
             Some(v) => std::env::set_var("KNOCODE_LOG_LEVEL", v),
             None => std::env::remove_var("KNOCODE_LOG_LEVEL"),

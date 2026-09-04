@@ -10,7 +10,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 |------|------------------|
 | **Agent Interception** | Pre-generation and pre-tool-call hooks for Tier 1 agents (opencode, Claude Code, Cursor, Gemini CLI, Copilot, OpenClaw, Pi, Factory Droid). Tier 2 agents supported as best-effort via convention-based integration. |
 | **Repository Intelligence** | Incremental AST parsing (tree-sitter), structural search (ast-grep), text search (ripgrep), git-change-triggered incremental updates, metadata storage. Optional LSP enrichment via agent's own language server. |
-| **Knowledge Hub** | Unified organizational surface for docs, ADRs, templates, and memory. BM25/tantivy for lexical retrieval. FlashRank and engram removed (see `docs/01-architecture/FLASHRANK_REMOVAL.md`, `ENGRAM_CBM_REMOVAL.md`); memory is SQLite+tantivy local. The Skill Engine was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`). |
+| **Knowledge Hub** | Unified organizational surface for docs, ADRs, templates, and memory. BM25/tantivy for lexical retrieval. FlashRank and engram removed (see REMOVED_TOOLS.md, REMOVED_TOOLS.md); memory is SQLite+tantivy local. The Skill Engine was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`). |
 | **Context Engine** | `BuildContext(task)` — the one public API. Retrieve → rank → deduplicate → compress → cache-order → token-budget → emit YAML Context Pack. Runs as a long-lived local daemon with Unix socket IPC. Local token counting via `tiktoken-rs`. |
 | **Execution Optimizer** | RTK adopted directly for tool-output compression. Intercepts tool outputs via pre-tool-call hooks. |
 | **Event Bus** | Async-only observability events: ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved. Consumed by CLI inspection, metrics, and future orchestrators. |
@@ -148,7 +148,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | Path | Protocol | Direction | Purpose |
 |------|----------|-----------|---------|
 | Agent → Daemon | Unix Domain Socket (MessagePack) | Bidirectional | Pre-generation hooks, pre-tool hooks |
-| Daemon → engram | *Removed* — memory is SQLite local (see ENGRAM_CBM_REMOVAL.md) | — |
+| Daemon → engram | *Removed* — memory is SQLite local (see REMOVED_TOOLS.md) | — |
 | Daemon → SQLite | In-process (rusqlite) | Bidirectional | Index and metadata |
 | Daemon → Event Bus | Internal async channel | Outbound only | Observability events |
 

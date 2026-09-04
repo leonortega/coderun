@@ -24,17 +24,14 @@ impl Default for KnowledgeConfig {
 pub struct KnowledgeHub {
     db: Database,
     event_bus: EventBus,
-    #[allow(dead_code)]
-    config: KnowledgeConfig,
 }
 
 impl KnowledgeHub {
     /// Create a new Knowledge Hub
-    pub fn new(db: Database, event_bus: EventBus, config: KnowledgeConfig) -> Self {
+    pub fn new(db: Database, event_bus: EventBus) -> Self {
         Self {
             db,
             event_bus,
-            config,
         }
     }
 
@@ -369,8 +366,7 @@ mod tests {
     fn test_hub() -> KnowledgeHub {
         let db = test_db();
         let event_bus = EventBus::new();
-        let config = KnowledgeConfig::default();
-        KnowledgeHub::new(db, event_bus, config)
+        KnowledgeHub::new(db, event_bus)
     }
 
     #[test]

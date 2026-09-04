@@ -15,7 +15,7 @@ use std::sync::Arc;
 use knocode_context::{ContextConfig, ContextEngine};
 use knocode_daemon::http_server::{create_router, HttpServerState};
 use knocode_events::EventBus;
-use knocode_knowledge::{KnowledgeConfig, KnowledgeHub};
+use knocode_knowledge::KnowledgeHub;
 use knocode_optimizer::ExecutionOptimizer;
 use knocode_repo_intel::RepositoryIntelligence;
 use knocode_storage::Database;
@@ -58,7 +58,6 @@ async fn e2e_hook_contracts() {
     let hub = KnowledgeHub::new(
         kh_db,
         EventBus::new(),
-        KnowledgeConfig::default(),
     );
     let engine = ContextEngine::new(
         RepositoryIntelligence::new(repo_knocode.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), EventBus::new()),

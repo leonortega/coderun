@@ -35,8 +35,8 @@
 - tree-sitter AST parsing (Rust, Python, JavaScript, TypeScript)
 - ripgrep text search with .gitignore support
 - tantivy BM25 full-text indexing and search
-- *engram HTTP client for cross-session memory — removed in v0.7.6 (see ENGRAM_CBM_REMOVAL.md, replaced by SQLite+tantivy local)*
-- *FlashRank reranker with TF-IDF fallback — removed in v0.7.6 (see FLASHRANK_REMOVAL.md, SQLite+tantivy local)*
+- *engram HTTP client for cross-session memory — removed in v0.7.6 (see REMOVED_TOOLS.md, replaced by SQLite+tantivy local)*
+- *FlashRank reranker with TF-IDF fallback — removed in v0.7.6 (see REMOVED_TOOLS.md, SQLite+tantivy local)*
 - LiteLLM client for multi-provider model routing
 
 ### v0.3.0 — Spec-Compliance ✅
@@ -47,7 +47,7 @@
 - tiktoken-rs local token counting (cl100k_base)
 - Cache-aware pack: SHA-256 dedup, frozen-prefix boundary, reversible compression
 - Repository Intelligence: structural search, full-text tantivy, dependency graph, git watcher
-- Knowledge Hub: BM25 → FlashRank pipeline *(FlashRank removed in v0.7.6 — see FLASHRANK_REMOVAL.md, reranker is passthrough)*, *engram deterministic reads — removed (see ENGRAM_CBM_REMOVAL.md)*
+- Knowledge Hub: BM25 → FlashRank pipeline *(FlashRank removed in v0.7.6 — see REMOVED_TOOLS.md, reranker is passthrough)*, *engram deterministic reads — removed (see REMOVED_TOOLS.md)*
 - LiteLLM gateway with fallback chains
 - RTK adoption with tee-on-failure
 - Event bus + `knocode preview`/`replay` CLI
@@ -70,9 +70,9 @@
 **Released:** August 24, 2026 | **Tests:** 166
 
 - Structural search: `AstGrepBackend` (ast-grep-core) + `StructuralRetriever` + `CombinedRetriever` intent routing + `QueryPlanner`
-- *engram deterministic reads — removed (see ENGRAM_CBM_REMOVAL.md, SQLite local)*
-- *FlashRank via `ort` int8, TF-IDF fallback only on model load fail — removed in v0.7.6 (see FLASHRANK_REMOVAL.md, offline eval only)*
-- *codebase-memory-mcp probe — removed (see ENGRAM_CBM_REMOVAL.md, local AST+regex)*
+- *engram deterministic reads — removed (see REMOVED_TOOLS.md, SQLite local)*
+- *FlashRank via `ort` int8, TF-IDF fallback only on model load fail — removed in v0.7.6 (see REMOVED_TOOLS.md, offline eval only)*
+- *codebase-memory-mcp probe — removed (see REMOVED_TOOLS.md, local AST+regex)*
 - LiteLLM `IModelGateway` with `capable→balanced→fast` cascade
 - RTK vendored crate primary, built-in compressors fallback only
 - Git `notify`+`git2` incremental watcher, polling fallback only
@@ -96,7 +96,7 @@
 - `knocode init` full bootstrap: scaffold → discovery → indexing → knowledge → engram → profile
 - Repository discovery: language census by extension, framework detection from manifests
 - Knowledge seeding at init: README + ADRs → `store_knowledge(category="docs")`
-- *Engram bootstrap — removed (see ENGRAM_CBM_REMOVAL.md)*
+- *Engram bootstrap — removed (see REMOVED_TOOLS.md)*
 - Repository profile artifact: `.knocode/profile.json`
 - ast-grep via npm prebuilt, RTK prebuilt binary installers
 

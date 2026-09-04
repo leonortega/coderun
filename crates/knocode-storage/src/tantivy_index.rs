@@ -596,57 +596,6 @@ impl TantivyIndex {
         Ok(())
     }
 
-    /// Expand a query by finding symbols that contain query terms.
-    /// E.g., "pagination" finds "PaginationInfoViewModel" and adds it as a search term.
-    #[allow(dead_code)]
-    fn expand_query_with_symbols(&self, reader: &IndexReader, sanitized_query: &str, _repository_id: Option<&str>) -> String {
-        let searcher = reader.searcher();
-        let mut extra_terms: Vec<String> = Vec::new();
-
-        // Extract individual query terms from the OR-joined query
-        for term in sanitized_query.split(" OR ") {
-            let term = term.trim();
-            if term.len() < 3 { continue; }
-
-            // Search symbol_name field for symbols containing this term
-            if let Ok(parsed) = QueryParser::for_index(&self.index, vec![self.schema.symbol_name_field]).parse_query(term) {
-                if let Ok(top_docs) = searcher.search(&parsed, &TopDocs::with_limit(5).order_by_score()) {
-                    for (_, doc_addr) in top_docs {
-                        if let Ok(doc) = searcher.doc::<tantivy::TantivyDocument>(doc_addr) {
-                            if let Some(Some(names)) = doc.get_first(self.schema.symbol_name_field).map(|v| v.as_str()) {
-                                // Add the full symbol name (which may be PascalCase)
-                                let name = names.to_string();
-                                let name_lower = name.to_lowercase();
-                                if name_lower != term.to_lowercase() && !extra_terms.contains(&name_lower) {
-                                    extra_terms.push(name_lower);
-                                }
-                                // Also add PascalCase split parts
-                                for part in split_pascal_case(&name) {
-                                    if part.len() >= 2 && part != term.to_lowercase() && !extra_terms.contains(&part) {
-                                        extra_terms.push(part);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if extra_terms.is_empty() {
-            sanitized_query.to_string()
-        } else {
-            // Merge original terms with symbol-discovered terms
-            let mut all_terms: Vec<String> = sanitized_query.split(" OR ").map(|s| s.trim().to_string()).collect();
-            for t in extra_terms {
-                if !all_terms.contains(&t) {
-                    all_terms.push(t);
-                }
-            }
-            all_terms.join(" OR ")
-        }
-    }
-
     /// Search the index — optionally scoped to a single repository (TASK-030).
     /// `repository_id: Some(id)` filters hits to docs stamped with that id; `None` searches all.
     /// `language_filter: Some(lang)` filters hits to docs with that language; `None` searches all.

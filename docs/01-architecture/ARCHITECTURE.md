@@ -197,7 +197,7 @@ Reference implementation: Rust daemon with Unix socket IPC. Lock strategy: acqui
 
 ### IModelGateway — [REMOVED v0.8.6]
 
-Model routing / LiteLLM were deleted from the v1 runtime (see `LLM_ROUTING_REMOVAL.md`).
+Model routing / LiteLLM were deleted from the v1 runtime (see REMOVED_TOOLS.md).
 The runtime is model-agnostic — the agent / provider / user chooses the model
 (V1_RUNTIME_SPEC.md §2.3).
 
@@ -286,9 +286,9 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 | Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (local AST+regex) | `repo-intel/src/graph.rs` |
 | Watcher | Two modes: `commit` (default — polls the resolved HEAD commit via git2, triggers on new commits) or `filesystem` (`notify` + git2 dirty-check; feature `fs-watcher`, enabled by the CLI and daemon) | `repo-intel/src/watcher.rs` |
 | LSP | Stub `LspClient` (`KNOCODE_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
-| Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see `FLASHRANK_REMOVAL.md` | `knowledge/src/rerank.rs` |
-| Memory | SQLite+tantivy local (engram removed — see `ENGRAM_CBM_REMOVAL.md`) | `knocode-storage` local | |
-| Model Gateway | [REMOVED v0.8.6] LiteLLM + heuristic routing deleted — runtime is model-agnostic | see `LLM_ROUTING_REMOVAL.md` |
+| Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see REMOVED_TOOLS.md | `knowledge/src/rerank.rs` |
+| Memory | SQLite+tantivy local (engram removed — see REMOVED_TOOLS.md) | `knocode-storage` local | |
+| Model Gateway | [REMOVED v0.8.6] LiteLLM + heuristic routing deleted — runtime is model-agnostic | see REMOVED_TOOLS.md |
 | Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.knocode/logs/tool-failures/` | `optimizer/src/rtk.rs` |
 | Token Counting | `tiktoken-rs` `cl100k_base` + `heuristic` fallback | `context/src/lib.rs:389`/`optimizer/src/lib.rs:303` |
 | Orchestration | Removed — single tokio daemon (see `REMOVED_TOOLS.md`) | — |

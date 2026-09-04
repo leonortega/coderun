@@ -24,6 +24,8 @@ pub mod bench_mattermost;
 #[cfg(test)]
 pub mod bench_components;
 #[cfg(test)]
+pub mod bench_eshop;
+#[cfg(test)]
 mod integration_tests;
 
 pub use evidence::{Evidence, EvidenceKind, EvidenceSource, RetrievalDiagnostics, RetrievalResult, RetrievalSignal};

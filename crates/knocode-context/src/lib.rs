@@ -19,28 +19,6 @@ fn prof(mark: &str, start: Instant) {
     }
 }
 
-/// Check if a path looks like a valid file (not a junk token like "TODO", "No", "This")
-#[allow(dead_code)]
-fn is_valid_file_path(path: &str) -> bool {
-    // Must not be too short (junk tokens are usually 1-5 chars)
-    if path.len() < 5 {
-        return false;
-    }
-    // Must not be a known junk token
-    let lower = path.to_lowercase();
-    if lower == "todo" || lower == "no" || lower == "this" || lower == "true" || lower == "false" {
-        return false;
-    }
-    // Has a directory separator — always valid (junk tokens don't contain / or \)
-    if path.contains('/') || path.contains('\\') {
-        return true;
-    }
-    // Bare filename: must have a file extension to be considered a real file
-    if path.contains('.') {
-        return true;
-    }
-    false
-}
 
 /// V1 docs/code split: Documentation files vs Code files (generic, not DefinitelyTyped-specific)
 fn is_documentation_path(path: &str) -> bool {
@@ -1096,7 +1074,7 @@ mod tests {
     fn test_assembled_sections_docs_then_code() {
         // assemble_context_pack orders docs before code (no skills section anymore)
         use knocode_events::EventBus;
-        use knocode_knowledge::KnowledgeConfig;
+        
         use knocode_repo_intel::RepositoryIntelligence;
         use knocode_storage::Database;
         use std::path::PathBuf;
@@ -1104,7 +1082,7 @@ mod tests {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let event_bus = EventBus::new();
         let repo_intel = RepositoryIntelligence::new(PathBuf::from("."), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(db, event_bus.clone());
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let mut budget = 12000;
         let mut usage = HashMap::new();
@@ -1117,7 +1095,7 @@ mod tests {
     #[test]
     fn test_dedup_skips_duplicate() {
         use knocode_events::EventBus;
-        use knocode_knowledge::{KnowledgeConfig, KnowledgeHub};
+        use knocode_knowledge::KnowledgeHub;
         use knocode_repo_intel::RepositoryIntelligence;
         use knocode_storage::Database;
         use std::path::PathBuf;
@@ -1125,7 +1103,7 @@ mod tests {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let event_bus = EventBus::new();
         let repo_intel = RepositoryIntelligence::new(PathBuf::from("."), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(db, event_bus.clone());
         let engine = ContextEngine::new(repo_intel, kh, event_bus, ContextConfig::default());
         let a = engine.dedup_content("sess1", "hello world");
         let b = engine.dedup_content("sess1", "hello world");
@@ -1157,7 +1135,7 @@ mod tests {
     async fn test_build_context_deterministic() {
         use knocode_core::TaskRequest;
         use knocode_events::EventBus;
-        use knocode_knowledge::{KnowledgeConfig, KnowledgeHub};
+        use knocode_knowledge::KnowledgeHub;
         use knocode_repo_intel::RepositoryIntelligence;
         use knocode_storage::Database;
 
@@ -1176,7 +1154,7 @@ mod tests {
         // Index repo so code retrieval has something
         let mut ri = RepositoryIntelligence::new(dir.clone(), Database::open(&db_path).unwrap(), event_bus.clone());
         let _ = ri.index_repository();
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(db, event_bus.clone());
         let engine = ContextEngine::new(ri, kh, event_bus, ContextConfig::default());
         let task1 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessA".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
         let task2 = TaskRequest { message: "fix hello function".to_string(), session_id: "sessB".to_string(), context_hints: None, repository_id: String::new(), repository_path: None, expected_files: None };
@@ -1288,7 +1266,7 @@ mod tests {
         // Engine whose default view is repo_b (simulates a daemon started in repo_b)
         let db = knocode_storage::Database::open(&std::path::PathBuf::from(":memory:")).unwrap();
         let kh_db = knocode_storage::Database::open(&std::path::PathBuf::from(":memory:")).unwrap();
-        let hub = KnowledgeHub::new(kh_db, EventBus::new(), knocode_knowledge::KnowledgeConfig::default());
+        let hub = KnowledgeHub::new(kh_db, EventBus::new());
         let engine = ContextEngine::new(
             RepositoryIntelligence::new(repo_b.clone(), db, EventBus::new()),
             hub,
@@ -1322,7 +1300,7 @@ mod tests {
     async fn test_eshop_reranker() {
         use knocode_core::TaskRequest;
         use knocode_events::EventBus;
-        use knocode_knowledge::{KnowledgeConfig, KnowledgeHub};
+        use knocode_knowledge::KnowledgeHub;
         use knocode_repo_intel::RepositoryIntelligence;
         use knocode_storage::Database;
         use std::path::PathBuf;
@@ -1342,7 +1320,7 @@ mod tests {
         let mut ri = RepositoryIntelligence::new(eshop_path.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone());
         ri.index_repository().expect("index eShopOnWeb");
 
-        let kh = KnowledgeHub::new(db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(db, event_bus.clone());
 
         let config = ContextConfig::default();
         let engine = ContextEngine::new(ri, kh, event_bus, config);
@@ -1396,7 +1374,7 @@ mod tests {
         // afterwards must see a newly added file immediately (fresh tantivy handle,
         // not a stale pre-reindex reader).
         use knocode_events::EventBus;
-        use knocode_knowledge::{KnowledgeConfig, KnowledgeHub};
+        use knocode_knowledge::KnowledgeHub;
         use knocode_repo_intel::RepositoryIntelligence;
         use knocode_storage::Database;
 
@@ -1417,7 +1395,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
         let kh_db = Database::open(&db_path).unwrap();
         let event_bus = EventBus::new();
-        let kh = KnowledgeHub::new(kh_db, event_bus.clone(), KnowledgeConfig::default());
+        let kh = KnowledgeHub::new(kh_db, event_bus.clone());
         let engine = ContextEngine::new(
             RepositoryIntelligence::new(dir.clone(), db, event_bus.clone()),
             kh,

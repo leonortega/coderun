@@ -5,11 +5,10 @@ use std::time::Duration;
 
 use tracing::{error, info, warn};
 
-#[allow(unused_imports)]
-use crate::adapter::{AdapterConfig, AdapterLayer};
+
 use knocode_core::Config;
 use knocode_events::EventBus;
-use knocode_knowledge::{KnowledgeConfig, KnowledgeHub};
+use knocode_knowledge::KnowledgeHub;
 use knocode_repo_intel::watcher::RepoWatcher;
 use knocode_repo_intel::RepositoryIntelligence;
 use knocode_storage::Database;
@@ -19,8 +18,6 @@ use knocode_storage::Database;
 #[allow(clippy::arc_with_non_send_sync)]
 pub struct DaemonState {
     pub config: Config,
-    #[allow(dead_code)]
-    pub db: Arc<Database>,
     pub event_bus: EventBus,
     pub context_engine: Arc<tokio::sync::Mutex<knocode_context::ContextEngine>>,
     /// Auto-reindex watcher — owned by the state so graceful shutdown can call
@@ -45,10 +42,7 @@ impl DaemonState {
         std::fs::create_dir_all(db_dir)
             .map_err(|e| format!("Failed to create database directory: {}", e))?;
 
-        let db = Database::open(&db_path)
-            .map_err(|e| format!("Failed to open database: {}", e))?;
-
-        info!(path = %db_path.display(), "Database opened");
+        info!(path = %db_path.display(), "Database directory ready");
 
         // Initialize event bus
         let event_bus = EventBus::new();
@@ -78,13 +72,9 @@ impl DaemonState {
         let knowledge_db = Database::open(&knowledge_db_path)
             .map_err(|e| format!("Failed to open database for knowledge: {}", e))?;
 
-        let knowledge_config = KnowledgeConfig {
-            max_knowledge_entries: config.knowledge.max_knowledge_entries,
-        };
         let knowledge_hub = KnowledgeHub::new(
             knowledge_db,
             event_bus.clone(),
-            knowledge_config,
         );
 
         // Initialize context engine
@@ -109,8 +99,6 @@ impl DaemonState {
 
         Ok(Self {
             config,
-            #[allow(clippy::arc_with_non_send_sync)]
-            db: Arc::new(db),
             event_bus,
             context_engine: Arc::new(tokio::sync::Mutex::new(context_engine)),
             watcher,
@@ -246,214 +234,7 @@ impl DaemonState {
             crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
         });
 
-        // Start UDS/MessagePack adapter (primary per spec §2) + HTTP fallback
-        // Shared ContextEngine + optimizer for both transports (handler extracted via adapter.rs)
-        let adapter_config = crate::adapter::AdapterConfig {
-            socket_path: std::path::PathBuf::from(self.config.daemon.socket_path.clone()),
-            request_timeout_ms: self.config.daemon.request_timeout_ms,
-            max_concurrent: self.config.daemon.max_concurrent,
-            tcp_port: 9527,
-        };
-        // Clone engine for adapter (needs owned ContextEngine; we rebuild from shared state via new)
-        // Instead, we reuse HTTP state for the adapter by cloning the Arc<Mutex<ContextEngine>> and optimizer.
-        // AdapterLayer::new expects owned ContextEngine — create a lightweight clone via shared adapter path:
-        // Use HTTP-server-style shared state: start adapter via direct UnixListener loop that reuses http_server's handler.
-        // For correctness we instantiate an AdapterLayer-compatible server that shares the same ContextEngine Arc.
-        #[allow(unused_variables)]
-        let adapter_handle = {
-            let adapter_engine = self.context_engine.clone();
-            let adapter_optimizer = std::sync::Arc::new(self.optimizer.clone());
-            let adapter_event_bus = self.event_bus.clone();
-            let adapter_socket = adapter_config.socket_path.clone();
-            let adapter_timeout = adapter_config.request_timeout_ms;
-            tokio::spawn(async move {
-            // Instantiate a minimal adapter that shares the existing ContextEngine Arc
-            // We cannot reuse AdapterLayer::new (takes owned engine), so we run a custom UDS loop
-            // that mirrors adapter::handle_connection but with shared Arcs.
-            #[cfg(unix)]
-            {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                use knocode_core::{AgentRequest, AgentResponse, CorrelationId, HookType, RequestPayload, ResponsePayload, TaskRequest, OutputType};
-                use tracing::{debug, warn};
 
-                // Helper: handle a single connection with timeout + MessagePack
-                async fn handle_uds_conn(
-                    stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-                    engine: std::sync::Arc<tokio::sync::Mutex<knocode_context::ContextEngine>>,
-                    optimizer: std::sync::Arc<knocode_optimizer::ExecutionOptimizer>,
-                    event_bus: knocode_events::EventBus,
-                    timeout_ms: u64,
-                    rate_limiter: crate::ratelimit::RateLimiter,
-                ) -> Result<(), String> {
-                    let mut len_buf = [0u8; 4];
-                    stream.read_exact(&mut len_buf).await.map_err(|e| format!("read len: {e}"))?;
-                    let len = u32::from_be_bytes(len_buf) as usize;
-                    if len > 10 * 1024 * 1024 { return Err("request too large".to_string()); }
-                    let mut body = vec![0u8; len];
-                    stream.read_exact(&mut body).await.map_err(|e| format!("read body: {e}"))?;
-                    let request: AgentRequest = rmp_serde::from_slice(&body).map_err(|e| format!("decode: {e}"))?;
-                    let correlation_id = request.correlation_id.clone();
-                    let hook_type = request.hook_type.clone();
-                    // TASK-021 single trace: request→context→router→model→optimizer with repository_id+timestamp
-                    tracing::info!(correlation_id=%correlation_id, repository_id=%request.repository_id, timestamp=%request.timestamp, hook_type=?hook_type, "UDS request received — trace start");
-
-                    // Readiness probe — lightweight parity with GET /health: never
-                    // gated (must answer during indexing), never rate-limited, no
-                    // engine lock. Clients poll until `state == "ready"` before
-                    // sending real requests.
-                    fn probe_payload() -> ResponsePayload {
-                        let m = crate::metrics::global();
-                        ResponsePayload::Probe {
-                            state: m.readiness_str().to_string(),
-                            index_files: m.index_files(),
-                            version: env!("CARGO_PKG_VERSION").to_string(),
-                        }
-                    }
-                    if matches!(&request.payload, RequestPayload::Probe) {
-                        let resp = AgentResponse {
-                            correlation_id: correlation_id.clone(),
-                            hook_type: hook_type.clone(),
-                            payload: probe_payload(),
-                            latency_ms: 0,
-                            error: None,
-                        };
-                        let bytes = rmp_serde::to_vec(&resp).map_err(|e| format!("encode: {e}"))?;
-                        let len_bytes = (bytes.len() as u32).to_be_bytes();
-                        stream.write_all(&len_bytes).await.map_err(|e| format!("write len: {e}"))?;
-                        stream.write_all(&bytes).await.map_err(|e| format!("write body: {e}"))?;
-                        return Ok(());
-                    }
-
-                    // Rate limiting per session_id
-                    let session_key = match &request.payload {
-                        RequestPayload::MessageRewrite { session_id, .. } => session_id.clone(),
-                        RequestPayload::ToolOutput { tool_name, .. } => tool_name.clone(),
-                        RequestPayload::Probe => "probe".to_string(),
-                    };
-                    if rate_limiter.is_rate_limited(&session_key) {
-                        crate::metrics::global().inc_fail_open();
-                        warn!(correlation_id = %correlation_id, "rate limited (UDS)");
-                        let resp = AgentResponse { correlation_id, hook_type, payload: ResponsePayload::OriginalPassthrough { original: String::new(), reason: "rate_limited".to_string() }, latency_ms: 0, error: Some("rate limited".to_string()) };
-                        let bytes = rmp_serde::to_vec(&resp).map_err(|e| format!("encode: {e}"))?;
-                        let len_bytes = (bytes.len() as u32).to_be_bytes();
-                        stream.write_all(&len_bytes).await.map_err(|e| format!("write len: {e}"))?;
-                        stream.write_all(&bytes).await.map_err(|e| format!("write body: {e}"))?;
-                        return Ok(());
-                    }
-                    let _ = rate_limiter.try_acquire("__probe__");
-                    let _ = crate::ratelimit::verify_hmac("", "", "");
-                    let payload_clone = request.payload.clone();
-                    let repository_path = match &payload_clone {
-                        RequestPayload::MessageRewrite { repository_path, .. } => repository_path.clone(),
-                        RequestPayload::ToolOutput { repository_path, .. } => repository_path.clone(),
-                        RequestPayload::Probe => None,
-                    };
-                    let fut = async {
-                        match payload_clone {
-                            RequestPayload::MessageRewrite { session_id, message, context_hints, .. } => {
-                                let task = TaskRequest {
-                                    message: message.clone(),
-                                    session_id,
-                                    context_hints,
-                                    repository_id: match repository_path.as_deref() {
-                                        Some(p) if !p.trim().is_empty() => knocode_core::repository_id_from_path(p),
-                                        _ => String::new(),
-                                    },
-                                    repository_path,
-                                    expected_files: None,
-                                };
-                                let _timer = crate::metrics::Timer::start();
-                                let eng = engine.lock().await;
-                                match eng.build_context(&task).await {
-                                    Ok(pack) => {
-                                        crate::metrics::global().inc_requests("PreGeneration");
-                                        crate::metrics::global().observe_context_tokens(pack.token_usage.total_tokens);
-                                        let recall = if !pack.code_context.is_empty() { 0.85 } else { 0.0 };
-                                        crate::metrics::global().set_retrieval_recall(recall);
-                                        tracing::info!(total_tokens=%pack.token_usage.total_tokens, recall=%recall, repository_state=%pack.repository_state, "trace: context built (UDS)");
-                                        // TASK-031/F-2: zero-value rewrite suppression
-                                        if pack.token_usage.total_tokens == 0 {
-                                            ResponsePayload::OriginalPassthrough { original: message, reason: "no_context_hits".to_string() }
-                                        } else {
-                                            let yaml = knocode_context::ContextEngine::to_yaml(&pack).unwrap_or_default();
-                                            ResponsePayload::RewrittenMessage(Box::new(knocode_core::RewrittenMessageData {
-                                                original: message.clone(),
-                                                rewritten: format!("{}\\n\\n---\\n\\nContext:\\n{}", message, yaml),
-                                                context_pack: Some(pack),
-                                            }))
-                                        }
-                                    }
-                                    Err(e) => {
-                                        crate::metrics::global().inc_fail_open();
-                                        ResponsePayload::OriginalPassthrough { original: message, reason: e }
-                                    },
-                                }
-                            }
-                            RequestPayload::ToolOutput { tool_name, output_type, content, context, .. } => {
-                                let r = optimizer.compress_output(&tool_name, output_type, content.clone(), context.as_deref());
-                                if r.original_tokens > r.compressed_tokens {
-                                    crate::metrics::global().add_tokens_saved(r.original_tokens - r.compressed_tokens);
-                                }
-                                tracing::info!(tool=%tool_name, saved=%r.original_tokens.saturating_sub(r.compressed_tokens), "trace: optimizer (UDS)");
-                                ResponsePayload::CompressedOutput { original: content, compressed: r.compressed, original_tokens: r.original_tokens, compressed_tokens: r.compressed_tokens }
-                            }
-                            // Unreachable (probes return before rate limiting) but honest if reached.
-                            RequestPayload::Probe => probe_payload(),
-                        }
-                    };
-                    let payload = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
-                        Ok(p) => p,
-                        Err(_) => {
-                            crate::metrics::global().inc_fail_open();
-                            warn!("UDS request timed out after {}ms", timeout_ms);
-                            ResponsePayload::OriginalPassthrough { original: String::new(), reason: "timeout".to_string() }
-                        }
-                    };
-                    let resp = AgentResponse { correlation_id, hook_type, payload, latency_ms: 0, error: None };
-                    let bytes = rmp_serde::to_vec(&resp).map_err(|e| format!("encode: {e}"))?;
-                    let len_bytes = (bytes.len() as u32).to_be_bytes();
-                    stream.write_all(&len_bytes).await.map_err(|e| format!("write len: {e}"))?;
-                    stream.write_all(&bytes).await.map_err(|e| format!("write body: {e}"))?;
-                    Ok(())
-                }
-
-                if adapter_socket.exists() { let _ = std::fs::remove_file(&adapter_socket); }
-                if let Some(parent) = adapter_socket.parent() { let _ = std::fs::create_dir_all(parent); }
-                let rate_limiter = crate::ratelimit::RateLimiter::default();
-                match tokio::net::UnixListener::bind(&adapter_socket) {
-                    Ok(listener) => {
-                        tracing::info!(path = %adapter_socket.display(), "UDS/MessagePack adapter listening (primary)");
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(&adapter_socket, std::fs::Permissions::from_mode(0o600));
-                        }
-                        loop {
-                            match listener.accept().await {
-                                Ok((mut stream, _)) => {
-                                    let eng = adapter_engine.clone();
-                                    let opt = adapter_optimizer.clone();
-                                    let eb = adapter_event_bus.clone();
-                                    let rl = rate_limiter.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = handle_uds_conn(&mut stream, eng, opt, eb, adapter_timeout, rl).await {
-                                            tracing::error!(error = %e, "UDS conn error");
-                                        }
-                                    });
-                                }
-                                Err(e) => { tracing::error!(error = %e, "UDS accept failed"); break; }
-                            }
-                        }
-                    }
-                    Err(e) => tracing::error!(error = %e, "Failed to bind UDS adapter"),
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                tracing::info!("UDS adapter not available on Windows — HTTP fallback active");
-            }
-        })
-        };
 
         // Wait for shutdown signal
         info!("Daemon ready. Press Ctrl+C to shutdown.");
@@ -462,17 +243,13 @@ impl DaemonState {
         // Graceful shutdown
         info!("Shutting down gracefully...");
 
-        // Wait for HTTP + UDS servers to finish (timeout)
+        // Wait for HTTP server to finish (timeout)
         let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
-        let _ = tokio::time::timeout(Duration::from_secs(5), adapter_handle).await;
 
         // Stop the auto-reindex watcher and wait for its poll loop to exit
         // (commit mode: within one poll interval; filesystem: within ~1s + debounce).
         self.watcher.stop();
         let _ = tokio::time::timeout(Duration::from_secs(10), watch_handle).await;
-
-        // Cleanup
-        cleanup(&self.config.daemon.socket_path);
 
         info!("Daemon shutdown complete");
         Ok(())
@@ -586,22 +363,9 @@ fn print_banner(config: &Config) {
     println!("║{}{}{}║", " ".repeat(pad_left), label, " ".repeat(pad_right));
     println!("╚══════════════════════════════════════════╝");
     println!();
-    println!("  Socket:  {}", config.daemon.socket_path);
     println!("  Database: {}", config.database.path);
     println!("  Log level: {}", config.logging.level);
-    println!("  Timeout:  {}ms", config.daemon.request_timeout_ms);
     println!();
-}
-
-fn cleanup(socket_path: &str) {
-    let path = PathBuf::from(socket_path);
-    if path.exists() {
-        if let Err(e) = std::fs::remove_file(&path) {
-            warn!(error = %e, "Failed to remove socket file");
-        } else {
-            info!(path = socket_path, "Socket file removed");
-        }
-    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -629,9 +393,4 @@ mod tests {
         assert_eq!(path, PathBuf::from("relative/path"));
     }
 
-    #[test]
-    fn test_cleanup_nonexistent() {
-        // Should not panic
-        cleanup("/tmp/nonexistent_socket_12345.sock");
-    }
 }

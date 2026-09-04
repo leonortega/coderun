@@ -19,7 +19,7 @@ The evaluation framework tests two core capabilities:
 ./eval/run-evaluation.sh model    # Model routing only
 ./eval/run-evaluation.sh context  # Context quality only
 
-# Compare BM25 vs MCP vs FlashRank (historical — FlashRank/MCP removed from v1 runtime, see FLASHRANK_REMOVAL.md / ENGRAM_CBM_REMOVAL.md)
+# Compare BM25 vs MCP vs FlashRank (historical — FlashRank/MCP removed from v1 runtime, see REMOVED_TOOLS.md / REMOVED_TOOLS.md)
 ./eval/run_comparison.sh  # offline eval only
 
 # View results in web UI

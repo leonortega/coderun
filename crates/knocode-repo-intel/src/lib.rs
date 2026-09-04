@@ -51,8 +51,6 @@ struct SymbolPatterns {
     impl_pattern: regex::Regex,
     trait_pattern: regex::Regex,
     type_pattern: regex::Regex,
-    #[allow(dead_code)]
-    import_pattern: regex::Regex,
 }
 
 impl SymbolPatterns {
@@ -83,10 +81,6 @@ impl SymbolPatterns {
             // type Alias = Type (Rust/TS), C# using alias
             type_pattern: regex::Regex::new(
                 r"(?m)^(?:pub\s+)?type\s+(\w+)"
-            ).unwrap(),
-            // import/use/require statements (broadened for C# using, Java import)
-            import_pattern: regex::Regex::new(
-                r"(?m)^(?:use|import|from|require|require_relative|using)\s+"
             ).unwrap(),
         }
     }
@@ -130,9 +124,6 @@ pub struct RepositoryIntelligence {
     db: knocode_storage::Database,
     event_bus: EventBus,
     patterns: SymbolPatterns,
-    #[allow(dead_code)]
-    /// Cache of file hashes for quick change detection
-    file_hashes: HashMap<String, String>,
     /// Cached file count (populated during init, used for graph-build decision)
     cached_file_count: std::sync::OnceLock<usize>,
     /// FIX #1: Cached Tantivy doc count — avoids opening index on every query.
@@ -144,7 +135,6 @@ impl RepositoryIntelligence {
     /// Create a new Repository Intelligence instance
     pub fn new(repo_path: PathBuf, db: knocode_storage::Database, event_bus: EventBus) -> Self {
         let patterns = SymbolPatterns::new();
-        let file_hashes = HashMap::new();
         // Canonicalize without Windows verbatim prefix (\\?\\) so both daemon and CLI derive the
         // SAME repository_id from the same directory (TASK-030/F-1)
         let canonical = dunce::canonicalize(&repo_path).unwrap_or_else(|_| repo_path.clone());
@@ -156,7 +146,6 @@ impl RepositoryIntelligence {
             db,
             event_bus,
             patterns,
-            file_hashes,
             cached_file_count: std::sync::OnceLock::new(),
             cached_doc_count: std::sync::OnceLock::new(),
         }
@@ -239,8 +228,6 @@ impl RepositoryIntelligence {
         struct FileJob {
             path_str: String,
             content: String,
-            #[allow(dead_code)]
-            hash: String,
             language: Option<String>,
             file_class: FileClass,
             file_changed: bool,
@@ -349,7 +336,6 @@ impl RepositoryIntelligence {
             file_jobs.push(FileJob {
                 path_str,
                 content,
-                hash,
                 language,
                 file_class,
                 file_changed,
@@ -938,11 +924,31 @@ impl RepositoryIntelligence {
             .unwrap_or(4)
             .clamp(1, 16);
 
+        // Directories to always skip (build artifacts, caches).
+        // filter_entry doesn't prevent descent on all platforms, so we also
+        // check path segments during iteration as a safety net.
+        const SKIP_DIRS: &[&str] = &["obj", "bin", "node_modules", ".git", "target"];
+
+        fn is_in_skip_dir(path: &Path) -> bool {
+            path.components().any(|c| {
+                c.as_os_str().to_str().map_or(false, |s| SKIP_DIRS.contains(&s))
+            })
+        }
+
         // Use ignore's WalkBuilder for respecting .gitignore — parallel when threads>1
         let walker = WalkBuilder::new(dir)
-            .hidden(false) // Include hidden files (but not .git)
+            .hidden(false)
             .git_ignore(true)
             .threads(threads)
+            .filter_entry(|entry| {
+                // Prevent descent into well-known build artifact directories
+                if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        return !SKIP_DIRS.contains(&name);
+                    }
+                }
+                true
+            })
             .build();
 
         for entry in walker {
@@ -950,9 +956,14 @@ impl RepositoryIntelligence {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-
             if entry.file_type().is_some_and(|ft| ft.is_file()) {
-                files.push(entry.into_path());
+                // Safety net: skip files under build artifact directories
+                // (filter_entry may not prevent descent on all platforms)
+                let path = entry.into_path();
+                if is_in_skip_dir(&path) {
+                    continue;
+                }
+                files.push(path);
             }
         }
 

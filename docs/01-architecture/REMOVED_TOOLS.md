@@ -9,15 +9,15 @@ explains why the rest is gone.
 
 | Tool / component | Removed (version) | What it was | Why removed (one line) | ADR / evidence |
 |---|---|---|---|---|
-| LLM Model Router + LiteLLM | v0.8.6 | Heuristic tier routing (`capable→balanced→fast`) with a LiteLLM HTTP fallback gateway; whole `knocode-router` crate | Routing couldn't be shown to beat the agent/provider/user choice, and model capabilities move too fast to encode | `LLM_ROUTING_REMOVAL.md` |
-| FlashRank reranker (`ort` int8) | v0.7.6 | Second-stage retrieval reranker, TF-IDF fallback on model-load failure | Measured **MRR degradation** on benchmark eval — ranking got worse, not better | `FLASHRANK_REMOVAL.md` |
-| Engram (cross-session memory) | v0.7.6 | Single Go binary, SQLite+FTS5 memory with MCP-native HTTP/CLI API | Zero recall gain; another external binary to install | `ENGRAM_CBM_REMOVAL.md` |
-| codebase-memory-mcp (graph probe) | v0.7.6 | Node dependency-graph extractor probed via `npx` as a first-class graph source | **0pp R@5 gain** over local AST+regex; fragile Node/npm dependency | `ENGRAM_CBM_REMOVAL.md` |
+| LLM Model Router + LiteLLM | v0.8.6 | Heuristic tier routing (`capable→balanced→fast`) with a LiteLLM HTTP fallback gateway; whole `knocode-router` crate | Routing couldn't be shown to beat the agent/provider/user choice, and model capabilities move too fast to encode | — |
+| FlashRank reranker (`ort` int8) | v0.7.6 | Second-stage retrieval reranker, TF-IDF fallback on model-load failure | Measured **MRR degradation** on benchmark eval — ranking got worse, not better | — |
+| Engram (cross-session memory) | v0.7.6 | Single Go binary, SQLite+FTS5 memory with MCP-native HTTP/CLI API | Zero recall gain; another external binary to install | — |
+| codebase-memory-mcp (graph probe) | v0.7.6 | Node dependency-graph extractor probed via `npx` as a first-class graph source | **0pp R@5 gain** over local AST+regex; fragile Node/npm dependency | — |
 | MkDocs integration | v0.9.0 | Ingested docs through the MkDocs build/ingestion path | Docs are plain Markdown — indexed via a first-class path instead | — |
 | DBOS workflow engine | v0.9.0 (code cleanup now) | Workflow/orchestration dependency (v0.6.0 made it "required") | Not required for V1; runtime is a single tokio daemon | — |
 | `knocode replay` CLI | v0.9.0 | Event-replay command over the event log | Replay off the hot path; `tracing` + metrics retained | — |
 | Skill Engine (runtime) | **current change** | `knocode-skills` crate: tag-based skill matching + full-instruction injection (`.knocode/skills`, `~/.knocode/skills`) | Agents already have native skill discovery (`.claude/skills`, `.agents/skills`, `.cursor/rules`); a second discovery+conflict system added complexity with no demonstrated outcome lift | V1_RUNTIME_SPEC.md §2 |
-| Model map / tier config | **current change** | `ModelConfig { default_tier, routing_enabled }`, "fast/balanced/capable" validation, `KNOCODE_MODEL_DEFAULT`, metrics request counter keyed `hook+tier`, `token_usage.model`/`tier` columns | Vestigial after the Model Router removal — nothing reads a tier anymore | `LLM_ROUTING_REMOVAL.md` |
+| Model map / tier config | **current change** | `ModelConfig { default_tier, routing_enabled }`, "fast/balanced/capable" validation, `KNOCODE_MODEL_DEFAULT`, metrics request counter keyed `hook+tier`, `token_usage.model`/`tier` columns | Vestigial after the Model Router removal — nothing reads a tier anymore | — |
 
 ## Why things were removed — the reasoning
 
@@ -43,7 +43,7 @@ decision).
 
 ### FlashRank reranker (v0.7.6)
 
-Benchmark evidence (`FLASHRANK_REMOVAL.md`) showed the reranker *degraded* results: adding FlashRank
+Benchmark evidence  showed the reranker *degraded* results: adding FlashRank
 was worse than the BM25 + symbol/path baseline on the metrics that matter (MRR). The `ort` int8 model
 was replaced by a passthrough, then the passthrough scaffolding itself was removed (current change) —
 `rerank_enabled` and the `rerank.rs` module are gone from `knocode-knowledge`.
@@ -110,8 +110,8 @@ Skill Engine as a V1 primitive. See `V1_RUNTIME_SPEC.md`.
 | Knowledge (SQLite + tantivy local; docs + code context) | ✅ core |
 | Execution Optimizer (tool-output compression) | ✅ core |
 | Observability (`/metrics`, `/health`, trace logs) | ✅ core |
-| Daemon IPC: UDS/MessagePack + HTTP `/hook` + **MCP `POST /mcp`** | ✅ core |
-| Readiness (`/health`, `/metrics` gauge, UDS Probe, MCP `-32001`) | ✅ core |
+| Daemon IPC: HTTP `/hook` + **MCP `POST /mcp`** | ✅ core |
+| Readiness (`/health`, `/metrics` gauge, HTTP probe, MCP `-32001`) | ✅ core |
 | Agent adapters (opencode plugin via MCP, Claude/Gemini/Cursor hooks) | ✅ |
 | MCP server package (`packages/knocode-mcp`, for Codex/Copilot/others) | ✅ |
 

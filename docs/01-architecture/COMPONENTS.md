@@ -408,7 +408,7 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 
 ### Purpose
 
-One organizational surface for project docs, ADRs, templates, and long-term memory. Lexical (BM25) search over stored knowledge and docs (engram and reranking removed — see `ENGRAM_CBM_REMOVAL.md`, `FLASHRANK_REMOVAL.md`).
+One organizational surface for project docs, ADRs, templates, and long-term memory. Lexical (BM25) search over stored knowledge and docs (engram and reranking removed — see REMOVED_TOOLS.md, REMOVED_TOOLS.md).
 
 ### v0.2.0 Implementation
 
@@ -509,7 +509,7 @@ One organizational surface for project docs, ADRs, templates, and long-term memo
 ## 5. Model Router — [REMOVED v0.8.6]
 
 > Model routing / LiteLLM were deleted from the v1 runtime in v0.8.6 (see
-> `LLM_ROUTING_REMOVAL.md`). The runtime is model-agnostic — the agent / provider /
+> REMOVED_TOOLS.md). The runtime is model-agnostic — the agent / provider /
 > user chooses the model (V1_RUNTIME_SPEC.md §2.3). This section is retained as a
 > numbered stub so later section numbers stay stable.
 
