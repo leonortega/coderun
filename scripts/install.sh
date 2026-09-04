@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Knocode installer v0.9.7 minimal (Unix: Linux/macOS, bash)
+# Knocode installer v0.9.11 minimal (Unix: Linux/macOS, bash)
 # Minimal v1: Git + SQLite(bundled)/tree-sitter/tantivy/tiktoken embedded + RTK optional (no Rust - prebuilt binaries; compile via scripts/compile.sh)
 # Agent integrations (OpenCode/Copilot) are selectable: --agents opencode,copilot | --all-agents | --no-agents
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--agents a,b,c|--all-agents|--no-agents] [--skip-prereqs]

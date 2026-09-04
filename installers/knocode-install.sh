@@ -19,7 +19,7 @@
 #   curl -fsSL https://leonortega.github.io/knocode/install.sh | bash
 #
 # Pinned version:
-#   curl -fsSL https://leonortega.github.io/knocode/install.sh | bash -s -- --version 0.9.7
+#   curl -fsSL https://leonortega.github.io/knocode/install.sh | bash -s -- --version 0.9.11
 set -euo pipefail
 
 REPO="leonortega/knocode"

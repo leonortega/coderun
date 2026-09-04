@@ -420,7 +420,7 @@ export const KnocodePlugin: Plugin = async ({ project, client, $, directory, wor
       {
         protocolVersion: "2024-11-05",
         capabilities: {},
-        clientInfo: { name: "opencode-knocode", version: "0.9.7" },
+        clientInfo: { name: "opencode-knocode", version: "0.9.11" },
       },
     );
 

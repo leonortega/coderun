@@ -7,7 +7,7 @@
 > workflow — see `01-architecture/REMOVED_TOOLS.md`); the V1 spec wins where they
 > conflict.
 
-## Current Version: v0.9.7
+## Current Version: v0.9.11
 
 **Released:** September 3, 2026
 **Status:** Active

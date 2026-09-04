@@ -4,7 +4,7 @@ name: Release
 # whenever a v* tag is pushed and publishes them to the GitHub Release for that
 # tag, together with the end-user installer scripts.
 #
-#   git tag v0.9.7 && git push origin v0.9.7
+#   git tag v0.9.11 && git push origin v0.9.11
 #   (or: cargo install cargo-release && cargo release patch)
 #
 # After publishing, the scoop bucket manifest (repo-root knocode.json) and the
