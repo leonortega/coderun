@@ -7,14 +7,14 @@
 .DESCRIPTION
   Minimal v1: Node >=20, Python+pip, Git, SQLite(bundled), tree-sitter/ripgrep/tantivy/tiktoken embedded,
          RTK (optional) - no Rust needed (prebuilt binaries; compile via scripts/compile.*)
-  Agent integrations: OpenCode, Codex, Copilot (VS Code), Cursor - select one or more at install
+  Agent integrations: OpenCode, Copilot (VS Code) - select one or more at install
   (default: all). Prebuilt: target/release/knocode.exe + knocode-daemon.exe are used directly.
 
 .PARAMETER SkipBuild
   Deprecated - build is always skipped (prebuilt binary at target/release/knocode.exe is used). Kept for compat.
 
 .PARAMETER Agents
-  Comma-separated agent list to wire, e.g. "-Agents opencode,codex". Valid: opencode, codex, copilot, cursor.
+  Comma-separated agent list to wire, e.g. "-Agents opencode". Valid: opencode, copilot.
 
 .PARAMETER AllAgents
   Install agent integrations for all supported agents (default when interactive prompt is not possible).
@@ -27,7 +27,7 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1
-  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode,cursor
+  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -AllAgents
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -NoAgents
 #>
@@ -99,7 +99,7 @@ function Install-GitIfMissing {
 }
 
 # --- Agent catalog & selection -------------------------------------------------
-$AgentCatalog = @("opencode", "codex", "copilot", "cursor")
+$AgentCatalog = @("opencode", "copilot")
 
 function Select-Agents {
   if ($NoAgents) { return @() }
@@ -118,7 +118,7 @@ function Select-Agents {
   $interactive = $true
   try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { $interactive = $false }
   if (-not $interactive) {
-    Info "non-interactive run - installing agent integrations for ALL agents (use -Agents opencode,cursor or -NoAgents to change)"
+    Info "non-interactive run - installing agent integrations for ALL agents (use -Agents opencode or -NoAgents to change)"
     return @($AgentCatalog)
   }
   Info "Which agent integrations should be installed? (default Yes for each)"
@@ -283,14 +283,14 @@ try { & $installedCli doctor } catch {}
 $ErrorActionPreference = $prevEA2
 
 # =====================================================================================
-# 3. Agent integrations (OpenCode / Codex / Copilot / Cursor) - selected above
+# 3. Agent integrations (OpenCode / Copilot) - selected above
 # =====================================================================================
 if ($agentSel.Count -gt 0) {
   $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
   $mcpDist = Join-Path $Root "packages\knocode-mcp\dist\index.js"
-  $wantMcp = @($agentSel | Where-Object { $_ -in @("codex", "copilot", "cursor") }).Count -gt 0
+  $wantMcp = @($agentSel | Where-Object { $_ -in @("copilot") }).Count -gt 0
 
-  # --- shared MCP server build (Codex, Copilot, Cursor all use knocode-mcp) ---
+  # --- shared MCP server build (Copilot uses knocode-mcp) ---
   if ($wantMcp) {
     $mcpDir = Join-Path $Root "packages\knocode-mcp"
     if (Test-Path $mcpDir) {
@@ -378,20 +378,6 @@ if ($agentSel.Count -gt 0) {
     Info "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
   }
 
-  # --- Codex: ~/.codex/config.toml mcp_servers.knocode ---
-  if ($agentSel -contains "codex") {
-    $codexDir = Join-Path $env:USERPROFILE ".codex"
-    $codexCfg = Join-Path $codexDir "config.toml"
-    try {
-      New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-      $codexEntry = "`n[mcp_servers.knocode]`ncommand = `"node`"`nargs = [`"$mcpDist`"]`n"
-      if (-not (Test-Path $codexCfg) -or -not ((Get-Content -LiteralPath $codexCfg -Raw -ErrorAction SilentlyContinue) -match "mcp_servers.knocode")) {
-        Add-Content -LiteralPath $codexCfg -Value $codexEntry -Encoding UTF8
-        Ok "Codex MCP config at $codexCfg (mcp_servers.knocode stdio)"
-      } else { Skip "Codex MCP already configured at $codexCfg" }
-    } catch { Warn "failed to write Codex MCP config: $_" }
-  }
-
   # --- Copilot (VS Code): user-level mcp.json (%APPDATA%\Code\User\mcp.json) ---
   if ($agentSel -contains "copilot") {
     try {
@@ -412,28 +398,56 @@ if ($agentSel.Count -gt 0) {
         } catch { Skip "VS Code mcp.json exists but could not merge knocode into $vscodeMcp" }
       }
     } catch { Warn "failed to write VS Code Copilot MCP config: $_" }
-  }
 
-  # --- Cursor: user-level ~/.cursor/mcp.json ---
-  if ($agentSel -contains "cursor") {
-    try {
-      $cursorDir = Join-Path $env:USERPROFILE ".cursor"
-      $cursorMcp = Join-Path $cursorDir "mcp.json"
-      $mcpJson = @{ mcpServers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10
-      New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null
-      if (-not (Test-Path $cursorMcp)) {
-        Set-Content -LiteralPath $cursorMcp -Value $mcpJson -Encoding UTF8
-        Ok "Cursor MCP at $cursorMcp (user scope)"
-      } else {
+    # --- Copilot Agent Plugin (hooks: SessionStart/PreToolUse/PostToolUse) ---
+    # Deploy to %USERPROFILE%\.knocode\copilot-plugin (repo-independent, survives repo moves).
+    $pluginSrc = Join-Path $Root "packages\knocode-copilot-plugin"
+    $pluginDst = Join-Path $env:USERPROFILE ".knocode\copilot-plugin"
+    if (Test-Path (Join-Path $pluginSrc "plugin.json")) {
+      try {
+        New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
+        # Fresh copy (idempotent update): clear destination first
+        if (Test-Path $pluginDst) { Remove-Item -LiteralPath $pluginDst -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
+        Copy-Item -Path (Join-Path $pluginSrc "*") -Destination $pluginDst -Recurse -Force -Exclude "node_modules"
+        Ok "Copilot Agent Plugin deployed to $pluginDst (hooks + MCP)"
+      } catch { Warn "failed to deploy Copilot Agent Plugin: $_" }
+    } else { Warn "packages/knocode-copilot-plugin not found - skipping Agent Plugin deploy" }
+
+    # --- @knocode chat participant extension (VSIX via `code` CLI) ---
+    $extDir = Join-Path $Root "packages\vscode-copilot-knocode"
+    if (Test-Path (Join-Path $extDir "package.json")) {
+      $vsix = $null
+      if ((Test-Cmd npm) -and -not (Test-Path (Join-Path $extDir "dist\extension.js"))) {
+        Info "Building vscode-copilot-knocode extension..."
+        Push-Location $extDir
         try {
-          $existing = Get-Content -LiteralPath $cursorMcp -Raw | ConvertFrom-Json
-          if (-not $existing.mcpServers) { $existing | Add-Member -NotePropertyName mcpServers -NotePropertyValue @{} }
-          $existing.mcpServers.knocode = $mcpServer
-          $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cursorMcp -Encoding UTF8
-          Ok "Cursor MCP updated at $cursorMcp"
-        } catch { Skip "Cursor mcp.json exists but could not merge knocode into $cursorMcp" }
+          & npm install --silent 2>&1 | Out-Null
+          & npm run build --silent 2>&1 | Out-Null
+        } catch {}
+        Pop-Location
       }
-    } catch { Warn "failed to write Cursor MCP config: $_" }
+      # Package a VSIX if none exists yet (requires vsce / npx)
+      if (-not (Get-ChildItem -Path $extDir -Filter "*.vsix" -ErrorAction SilentlyContinue)) {
+        if (Test-Cmd npm) {
+          Push-Location $extDir
+          try {
+            & npx --yes @vscode/vsce package --no-dependencies 2>&1 | Out-Null
+          } catch {}
+          Pop-Location
+        }
+      }
+      $vsix = Get-ChildItem -Path $extDir -Filter "*.vsix" -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($vsix) {
+        if (Test-Cmd code) {
+          Info "Installing @knocode VS Code extension (code --install-extension)..."
+          $prevEA4 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+          try { & code --install-extension $vsix.FullName --force 2>&1 | Out-Null; Ok "@knocode extension installed from $($vsix.Name) - reload VS Code to activate" }
+          catch { Warn "code CLI install failed - install manually: code --install-extension $($vsix.FullName)" }
+          $ErrorActionPreference = $prevEA4
+        } else { Warn "VS Code 'code' CLI not on PATH - install manually: code --install-extension $($vsix.FullName)" }
+      } else { Warn "vscode-copilot-knocode VSIX not built - open packages/vscode-copilot-knocode in VS Code and press F5, or run: npx @vscode/vsce package" }
+    } else { Warn "packages/vscode-copilot-knocode not found - skipping @knocode extension install" }
   }
 }
 

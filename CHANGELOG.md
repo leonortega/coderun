@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.11] - 2026-09-04 — Doctor index-path fix
+
+### Fixed
+- **`knocode doctor` reported `0 docs` / "no results — re-run init"** — the doctor probes opened the global `~/.knocode/index` container instead of the repo-scoped `~/.knocode/index/<repository_id>/` directory that `init` and the daemon write to. Doctor now resolves the index via `default_index_path(repository_id)` (honoring `KNOCODE_INDEX_DIR`), so `Tantivy:` and `Retrieval:` report the real in-repo counts.
+
+### Changed
+- **Version strings synced** across `knocode.json` (Scoop), `Formula/knocode.rb` (Homebrew), `packages/opencode-knocode/package.json`, `Cargo.lock` to match workspace `0.9.11`
+
+---
+
 ## [0.9.10] - 2026-09-04 — Housekeeping + Cleanup
 
 ### Fixed

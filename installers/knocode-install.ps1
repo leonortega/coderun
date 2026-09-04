@@ -18,7 +18,7 @@
       agent integrations are selected.
     - RTK (prebuilt from GitHub releases) - optional external tool.
 
-  Agent integrations (OpenCode / Codex / Copilot / Cursor) are optional and
+  Agent integrations (OpenCode / Copilot) are optional and
   selected interactively. They use the integration bundles shipped inside the
   release zip (integrations/opencode-knocode + integrations/knocode-mcp) - no
   npm registry needed. Use -SkipPrereqs to disable auto-installs.
@@ -34,8 +34,8 @@
   Defaults to the latest GitHub release.
 
 .PARAMETER Agents
-  Comma-separated agents to wire after install, e.g. "-Agents opencode,cursor".
-  Valid: opencode, codex, copilot, cursor.
+  Comma-separated agents to wire after install, e.g. "-Agents opencode".
+  Valid: opencode, copilot.
 
 .PARAMETER AllAgents
   Wire all supported agents without prompting.
@@ -48,13 +48,13 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File knocode-install.ps1
-  powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Version 0.9.7 -Agents opencode,codex
+  powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Version 0.9.7 -Agents opencode
 #>
 param([string]$Version = "", [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$SkipPrereqs)
 
 $ErrorActionPreference = "Stop"
 $Repo = "leonortega/knocode"
-$AgentCatalog = @("opencode", "codex", "copilot", "cursor")
+$AgentCatalog = @("opencode", "copilot")
 
 function Write-Step($m) { Write-Host "[knocode] $m" -ForegroundColor Cyan }
 function Write-Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
@@ -160,7 +160,7 @@ function Select-Agents {
   $interactive = $true
   try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { $interactive = $false }
   if (-not $interactive) {
-    Write-Step "non-interactive run - no agent integrations installed (pass -Agents opencode,codex or -AllAgents)"
+    Write-Step "non-interactive run - no agent integrations installed (pass -Agents opencode or -AllAgents)"
     return @()
   }
   Write-Step "Which agent integrations should be installed?"
@@ -339,12 +339,12 @@ if (Get-Command rtk -ErrorAction SilentlyContinue) {
 }
 
 # =============================================================================
-# 9. Agent integrations (OpenCode / Codex / Copilot / Cursor) - optional
+# 9. Agent integrations (OpenCode / Copilot) - optional
 # =============================================================================
 $agentSel = @(Select-Agents)
 if ($agentSel.Count -eq 0) {
   Write-Step "No agent integrations selected."
-  Write-Step "Re-run with -Agents opencode,codex,copilot,cursor (or -AllAgents) to wire agent integrations later."
+  Write-Step "Re-run with -Agents opencode,copilot (or -AllAgents) to wire agent integrations later."
 }
 else {
   Write-Step "Wiring agent integrations: $($agentSel -join ', ')"
@@ -387,25 +387,10 @@ else {
     catch { Write-Warn "opencode wiring failed: $($_.Exception.Message)" }
   }
 
-  # --- Shared MCP server descriptor for Codex / Copilot / Cursor (bundled knocode-mcp) ---
+  # --- Shared MCP server descriptor for Copilot (bundled knocode-mcp) ---
   $mcpDist = Join-Path $intsDst "knocode-mcp\dist\index.js"
   if ($agentSel.Count -gt 0 -and -not (Test-Path $mcpDist)) { Write-Warn "bundled knocode-mcp has no dist/index.js - MCP agents skipped" }
   $mcpServer = @{ command = "node"; args = @($mcpDist); env = @{ KNOCODE_DAEMON_URL = "http://127.0.0.1:9527" } }
-
-  # --- Codex: ~/.codex/config.toml mcp_servers.knocode ---
-  if ($agentSel -contains "codex" -and (Test-Path $mcpDist)) {
-    try {
-      $codexDir = Join-Path $env:USERPROFILE ".codex"
-      New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-      $codexCfg = Join-Path $codexDir "config.toml"
-      if (-not (Test-Path $codexCfg) -or -not ((Get-Content -LiteralPath $codexCfg -Raw -ErrorAction SilentlyContinue) -match "mcp_servers.knocode")) {
-        Add-Content -LiteralPath $codexCfg -Value "`n[mcp_servers.knocode]`ncommand = `"node`"`nargs = [`"$mcpDist`"]`n" -Encoding UTF8
-        Write-Ok "Codex MCP config at $codexCfg"
-      }
-      else { Write-Ok "Codex MCP already configured at $codexCfg" }
-    }
-    catch { Write-Warn "Codex wiring failed: $($_.Exception.Message)" }
-  }
 
   # --- Copilot (VS Code): user-level %APPDATA%\Code\User\mcp.json ---
   if ($agentSel -contains "copilot" -and (Test-Path $mcpDist)) {
@@ -425,26 +410,6 @@ else {
       Write-Ok "VS Code Copilot MCP at $vscodeMcp"
     }
     catch { Write-Warn "Copilot wiring failed: $($_.Exception.Message)" }
-  }
-
-  # --- Cursor: user-level ~/.cursor/mcp.json ---
-  if ($agentSel -contains "cursor" -and (Test-Path $mcpDist)) {
-    try {
-      $cursorDir = Join-Path $env:USERPROFILE ".cursor"
-      New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null
-      $cursorMcp = Join-Path $cursorDir "mcp.json"
-      if (-not (Test-Path $cursorMcp)) {
-        Set-Content -LiteralPath $cursorMcp -Value (@{ mcpServers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10) -Encoding UTF8
-      }
-      else {
-        $j = Get-Content -LiteralPath $cursorMcp -Raw | ConvertFrom-Json
-        if (-not $j.mcpServers) { $j | Add-Member -NotePropertyName mcpServers -NotePropertyValue @{} }
-        $j.mcpServers.knocode = $mcpServer
-        $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cursorMcp -Encoding UTF8
-      }
-      Write-Ok "Cursor MCP at $cursorMcp"
-    }
-    catch { Write-Warn "Cursor wiring failed: $($_.Exception.Message)" }
   }
 
   if ($agentSel.Count -gt 0) { Write-Step "Agent integrations wired: $($agentSel -join ', ')" }

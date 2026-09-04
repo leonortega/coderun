@@ -1219,6 +1219,8 @@ fn cmd_doctor() -> Result<(), String> {
     // Check config (critical)
     print!("Config:          ");
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Repo-scoped BM25 index path (matches init/daemon via default_index_path, honors KNOCODE_INDEX_DIR)
+    let repo_id = knocode_core::repository_id_from_path(&project_root.to_string_lossy());
     match Config::load(&project_root) {
         Ok(config) => {
             match config.validate() {
@@ -1327,7 +1329,7 @@ fn cmd_doctor() -> Result<(), String> {
                 println!("    {:<18} {:>6} files", ext, cnt);
             }
             // Also show file-class breakdown from current index if available
-            let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".knocode").join("index");
+            let idx_path = PathBuf::from(knocode_repo_intel::default_index_path(&repo_id));
             if let Ok(idx) = knocode_storage::tantivy_index::TantivyIndex::open(&idx_path.to_string_lossy()) {
                 if let Ok(reader) = idx.reader() {
                     if let Ok(stats) = idx.stats(&reader) {
@@ -1364,7 +1366,7 @@ fn cmd_doctor() -> Result<(), String> {
     print!("Tantivy:         ");
     {
         // Global BM25 store (per-repo scoping happens at query time via repository_id)
-        let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".knocode").join("index");
+        let idx_path = PathBuf::from(knocode_repo_intel::default_index_path(&repo_id));
         if idx_path.exists() {
             let idx_str = idx_path.to_string_lossy().to_string();
             let doc_count = knocode_storage::tantivy_index::TantivyIndex::open(&idx_str)
@@ -1385,10 +1387,10 @@ fn cmd_doctor() -> Result<(), String> {
     // RET-015: Retrieval probe — verify search works
     print!("Retrieval:       ");
     {
-        let idx_path = dirs().unwrap_or_else(|| PathBuf::from(".")).join(".knocode").join("index");
+        let idx_path = PathBuf::from(knocode_repo_intel::default_index_path(&repo_id));
         if let Ok(idx) = knocode_storage::tantivy_index::TantivyIndex::open(&idx_path.to_string_lossy()) {
             if let Ok(reader) = idx.reader() {
-                let rid = knocode_core::repository_id_from_path(&project_root.to_string_lossy());
+                let rid = repo_id.clone();
                 let probe_queries = ["class", "main", "function"];
                 let mut hits = 0;
                 for q in &probe_queries {

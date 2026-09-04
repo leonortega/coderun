@@ -1182,7 +1182,7 @@ fn is_file_unchanged_fast(path: &Path, rec: &knocode_storage::FileRecord) -> boo
 /// Default tantivy index path (spec §3 — MmapDirectory).
 /// `KNOCODE_INDEX_DIR` overrides for tests/isolation (TASK-035) — keeps the shared
 /// global index from being polluted by parallel test runs.
-fn default_index_path(repository_id: &str) -> String {
+pub fn default_index_path(repository_id: &str) -> String {
     if let Ok(dir) = std::env::var("KNOCODE_INDEX_DIR") {
         if !dir.is_empty() {
             return dir;

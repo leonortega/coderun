@@ -1,6 +1,6 @@
 {
   "name": "opencode-knocode",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "description": "Knocode AI Runtime plugin for OpenCode — context enrichment and tool-output compression via daemon",
   "type": "module",
   "main": "dist/index.js",

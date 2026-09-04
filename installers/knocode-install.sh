@@ -11,7 +11,7 @@
 #   - Node.js LTS - required only when agent integrations are selected.
 #   - RTK (prebuilt from GitHub releases) - optional external tool.
 #
-# Agent integrations (OpenCode / Codex / Copilot / Cursor) are optional and
+# Agent integrations (OpenCode / Copilot) are optional and
 # selected interactively. They use the integration bundles shipped inside the
 # release archive - no npm registry needed.
 #
@@ -47,7 +47,7 @@ skip() { echo -e "  \033[90m[SKIP]\033[0m $*"; }
 fail() { echo -e "  \033[31m[FAIL]\033[0m $*" >&2; exit 1; }
 
 # ── Agent catalog & selection ─────────────────────────────────────────────
-AGENT_CATALOG="opencode codex copilot cursor"
+AGENT_CATALOG="opencode copilot"
 select_agents() {
   if [ "$NO_AGENTS" = true ]; then echo ""; return; fi
   if [ -n "$AGENTS" ]; then
@@ -55,7 +55,7 @@ select_agents() {
     IFS=',' read -ra parts <<< "$AGENTS"
     for a in "${parts[@]}"; do
       a="$(echo "$a" | tr '[:upper:]' '[:lower:]' | xargs)"
-      case " $AGENT_CATALOG " in *" $a "*) sel="$sel $a";; *) warn "unknown agent '$a' - valid: opencode, codex, copilot, cursor";; esac
+      case " $AGENT_CATALOG " in *" $a "*) sel="$sel $a";; *) warn "unknown agent '$a' - valid: opencode, copilot";; esac
     done
     if [ -z "$sel" ]; then fail "no valid agents in --agents ('$AGENTS')"; fi
     echo "$sel"; return
@@ -63,7 +63,7 @@ select_agents() {
   if [ "$ALL_AGENTS" = true ]; then echo "$AGENT_CATALOG"; return; fi
   # Interactive multi-select when stdin is a terminal; default to NONE otherwise
   if [ ! -t 0 ]; then
-    info "non-interactive run - no agent integrations installed (use --agents opencode,cursor or --all-agents to change)"
+    info "non-interactive run - no agent integrations installed (use --agents opencode,copilot or --all-agents to change)"
     echo ""; return
   fi
   local sel=""
@@ -328,19 +328,6 @@ OCEOF
       warn "bundled knocode-mcp has no dist/index.js - MCP agents skipped"
     fi
 
-    # --- Codex ---
-    if echo "$AGENT_SEL" | grep -qw codex && [ -f "$MCP_DIST" ]; then
-      CODEX_DIR="$HOME/.codex"
-      CODEX_CFG="$CODEX_DIR/config.toml"
-      mkdir -p "$CODEX_DIR"
-      if [ ! -f "$CODEX_CFG" ] || ! grep -q "mcp_servers.knocode" "$CODEX_CFG" 2>/dev/null; then
-        printf '\n[mcp_servers.knocode]\ncommand = "node"\nargs = ["%s"]\n' "$MCP_DIST" >> "$CODEX_CFG"
-        ok "Codex MCP config at $CODEX_CFG"
-      else
-        ok "Codex MCP already configured at $CODEX_CFG"
-      fi
-    fi
-
     # --- Copilot (VS Code) ---
     if echo "$AGENT_SEL" | grep -qw copilot && [ -f "$MCP_DIST" ]; then
       CODE_USER_DIR="$HOME/.config/Code/User"
@@ -366,35 +353,6 @@ MCPJSON
           " "$VSCODE_MCP" "$MCP_DIST" 2>/dev/null && ok "VS Code Copilot MCP updated at $VSCODE_MCP" || skip "VS Code mcp.json exists but could not merge knocode"
         else
           skip "VS Code mcp.json exists but could not merge knocode (node missing)"
-        fi
-      fi
-    fi
-
-    # --- Cursor ---
-    if echo "$AGENT_SEL" | grep -qw cursor && [ -f "$MCP_DIST" ]; then
-      CURSOR_DIR="$HOME/.cursor"
-      CURSOR_MCP="$CURSOR_DIR/mcp.json"
-      mkdir -p "$CURSOR_DIR"
-      if [ ! -f "$CURSOR_MCP" ]; then
-        cat > "$CURSOR_MCP" <<MCPJSON
-{
-  "mcpServers": {
-    "knocode": { "command": "node", "args": ["$MCP_DIST"], "env": { "KNOCODE_DAEMON_URL": "http://127.0.0.1:9527" } }
-  }
-}
-MCPJSON
-        ok "Cursor MCP at $CURSOR_MCP"
-      else
-        if command -v node >/dev/null 2>&1; then
-          node -e "
-            const fs=require('fs');const p=process.argv[1];
-            let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};
-            j.mcpServers=j.mcpServers||{};
-            j.mcpServers.knocode={command:'node',args:[process.argv[2]],env:{KNOCODE_DAEMON_URL:'http://127.0.0.1:9527'}};
-            fs.writeFileSync(p,JSON.stringify(j,null,2));
-          " "$CURSOR_MCP" "$MCP_DIST" 2>/dev/null && ok "Cursor MCP updated at $CURSOR_MCP" || skip "Cursor mcp.json exists but could not merge knocode"
-        else
-          skip "Cursor mcp.json exists but could not merge knocode (node missing)"
         fi
       fi
     fi

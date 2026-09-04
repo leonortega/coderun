@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "knocode-copilot",
+  "version": "0.9.11",
+  "description": "Knocode AI Runtime for GitHub Copilot (VS Code) — repository context enrichment and tool-output compression via the local Knocode daemon.",
+  "author": {
+    "name": "Knocode",
+    "url": "https://github.com/LeonOrtega/knocode"
+  },
+  "homepage": "https://github.com/LeonOrtega/knocode",
+  "repository": "https://github.com/LeonOrtega/knocode",
+  "license": "MIT",
+  "keywords": [
+    "copilot",
+    "vscode",
+    "knocode",
+    "context",
+    "daemon",
+    "agent",
+    "mcp",
+    "hooks"
+  ]
+}

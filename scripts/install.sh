@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Knocode installer v0.9.7 minimal (Unix: Linux/macOS, bash)
 # Minimal v1: Git + SQLite(bundled)/tree-sitter/tantivy/tiktoken embedded + RTK optional (no Rust - prebuilt binaries; compile via scripts/compile.sh)
-# Agent integrations (OpenCode/Codex/Copilot/Cursor) are selectable: --agents opencode,codex | --all-agents | --no-agents
+# Agent integrations (OpenCode/Copilot) are selectable: --agents opencode,copilot | --all-agents | --no-agents
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--agents a,b,c|--all-agents|--no-agents] [--skip-prereqs]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,12 +13,12 @@ for arg in "$@"; do case "$arg" in
   --all-agents) ALL_AGENTS=true;;
   --no-agents) NO_AGENTS=true;;
   --skip-prereqs) SKIP_PREREQS=true;;
-  -h|--help) echo "Usage: $0 [--skip-build] [--agents opencode,codex,copilot,cursor | --all-agents | --no-agents] [--skip-prereqs]"; exit 0;;
+  -h|--help) echo "Usage: $0 [--skip-build] [--agents opencode,copilot | --all-agents | --no-agents] [--skip-prereqs]"; exit 0;;
 esac; done
 info(){ echo -e "\033[36m[knocode]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; } ; skip(){ echo -e "  \033[90m[SKIP]\033[0m $*"; }
 
 # --- Agent catalog & selection -------------------------------------------------
-AGENT_CATALOG="opencode codex copilot cursor"
+AGENT_CATALOG="opencode copilot"
 select_agents() {
   if [ "$NO_AGENTS" = true ]; then echo ""; return; fi
   if [ -n "$AGENTS" ]; then
@@ -26,7 +26,7 @@ select_agents() {
     IFS=',' read -ra parts <<< "$AGENTS"
     for a in "${parts[@]}"; do
       a="$(echo "$a" | tr '[:upper:]' '[:lower:]' | xargs)"
-      case " $AGENT_CATALOG " in *" $a "*) sel="$sel $a";; *) warn "unknown agent '$a' - valid: opencode, codex, copilot, cursor";; esac
+      case " $AGENT_CATALOG " in *" $a "*) sel="$sel $a";; *) warn "unknown agent '$a' - valid: opencode, copilot";; esac
     done
     if [ -z "$sel" ]; then echo "error: no valid agents in --agents ('$AGENTS')" >&2; exit 1; fi
     echo "$sel"; return
@@ -34,7 +34,7 @@ select_agents() {
   if [ "$ALL_AGENTS" = true ]; then echo "$AGENT_CATALOG"; return; fi
   # Interactive multi-select when stdin is a terminal; default to ALL otherwise
   if [ ! -t 0 ]; then
-    info "non-interactive run - installing agent integrations for ALL agents (use --agents opencode,cursor or --no-agents to change)"
+    info "non-interactive run - installing agent integrations for ALL agents (use --agents opencode or --no-agents to change)"
     echo "$AGENT_CATALOG"; return
   fi
   local sel=""
@@ -153,15 +153,15 @@ info "Verifying installation (doctor)..."
 "$INSTALLED_CLI" doctor
 
 # =====================================================================================
-# 3. Agent integrations (OpenCode / Codex / Copilot / Cursor) - selected above
+# 3. Agent integrations (OpenCode / Copilot) - selected above
 # =====================================================================================
 if [ -n "$AGENT_SEL" ]; then
   OC_GLOBAL="$HOME/.config/opencode"
   MCP_DIST="$ROOT/packages/knocode-mcp/dist/index.js"
   WANT_MCP=false
-  for a in $AGENT_SEL; do case "$a" in codex|copilot|cursor) WANT_MCP=true;; esac; done
+  for a in $AGENT_SEL; do case "$a" in copilot) WANT_MCP=true;; esac; done
 
-  # --- shared MCP server build (Codex, Copilot, Cursor all use knocode-mcp) ---
+  # --- shared MCP server build (Copilot uses knocode-mcp) ---
   if [ "$WANT_MCP" = true ]; then
     if [ -d "$ROOT/packages/knocode-mcp" ]; then
       if [ ! -f "$MCP_DIST" ]; then
@@ -223,18 +223,6 @@ EOF
     info "Restart opencode to load global plugin 'opencode-knocode' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode)."
   fi
 
-  # --- Codex: ~/.codex/config.toml mcp_servers.knocode ---
-  if echo "$AGENT_SEL" | grep -qw codex; then
-    CODEX_DIR="$HOME/.codex"; CODEX_CFG="$CODEX_DIR/config.toml"
-    mkdir -p "$CODEX_DIR"
-    if [ -f "$CODEX_CFG" ] && grep -qs "mcp_servers.knocode" "$CODEX_CFG"; then
-      skip "Codex MCP already configured at $CODEX_CFG"
-    else
-      printf '\n[mcp_servers.knocode]\ncommand = "node"\nargs = ["%s"]\n' "$MCP_DIST" >> "$CODEX_CFG"
-      ok "Codex MCP config at $CODEX_CFG (mcp_servers.knocode stdio)"
-    fi
-  fi
-
   # --- Copilot (VS Code): user-level mcp.json (~/.config/Code/User/mcp.json) ---
   if echo "$AGENT_SEL" | grep -qw copilot; then
     CODE_USER_DIR="$HOME/.config/Code/User"; VSCODE_MCP="$CODE_USER_DIR/mcp.json"
@@ -249,17 +237,50 @@ EOF
     fi
   fi
 
-  # --- Cursor: user-level ~/.cursor/mcp.json ---
-  if echo "$AGENT_SEL" | grep -qw cursor; then
-    CURSOR_DIR="$HOME/.cursor"; CURSOR_MCP="$CURSOR_DIR/mcp.json"
-    mkdir -p "$CURSOR_DIR"
-    if [ ! -f "$CURSOR_MCP" ]; then
-      printf '{\n  "mcpServers": {\n    "knocode": { "command": "node", "args": ["%s"], "env": { "KNOCODE_DAEMON_URL": "http://127.0.0.1:9527" } }\n  }\n}\n' "$MCP_DIST" > "$CURSOR_MCP"
-      ok "Cursor MCP at $CURSOR_MCP (user scope)"
+  # --- Copilot Agent Plugin (hooks: SessionStart/PreToolUse/PostToolUse) ---
+  # Deploy to ~/.knocode/copilot-plugin (repo-independent, survives repo moves).
+  if echo "$AGENT_SEL" | grep -qw copilot; then
+    PLUGIN_SRC="$ROOT/packages/knocode-copilot-plugin"
+    PLUGIN_DST="$HOME/.knocode/copilot-plugin"
+    if [ -f "$PLUGIN_SRC/plugin.json" ]; then
+      rm -rf "$PLUGIN_DST" 2>/dev/null || true
+      mkdir -p "$PLUGIN_DST"
+      if cp -r "$PLUGIN_SRC/." "$PLUGIN_DST/" 2>/dev/null; then
+        ok "Copilot Agent Plugin deployed to $PLUGIN_DST (hooks + MCP)"
+      else
+        warn "failed to deploy Copilot Agent Plugin to $PLUGIN_DST"
+      fi
     else
-      if command -v node >/dev/null 2>&1; then
-        CURSOR_MCP_PATH="$CURSOR_MCP" MCP_DIST="$MCP_DIST" node -e "const fs=require('fs');const p=process.env.CURSOR_MCP_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};j.mcpServers=j.mcpServers||{};j.mcpServers.knocode={command:'node',args:[process.env.MCP_DIST],env:{KNOCODE_DAEMON_URL:'http://127.0.0.1:9527'}};fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null && ok "Cursor MCP updated at $CURSOR_MCP" || skip "Cursor mcp.json exists but could not merge knocode into $CURSOR_MCP"
-      else skip "Cursor mcp.json exists but could not merge knocode (node missing)"; fi
+      warn "packages/knocode-copilot-plugin not found - skipping Agent Plugin deploy"
+    fi
+
+    # --- @knocode chat participant extension (VSIX via `code` CLI) ---
+    EXT_DIR="$ROOT/packages/vscode-copilot-knocode"
+    if [ -f "$EXT_DIR/package.json" ]; then
+      if command -v npm >/dev/null 2>&1 && [ ! -f "$EXT_DIR/dist/extension.js" ]; then
+        info "Building vscode-copilot-knocode extension..."
+        (cd "$EXT_DIR" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null) || warn "vscode-copilot-knocode build failed"
+      fi
+      if [ -z "$(ls "$EXT_DIR"/*.vsix 2>/dev/null)" ] && command -v npm >/dev/null 2>&1; then
+        (cd "$EXT_DIR" && npx --yes @vscode/vsce package --no-dependencies >/dev/null 2>&1) || true
+      fi
+      VSIX="$(ls "$EXT_DIR"/*.vsix 2>/dev/null | head -n 1 || true)"
+      if [ -n "$VSIX" ]; then
+        if command -v code >/dev/null 2>&1; then
+          info "Installing @knocode VS Code extension (code --install-extension)..."
+          if code --install-extension "$VSIX" --force >/dev/null 2>&1; then
+            ok "@knocode extension installed from $(basename "$VSIX") - reload VS Code to activate"
+          else
+            warn "code CLI install failed - install manually: code --install-extension $VSIX"
+          fi
+        else
+          warn "VS Code 'code' CLI not on PATH - install manually: code --install-extension $VSIX"
+        fi
+      else
+        warn "vscode-copilot-knocode VSIX not built - run: cd packages/vscode-copilot-knocode && npx @vscode/vsce package"
+      fi
+    else
+      warn "packages/vscode-copilot-knocode not found - skipping @knocode extension install"
     fi
   fi
 fi
