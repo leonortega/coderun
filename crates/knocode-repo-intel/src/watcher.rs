@@ -324,7 +324,7 @@ mod tests {
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        let sig = repo.signature().unwrap();
+        let sig = git2::Signature::now("knocode-test", "test@knocode.dev").unwrap();
         let parents: Vec<git2::Commit> = repo
             .head()
             .ok()

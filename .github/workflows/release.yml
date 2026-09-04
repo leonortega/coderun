@@ -51,8 +51,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build
+      - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build
+          cache-directories: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
