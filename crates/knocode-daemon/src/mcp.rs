@@ -258,7 +258,7 @@ async fn tool_context(
     {
         Ok(HttpResponsePayload::RewrittenMessage { rewritten, context_pack, .. }) => {
             let provenance = context_pack
-                .as_ref()
+                .as_ref().as_ref()
                 .map(|p| {
                     p.provenance
                         .iter()
@@ -275,11 +275,11 @@ async fn tool_context(
                 })
                 .unwrap_or_default();
             let total_tokens = context_pack
-                .as_ref()
+                .as_ref().as_ref()
                 .map(|p| p.token_usage.total_tokens)
                 .unwrap_or(0);
             let repository_state = context_pack
-                .as_ref()
+                .as_ref().as_ref()
                 .map(|p| p.repository_state.clone())
                 .unwrap_or_default();
             tracing::info!(took_ms = %started.elapsed().as_millis(), "MCP knocode_context built");

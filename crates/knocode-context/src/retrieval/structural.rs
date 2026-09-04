@@ -358,10 +358,7 @@ impl StructuralRetriever {
         };
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let adapter = match adapter_for_ext(ext) {
-            Some(a) => a,
-            None => return None,
-        };
+        let adapter = adapter_for_ext(ext)?;
 
         // FIX #2: Wrap in catch_unwind to prevent ast-grep panics from crashing retrieval.
         // ast-grep can panic on ambiguous patterns (e.g., MultipleNode errors).

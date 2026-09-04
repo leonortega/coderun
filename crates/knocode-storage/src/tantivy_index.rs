@@ -211,9 +211,6 @@ fn split_pascal_case(s: &str) -> Vec<String> {
 
 /// Sanitize a natural-language or code query for Tantivy BM25 search.
 ///
-/// 1. Strips Tantivy query syntax characters (`:`, `+`, `-`, `(`, `)`, `"`, `~`, `*`, `?`, `\`, `^`)
-/// 2. Extracts meaningful code-relevant keywords (≥ 2 chars, not stop words)
-/// 3. Joins with OR so any keyword can match
 /// Preprocess code content for indexing: split PascalCase identifiers into
 /// constituent words so natural-language queries can match code symbols.
 /// "UserProfile" in source becomes "UserProfile user profile userprofile"
@@ -277,7 +274,7 @@ fn sanitize_code_query(query: &str) -> String {
             }
         }
         // Code vocabulary expansion: "controller" -> ["Controller"]
-        for expanded in expand_code_vocabulary(&w) {
+        for expanded in expand_code_vocabulary(w) {
             if !all_terms.contains(&expanded.to_lowercase()) {
                 all_terms.push(expanded.to_lowercase());
             }
@@ -378,7 +375,7 @@ impl TantivyIndex {
     /// (e.g. `RepositoryIntelligence::index_repository`, which uses `open` not
     /// `open_cached`): it forces the next query to create a fresh `TantivyIndex`
     /// + `IndexReader` and thus observe the new commit immediately instead of
-    /// serving from the stale pre-reindex cached reader.
+    ///   serving from the stale pre-reindex cached reader.
     pub fn invalidate_cached(index_path: &str) {
         if let Ok(mut cache) = index_cache().write() {
             cache.remove(index_path);
@@ -481,6 +478,7 @@ impl TantivyIndex {
     }
 
     /// Add a document to the index, stamped with its repository scope (TASK-030)
+    #[allow(clippy::too_many_arguments)]
     pub fn add_document(
         &self,
         writer: &mut IndexWriter,
@@ -498,6 +496,7 @@ impl TantivyIndex {
     }
 
     /// Add document with explicit title (V1 docs: first heading)
+    #[allow(clippy::too_many_arguments)]
     pub fn add_document_with_title(
         &self,
         writer: &mut IndexWriter,

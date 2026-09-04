@@ -624,7 +624,7 @@ impl knocode_core::IContextBuilder for ContextEngine {
     ) -> std::result::Result<ContextPack, knocode_core::KnocodeError> {
         ContextEngine::build_context(self, task)
             .await
-            .map_err(|e| knocode_core::KnocodeError::ContextBuildFailed(e))
+            .map_err(knocode_core::KnocodeError::ContextBuildFailed)
     }
 
     fn to_yaml(pack: &ContextPack) -> std::result::Result<String, knocode_core::KnocodeError>
@@ -632,7 +632,7 @@ impl knocode_core::IContextBuilder for ContextEngine {
         Self: Sized,
     {
         ContextEngine::to_yaml(pack)
-            .map_err(|e| knocode_core::KnocodeError::Serialization(e))
+            .map_err(knocode_core::KnocodeError::Serialization)
     }
 }
 

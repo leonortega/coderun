@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] - 2026-09-04 — Housekeeping + Cleanup
+
+### Fixed
+- **Undefined `$ocGlobalDir` in `scripts/uninstall.ps1`** — npm plugin cleanup silently did nothing on Windows; variable now defined before use
+
+### Changed
+- **Version strings synced** across `knocode.json` (Scoop), `Formula/knocode.rb` (Homebrew), `packages/opencode-knocode/package.json` to match workspace `0.9.10`
+- **Removed stale docs** — `ADAPTERS.md` (references deleted adapter files), `EVALUATION.md` (references removed Model Router/FlashRank), `docs/dashboards/knocode.json` (stale Grafana dashboard)
+- **Cleaned `.opencode/.gitignore`** — removed `engram/` entry (engram removed in v0.7.6)
+- **Cleaned `docs/INDEXING_PERF_PLAN.md`** — removed references to deleted `codebase-memory-mcp` and `engram`
+
+---
+
 ## [0.9.5] - 2026-09-03 — GitHub Releases + Lean Installers
 
 ### Added — Release Pipeline

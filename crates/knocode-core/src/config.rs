@@ -19,7 +19,7 @@ pub struct Config {
     pub logging: LoggingConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DaemonConfig {}
 
@@ -32,21 +32,16 @@ pub struct DatabaseConfig {
 
 /// Auto-reindex watch mode — single source of truth shared by config, CLI and daemon.
 /// Possible values: `commit` (default) or `filesystem` (aliases `git`/`fs` accepted).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WatchMode {
     /// Re-index only when a new git commit lands on the current HEAD.
     #[serde(alias = "git")]
+    #[default]
     Commit,
     /// Re-index on any repository file change (debounced, via `notify`).
     #[serde(alias = "fs")]
     Filesystem,
-}
-
-impl Default for WatchMode {
-    fn default() -> Self {
-        Self::Commit
-    }
 }
 
 impl std::fmt::Display for WatchMode {
@@ -120,9 +115,6 @@ pub struct LoggingConfig {
 
 // Default is derived since all fields implement Default
 
-impl Default for DaemonConfig {
-    fn default() -> Self { Self {} }
-}
 
 impl Default for DatabaseConfig {
     fn default() -> Self {

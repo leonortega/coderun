@@ -258,6 +258,17 @@ try {
     Write-Ok "agent integration bundles installed to $intsDst"
   }
   else { Write-Warn "no bundled integrations in $asset - agent wiring will be unavailable" }
+
+  # 5c. Install the knocode agent skill (opencode — agent-native discovery)
+  $skillSrc = Join-Path $extract "skills\knocode"
+  if (Test-Path (Join-Path $skillSrc "SKILL.md")) {
+    $ocDir = Join-Path $env:USERPROFILE ".config\opencode"
+    $skillDst = Join-Path $ocDir "skills\knocode"
+    New-Item -ItemType Directory -Force -Path (Join-Path $ocDir "skills") | Out-Null
+    Copy-Item -LiteralPath $skillSrc -Destination $skillDst -Recurse -Force
+    Write-Ok "knocode skill installed to $skillDst (opencode agent-native)"
+  }
+  else { Write-Warn "knocode skill not found in $asset - skipping skill install" }
 }
 finally {
   Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

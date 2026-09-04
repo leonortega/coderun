@@ -1,4 +1,4 @@
-# v0.9.6 multi-stage: rust builder → distroless runtime
+# Multi-stage: rust builder → distroless runtime
 FROM rust:1.75-slim AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

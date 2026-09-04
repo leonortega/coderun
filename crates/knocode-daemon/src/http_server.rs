@@ -75,7 +75,7 @@ pub enum HttpResponsePayload {
         rewritten: String,
         /// Full context pack (TASK-035: lets E2E tests assert provenance uniqueness/scoping)
         #[serde(skip_serializing_if = "Option::is_none")]
-        context_pack: Option<knocode_core::ContextPack>,
+        context_pack: Box<Option<knocode_core::ContextPack>>,
     },
     #[serde(rename = "CompressedOutput")]
     CompressedOutput {
@@ -185,6 +185,7 @@ fn http_rate_limiter() -> &'static crate::ratelimit::RateLimiter {
     HTTP_RATE_LIMITER.get_or_init(crate::ratelimit::RateLimiter::default)
 }
 
+#[allow(clippy::result_large_err)]
 async fn handle_hook(
     State(state): State<HttpServerState>,
     Json(request): Json<HttpRequest>,
@@ -458,7 +459,7 @@ pub(crate) async fn handle_pre_generation(
     Ok(HttpResponsePayload::RewrittenMessage {
         original: message,
         rewritten,
-        context_pack: Some(context_pack),
+        context_pack: Box::new(Some(context_pack)),
     })
 }
 

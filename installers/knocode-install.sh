@@ -174,6 +174,17 @@ else
   warn "no bundled integrations in $ASSET - agent wiring will be unavailable"
 fi
 
+# Install the knocode agent skill (opencode — agent-native discovery)
+SKILL_SRC="$TMP/extract/skills/knocode"
+if [ -f "$SKILL_SRC/SKILL.md" ]; then
+  OC_SKILL_DST="$HOME/.config/opencode/skills/knocode"
+  mkdir -p "$(dirname "$OC_SKILL_DST")"
+  cp -rf "$SKILL_SRC" "$OC_SKILL_DST"
+  ok "knocode skill installed to $OC_SKILL_DST (opencode agent-native)"
+else
+  warn "knocode skill not found in $ASSET - skipping skill install"
+fi
+
 # ── Persist on PATH ───────────────────────────────────────────────────────
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) export PATH="$BIN_DIR:$PATH" ;; esac
 for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do

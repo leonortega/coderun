@@ -3,22 +3,6 @@ use knocode_events::{EventBus, RuntimeEvent};
 use knocode_storage::Database;
 use tracing::{debug, info};
 
-// ── Configuration ───────────────────────────────────────────────────────
-
-/// KnowledgeConfig — storage is SQLite+tantivy local
-#[derive(Debug, Clone)]
-pub struct KnowledgeConfig {
-    pub max_knowledge_entries: usize,
-}
-
-impl Default for KnowledgeConfig {
-    fn default() -> Self {
-        Self {
-            max_knowledge_entries: 10000,
-        }
-    }
-}
-
 // ── Knowledge Hub ───────────────────────────────────────────────────────
 
 pub struct KnowledgeHub {

@@ -395,11 +395,10 @@ impl RepositoryIntelligence {
         }
 
         let t_extract = Instant::now();
-        let extraction_results: Vec<ExtractedResult>;
 
-        if file_jobs.len() < 100 || thread_count == 1 {
+        let extraction_results: Vec<ExtractedResult> = if file_jobs.len() < 100 || thread_count == 1 {
             // Small repo or single-thread: sequential extraction (no thread overhead)
-            extraction_results = file_jobs.iter().map(|job| {
+            file_jobs.iter().map(|job| {
                 let extracted = if matches!(job.file_class, FileClass::Documentation | FileClass::Config) {
                     Vec::new()
                 } else {
@@ -411,7 +410,7 @@ impl RepositoryIntelligence {
                     sym_kinds: extracted.iter().map(|s| s.kind.clone()).collect(),
                     extracted_count: count,
                 }
-            }).collect();
+            }).collect()
         } else {
             // Large repo: parallel extraction via scoped threads
             // Each thread gets a slice of file_jobs and extracts symbols independently.
@@ -419,7 +418,7 @@ impl RepositoryIntelligence {
             let chunk_size = (file_jobs.len() / thread_count).max(1);
             let patterns = &self.patterns;
 
-            extraction_results = std::thread::scope(|s| {
+            std::thread::scope(|s| {
                 let handles: Vec<_> = file_jobs.chunks(chunk_size).map(|chunk| {
                     s.spawn(move || {
                         chunk.iter().map(|job| {
@@ -445,8 +444,8 @@ impl RepositoryIntelligence {
                     }
                 }
                 results
-            });
-        }
+            })
+        };
 
         let extract_ms = t_extract.elapsed().as_millis() as u64;
         info!(
@@ -931,7 +930,7 @@ impl RepositoryIntelligence {
 
         fn is_in_skip_dir(path: &Path) -> bool {
             path.components().any(|c| {
-                c.as_os_str().to_str().map_or(false, |s| SKIP_DIRS.contains(&s))
+                c.as_os_str().to_str().is_some_and(|s| SKIP_DIRS.contains(&s))
             })
         }
 
@@ -991,11 +990,10 @@ impl RepositoryIntelligence {
                 continue;
             }
             if in_packages {
-                if trimmed.starts_with("- ") {
-                    let glob = trimmed[2..].trim().trim_matches('"').trim_matches('\'').trim();
+                if let Some(stripped) = trimmed.strip_prefix("- ") {
+                    let glob = stripped.trim().trim_matches('"').trim_matches('\'').trim();
                     // Expand glob like `types/*` → list dirs under types/
-                    if glob.ends_with("/*") {
-                        let base = &glob[..glob.len()-2];
+                    if let Some(base) = glob.strip_suffix("/*") {
                         let base_path = self.repo_path.join(base);
                         if let Ok(entries) = std::fs::read_dir(&base_path) {
                             for e in entries.flatten() {

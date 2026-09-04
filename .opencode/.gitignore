@@ -3,4 +3,3 @@ package.json
 package-lock.json
 bun.lock
 .gitignore
-engram/

@@ -63,12 +63,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-build-windows
-          cache-directories: |
-            ~/.cargo/bin
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
@@ -105,7 +100,8 @@ jobs:
         run: |
           $ver = "${{ needs.verify.outputs.version }}"
           $asset = "knocode-${ver}-x86_64-pc-windows-msvc.zip"
-          Compress-Archive -Path "target/release/knocode.exe", "target/release/knocode-daemon.exe", "integrations", "LICENSE" -DestinationPath $asset -CompressionLevel Optimal
+          Copy-Item -Path ".knocode/skills/knocode" -Destination "skills/knocode" -Recurse -Force
+          Compress-Archive -Path "target/release/knocode.exe", "target/release/knocode-daemon.exe", "integrations", "skills", "LICENSE" -DestinationPath $asset -CompressionLevel Optimal
           $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii
           Get-Item $asset, "$asset.sha256" | Select-Object Name, Length
@@ -135,12 +131,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-build-linux
-          cache-directories: |
-            ~/.cargo/bin
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
@@ -176,6 +167,7 @@ jobs:
           cp target/release/knocode staging/
           cp target/release/knocode-daemon staging/
           cp -r integrations staging/
+          cp -r .knocode/skills/knocode staging/skills/knocode
           cp LICENSE staging/
           (cd staging && zip -r "../$asset" .)
           sha256sum "$asset" | awk '{print $1}' > "$asset.sha256"
@@ -206,12 +198,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-build-macos
-          cache-directories: |
-            ~/.cargo/bin
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
@@ -247,6 +234,7 @@ jobs:
           cp target/release/knocode staging/
           cp target/release/knocode-daemon staging/
           cp -r integrations staging/
+          cp -r .knocode/skills/knocode staging/skills/knocode
           cp LICENSE staging/
           (cd staging && zip -r "../$asset" .)
           shasum -a 256 "$asset" | awk '{print $1}' > "$asset.sha256"
@@ -319,18 +307,30 @@ jobs:
       - name: Refresh scoop + winget manifests
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $ver = "${{ needs.verify.outputs.version }}"
           $asset = "knocode-$ver-x86_64-pc-windows-msvc.zip"
 
-          # Download the sha256 from the release to get the hash
+          # Download the sha256 from the release to get the hash (retry up to 3 times)
           $url = "https://github.com/leonortega/knocode/releases/download/v$ver/$asset.sha256"
-          try {
-            $shaContent = (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30).Content
-            $hash = (($shaContent -split "\s+")[0]).Trim().ToLower()
-          } catch {
-            Write-Warning "could not download sha256 sidecar: $_"
-            return
+          $hash = $null
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              $shaContent = (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30).Content
+              $hash = (($shaContent -split "\s+")[0]).Trim().ToLower()
+              if ($hash -match '^[a-f0-9]{64}$') { break }
+              Write-Warning "attempt $attempt: invalid hash format '$hash' — retrying"
+              $hash = $null
+            } catch {
+              Write-Warning "attempt $attempt: could not download sha256 sidecar: $_"
+              Start-Sleep -Seconds 2
+            }
           }
+          if (-not $hash) {
+            Write-Error "FATAL: could not obtain valid sha256 hash for $asset after 3 attempts — manifest refresh aborted"
+            exit 1
+          }
+          Write-Host "sha256 hash for $asset: $hash"
 
           # --- scoop: repo-root knocode.json ---
           $mf = Get-Content -LiteralPath "knocode.json" -Raw | ConvertFrom-Json
@@ -338,6 +338,14 @@ jobs:
           $mf.architecture."64bit".url = "https://github.com/leonortega/knocode/releases/download/v$ver/$asset"
           $mf.architecture."64bit".hash = $hash
           $mf | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath "knocode.json" -Encoding utf8
+
+          # Validate the written hash matches what we downloaded
+          $verify = (Get-Content -LiteralPath "knocode.json" -Raw | ConvertFrom-Json).architecture."64bit".hash
+          if ($verify -ne $hash) {
+            Write-Error "FATAL: knocode.json hash verification failed (wrote '$hash', read back '$verify')"
+            exit 1
+          }
+          Write-Host "knocode.json updated: version=$ver hash=$hash"
 
           # --- winget: winget/Knocode/knocode/<ver>/ ---
           $wgDir = "winget/Knocode/knocode"
@@ -406,6 +414,7 @@ jobs:
       - name: Commit manifest refresh to dev
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add knocode.json winget/
@@ -414,4 +423,8 @@ jobs:
             exit 0
           fi
           git commit -m "chore(release): refresh scoop/winget manifests for ${{ github.ref_name }}"
-          git push origin dev || echo "::warning::manifest refresh push failed — commit is local to the runner, refresh manually"
+          if ! git push origin dev; then
+            echo "::error::manifest refresh push failed — commit is local to the runner"
+            exit 1
+          fi
+          echo "manifests committed and pushed to dev"

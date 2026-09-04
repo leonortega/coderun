@@ -338,6 +338,7 @@ if (-not $doRemoveExternal) {
 
   # 3c. Opencode npm plugin -- installed into GLOBAL ~/.config/opencode/node_modules (and legacy .opencode/node_modules)
   Info "Removing opencode npm plugin (opencode-knocode)..."
+  $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
   $opencodeNodeModules = @(
     (Join-Path $ocGlobalDir "node_modules\opencode-knocode"),
     (Join-Path $ocGlobalDir "node_modules\@opencode-ai"),
@@ -357,6 +358,7 @@ if (-not $doRemoveExternal) {
     } else { Skip "not found $display" }
   }
   # Clean package.json deps: GLOBAL ~/.config/opencode/package.json + legacy .opencode/package.json
+  if (-not $ocGlobalDir) { $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode" }
   foreach ($pkgJsonPath in @((Join-Path $ocGlobalDir "package.json"), (Join-Path $Root ".opencode\package.json"))) {
     if (-not (Test-Path $pkgJsonPath)) { Skip "not found $pkgJsonPath"; continue }
     if ($PSCmdlet.ShouldProcess($pkgJsonPath, "clean opencode-knocode dep")) {

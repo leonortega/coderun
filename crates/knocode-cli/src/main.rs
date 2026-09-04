@@ -1,5 +1,6 @@
 #![allow(linker_messages)]
 use std::collections::HashMap;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -34,6 +35,9 @@ enum Commands {
         /// Run interactive setup wizard
         #[arg(long)]
         wizard: bool,
+        /// Skip the startup animation
+        #[arg(long)]
+        no_anim: bool,
     },
     
     /// Trigger repository re-indexing
@@ -120,7 +124,7 @@ fn main() {
     
     let result = match cli.command {
         Commands::Serve { port, socket } => cmd_serve(port, socket),
-        Commands::Init { wizard } => cmd_init(wizard),
+        Commands::Init { wizard, no_anim } => cmd_init(wizard, no_anim),
         Commands::Index { watch, watch_mode } => cmd_index(watch, watch_mode.as_deref()),
         Commands::Preview { prompt, session, no_cache, diag, expected_files, candidate_k, max_files } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref(), candidate_k, max_files),
         Commands::Status => cmd_status(),
@@ -234,7 +238,82 @@ fn dirs_home() -> Option<PathBuf> {
     { std::env::var("HOME").ok().map(PathBuf::from) }
 }
 
-fn cmd_init(wizard: bool) -> Result<(), String> {
+/// Print the KNOCODE logo with a pulse/glow animation.
+/// Uses ANSI escape codes for color — only called when stdout is a TTY.
+fn animate_logo() {
+    let logo = [
+        r"    _  __     __  _____  __        ",
+        r"   / |/ /__  / / / / _ \/ /___ ___",
+        r"  /    / _ \/ /_/ / // / __/ _ `(_-<",
+        r" /_/|_/\___/\____/____/\__/\_,_/___/",
+    ];
+    let subtitle = "         AI Runtime";
+
+    // ANSI color codes
+    let dim_cyan    = "\x1b[2;36m";   // dim cyan
+    let bright_cyan = "\x1b[1;96m";   // bright cyan (bold)
+    let _dim_green   = "\x1b[2;32m";   // dim green
+    let bright_green= "\x1b[1;92m";   // bright green (bold)
+    let dim_white   = "\x1b[2;37m";   // dim white
+    let bright_white= "\x1b[1;97m";   // bright white (bold)
+    let reset       = "\x1b[0m";
+
+    let mut stdout = std::io::stdout();
+
+    // Phase 1: Draw logo dim
+    for line in &logo {
+        let _ = write!(stdout, "{}{}{}", dim_cyan, line, reset);
+        let _ = writeln!(stdout);
+    }
+    let _ = writeln!(stdout, "{}{}{}", dim_white, subtitle, reset);
+    let _ = stdout.flush();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // Phase 2: Pulse — brighten each line sequentially
+    for (i, line) in logo.iter().enumerate() {
+        // Move cursor up to overwrite
+        if i > 0 || true {
+            let _ = write!(stdout, "\x1b[{}A", 1); // up 1 line
+        }
+        let _ = write!(stdout, "\r{}{}{}", bright_cyan, line, reset);
+        let _ = stdout.flush();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    // Pulse subtitle
+    let _ = write!(stdout, "\x1b[1A\r{}{}{}", bright_white, subtitle, reset);
+    let _ = writeln!(stdout);
+    let _ = stdout.flush();
+    std::thread::sleep(std::time::Duration::from_millis(120));
+
+    // Phase 3: Glow — full bright flash then settle
+    for _ in &logo {
+        let _ = write!(stdout, "\x1b[{}A", 1);
+    }
+    for line in logo.iter() {
+        let _ = write!(stdout, "\r{}{}{}", bright_green, line, reset);
+        let _ = writeln!(stdout);
+    }
+    let _ = write!(stdout, "\r{}{}{}", bright_green, subtitle, reset);
+    let _ = writeln!(stdout);
+    let _ = stdout.flush();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Phase 4: Settle — final state with clean colors
+    for _ in &logo {
+        let _ = write!(stdout, "\x1b[{}A", 1);
+    }
+    for (i, line) in logo.iter().enumerate() {
+        let color = if i < 2 { bright_cyan } else { bright_green };
+        let _ = write!(stdout, "\r{}{}{}", color, line, reset);
+        let _ = writeln!(stdout);
+    }
+    let _ = write!(stdout, "\r{}   {}{}", bright_white, subtitle, reset);
+    let _ = writeln!(stdout);
+    let _ = writeln!(stdout);
+    let _ = stdout.flush();
+}
+
+fn cmd_init(wizard: bool, no_anim: bool) -> Result<(), String> {
     if wizard {
         println!("(wizard mode is non-interactive — defaults applied, edit .knocode/config.toml afterwards)");
         println!();
@@ -247,7 +326,15 @@ fn cmd_init(wizard: bool) -> Result<(), String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repository".to_string());
 
-    println!("Knocode Bootstrap — {}", project_name);
+    // ── Logo animation ─────────────────────────────────────────────
+    let use_color = std::io::stdout().is_terminal();
+    if !no_anim && use_color {
+        animate_logo();
+    } else {
+        println!("knocode v{}", env!("CARGO_PKG_VERSION"));
+    }
+
+    println!("Bootstrap — {}", project_name);
     println!("═══════════════════════════════════════");
 
     // ── Step 1: Scaffold ─────────────────────────────────────────────
