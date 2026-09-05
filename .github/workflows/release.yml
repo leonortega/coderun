@@ -332,7 +332,7 @@ jobs:
               Write-Warning "attempt ${attempt}: invalid hash format '$hash' — retrying"
               $hash = $null
             } catch {
-              Write-Warning "attempt $attempt: could not download sha256 sidecar: $_"
+              Write-Warning "attempt ${attempt}: could not download sha256 sidecar: $_"
               Start-Sleep -Seconds 2
             }
           }
