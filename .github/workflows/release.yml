@@ -311,7 +311,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $ver = "${{ needs.verify.outputs.version }}"
+          # Derive version from the tag (this job only runs on tag pushes);
+          # needs.verify.outputs.version can be empty on job re-runs.
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v[0-9]') {
+            Write-Error "FATAL: refresh-manifests must run on a v* tag push (got ref '$tag')"
+            exit 1
+          }
+          $ver = $tag -replace '^v', ''
           $asset = "knocode-$ver-x86_64-pc-windows-msvc.zip"
 
           # Download the sha256 from the release to get the hash (retry up to 3 times)
@@ -322,7 +329,7 @@ jobs:
               $shaContent = (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30).Content
               $hash = (($shaContent -split "\s+")[0]).Trim().ToLower()
               if ($hash -match '^[a-f0-9]{64}$') { break }
-              Write-Warning "attempt $attempt: invalid hash format '$hash' — retrying"
+              Write-Warning "attempt ${attempt}: invalid hash format '$hash' — retrying"
               $hash = $null
             } catch {
               Write-Warning "attempt $attempt: could not download sha256 sidecar: $_"
@@ -333,7 +340,7 @@ jobs:
             Write-Error "FATAL: could not obtain valid sha256 hash for $asset after 3 attempts — manifest refresh aborted"
             exit 1
           }
-          Write-Host "sha256 hash for $asset: $hash"
+          Write-Host "sha256 hash for ${asset}: $hash"
 
           # --- scoop: repo-root knocode.json ---
           $mf = Get-Content -LiteralPath "knocode.json" -Raw | ConvertFrom-Json
