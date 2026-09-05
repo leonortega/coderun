@@ -326,7 +326,13 @@ jobs:
           $hash = $null
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             try {
-              $shaContent = (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30).Content
+              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
+              # GitHub serves .sha256 as application/octet-stream, so .Content
+              # arrives as Byte[] — decode before splitting (each byte would
+              # otherwise stringify as a decimal ASCII code, e.g. '100').
+              $shaContent = if ($resp.Content -is [byte[]]) {
+                [System.Text.Encoding]::ASCII.GetString($resp.Content)
+              } else { $resp.Content }
               $hash = (($shaContent -split "\s+")[0]).Trim().ToLower()
               if ($hash -match '^[a-f0-9]{64}$') { break }
               Write-Warning "attempt ${attempt}: invalid hash format '$hash' — retrying"
